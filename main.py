@@ -1,13 +1,40 @@
 import os
 import json
+import threading
+
 import discord
 from discord import app_commands
+
+# Servidor HTTP mínimo (Render precisa de uma porta aberta em Web Service)
+from flask import Flask
 
 # (opcional) Google Sheets - a gente testa depois
 import gspread
 from google.oauth2.service_account import Credentials
 
 
+# =========================
+# HTTP keep-alive (Render)
+# =========================
+app = Flask(__name__)
+
+@app.get("/")
+def home():
+    return "LEME HOLANDÊS BOT online"
+
+def _run_web():
+    # Render define a porta na variável PORT
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    t = threading.Thread(target=_run_web, daemon=True)
+    t.start()
+
+
+# =========================
+# Configs
+# =========================
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # opcional
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
@@ -32,6 +59,8 @@ class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True  # você já ativou no portal
+        # Se algum comando seu no futuro precisar ler conteúdo de mensagem,
+        # você teria que habilitar message_content e setar: intents.message_content = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -71,5 +100,8 @@ async def sheets(interaction: discord.Interaction):
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Faltou a variável DISCORD_TOKEN no ambiente.")
+
+# Inicia o mini servidor web ANTES do bot
+keep_alive()
 
 client.run(DISCORD_TOKEN)
