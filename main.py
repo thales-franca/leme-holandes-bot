@@ -429,3 +429,39 @@ if not DISCORD_TOKEN:
 
 keep_alive()
 client.run(DISCORD_TOKEN)
+@client.tree.command(name="deck", description="Define ou altera o nome do seu deck.")
+@app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
+async def deck(interaction: discord.Interaction, nome: str):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_id = interaction.user.id
+    now = now_br_str()
+
+    try:
+        sh = open_sheet()
+        ws = sh.worksheet("Players")
+
+        row = find_player_row(ws, discord_id)
+
+        if row is None:
+            await interaction.followup.send(
+                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
+                ephemeral=True
+            )
+            return
+
+        # Coluna C = deck
+        ws.update(f"C{row}", [[nome]])
+        # Coluna H = updated_at
+        ws.update(f"H{row}", [[now]])
+
+        await interaction.followup.send(
+            f"✅ Deck atualizado com sucesso.\nDeck atual: **{nome}**",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro ao atualizar deck: {e}",
+            ephemeral=True
+        )
