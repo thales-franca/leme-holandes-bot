@@ -1,7 +1,7 @@
 import os
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
@@ -43,6 +43,20 @@ SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
 
 # =========================
+# Time helpers (BR)
+# =========================
+BR_TZ = timezone(timedelta(hours=-3))
+
+def now_br_str() -> str:
+    # Formato padrão para created_at / updated_at (Brasil)
+    return datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+def now_iso_utc() -> str:
+    # ISO em UTC para logs internos (ex: last_recalc_at)
+    return datetime.now(timezone.utc).isoformat()
+
+
+# =========================
 # Google Sheets helpers
 # =========================
 def get_sheets_client():
@@ -63,9 +77,6 @@ def open_sheet():
         raise RuntimeError("Google Sheets não configurado (SHEET_ID ou GOOGLE_SERVICE_ACCOUNT_JSON).")
     return gc.open_by_key(SHEET_ID)
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
 def safe_int(v, default=0):
     try:
         return int(str(v).strip())
@@ -83,6 +94,17 @@ def floor_333(x: float) -> float:
 def pct1(x: float) -> float:
     # retorna percentual com 1 casa (ex: 50.0)
     return round(x * 100.0, 1)
+
+def find_player_row(ws_players, discord_id: int):
+    """
+    Procura discord_id na coluna A (discord_id).
+    Retorna o número da linha (int) se encontrar, ou None se não encontrar.
+    """
+    try:
+        cell = ws_players.find(str(discord_id))
+        return cell.row
+    except Exception:
+        return None
 
 
 # =========================
@@ -143,7 +165,7 @@ def recalculate_cycle(cycle: int):
         if not a or not b:
             continue
 
-        # Ignorar BYE como oponente (futuro)
+        # Ignorar BYE como oponente (futuro) - por enquanto, não entra no ranking
         result_type = str(r.get("result_type", "normal")).strip().lower()
         if result_type == "bye":
             continue
@@ -220,7 +242,7 @@ def recalculate_cycle(cycle: int):
     for pid, s in stats.items():
         rows.append({
             "cycle": cycle,
-            "player_id": pid,
+            "player_id": pid,  # (mantido por compatibilidade com sua aba Standings atual)
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
             "mwp_percent": pct1(mwp[pid]),
@@ -239,7 +261,7 @@ def recalculate_cycle(cycle: int):
     )
 
     # rank_position e timestamp
-    ts = now_iso()
+    ts = now_iso_utc()
     for i, r in enumerate(rows, start=1):
         r["rank_position"] = i
         r["last_recalc_at"] = ts
@@ -319,6 +341,64 @@ async def sheets(interaction: discord.Interaction):
         await interaction.response.send_message(f"✅ Conectado na planilha: **{sh.title}**")
     except Exception as e:
         await interaction.response.send_message(f"❌ Erro ao acessar planilha: `{e}`")
+
+
+# =========================
+# FASE 2 - /inscrever
+# =========================
+@client.tree.command(name="inscrever", description="Inscreve você na Liga Leme Holandês (cria/atualiza cadastro).")
+async def inscrever(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_id = interaction.user.id
+    nick = interaction.user.display_name
+    now = now_br_str()
+
+    try:
+        sh = open_sheet()
+        ws = sh.worksheet("Players")
+
+        row = find_player_row(ws, discord_id)
+
+        if row is None:
+            # Players columns (A..H):
+            # discord_id, nick, deck, decklist_url, status, reports_unique, created_at, updated_at
+            new_row = [
+                str(discord_id),
+                nick,
+                "",             # deck
+                "",             # decklist_url
+                "active",       # status
+                "0",            # reports_unique
+                now,            # created_at
+                now             # updated_at
+            ]
+            ws.append_row(new_row, value_input_option="USER_ENTERED")
+
+            await interaction.followup.send(
+                "Inscrição realizada ✅\n"
+                f"Nick: **{nick}**\n"
+                "Próximo passo: use `/deck` e `/decklist` quando quiser.",
+                ephemeral=True
+            )
+        else:
+            # Atualiza apenas: nick (B), status (E), updated_at (H)
+            ws.update(f"B{row}", [[nick]])
+            ws.update(f"E{row}", [["active"]])
+            ws.update(f"H{row}", [[now]])
+
+            await interaction.followup.send(
+                "Seu cadastro já existia. Atualizei seu nick/status ✅\n"
+                f"Nick atual: **{nick}**",
+                ephemeral=True
+            )
+
+    except Exception as e:
+        await interaction.followup.send(
+            "❌ Erro ao acessar a planilha. Confirme se o bot tem acesso e se a aba **Players** existe.\n"
+            f"Detalhe: `{type(e).__name__}`",
+            ephemeral=True
+        )
 
 
 @client.tree.command(name="recalcular", description="Recalcula ranking do ciclo (ADM/Organizador)")
