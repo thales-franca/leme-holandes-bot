@@ -116,7 +116,6 @@ def recalculate_cycle(cycle: int):
     ws_matches = sh.worksheet("Matches")
     ws_standings = sh.worksheet("Standings")
 
-    # Players: discord_id -> nick
     players_rows = ws_players.get_all_records()
     all_player_ids = set()
 
@@ -125,7 +124,6 @@ def recalculate_cycle(cycle: int):
         if pid:
             all_player_ids.add(pid)
 
-    # Estruturas
     stats = {}
     opponents = {}
 
@@ -143,7 +141,6 @@ def recalculate_cycle(cycle: int):
     for pid in list(all_player_ids):
         ensure(pid)
 
-    # Matches válidos (ciclo + confirmed + active TRUE)
     matches_rows = ws_matches.get_all_records()
     valid = []
 
@@ -165,7 +162,6 @@ def recalculate_cycle(cycle: int):
         if not a or not b:
             continue
 
-        # Ignorar BYE como oponente (futuro) - por enquanto, não entra no ranking
         result_type = str(r.get("result_type", "normal")).strip().lower()
         if result_type == "bye":
             continue
@@ -178,12 +174,10 @@ def recalculate_cycle(cycle: int):
 
         valid.append((a, b, a_gw, b_gw))
 
-    # 1º passe: pontos, jogos, games, oponentes
     for a, b, a_gw, b_gw in valid:
         stats[a]["matches_played"] += 1
         stats[b]["matches_played"] += 1
 
-        # games
         stats[a]["game_wins"] += a_gw
         stats[a]["game_losses"] += b_gw
         stats[a]["games_played"] += (a_gw + b_gw)
@@ -192,7 +186,6 @@ def recalculate_cycle(cycle: int):
         stats[b]["game_losses"] += a_gw
         stats[b]["games_played"] += (a_gw + b_gw)
 
-        # match points (W=3, D=1, L=0) usando games para decidir
         if a_gw > b_gw:
             stats[a]["match_points"] += 3
         elif b_gw > a_gw:
@@ -204,7 +197,6 @@ def recalculate_cycle(cycle: int):
         opponents[a].append(b)
         opponents[b].append(a)
 
-    # MWP% e GW% com piso 33,3%
     mwp = {}
     gwp = {}
 
@@ -222,11 +214,10 @@ def recalculate_cycle(cycle: int):
         else:
             gwp[pid] = floor_333(s["game_wins"] / float(gplayed))
 
-    # OMW% e OGW% (média simples dos oponentes; piso aplicado por oponente via mwp/gwp)
     omw = {}
     ogw = {}
 
-    for pid, s in stats.items():
+    for pid in stats.keys():
         opps = opponents.get(pid, [])
         if not opps:
             omw[pid] = 1/3
@@ -237,12 +228,11 @@ def recalculate_cycle(cycle: int):
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
-    # Montar linhas para Standings
     rows = []
     for pid, s in stats.items():
         rows.append({
             "cycle": cycle,
-            "player_id": pid,  # (mantido por compatibilidade com sua aba Standings atual)
+            "player_id": pid,
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
             "mwp_percent": pct1(mwp[pid]),
@@ -254,19 +244,16 @@ def recalculate_cycle(cycle: int):
             "ogw_percent": pct1(ogw[pid]),
         })
 
-    # Ordenação oficial: Pontos > OMW% > GW% > OGW%
     rows.sort(
         key=lambda r: (r["match_points"], r["omw_percent"], r["gw_percent"], r["ogw_percent"]),
         reverse=True
     )
 
-    # rank_position e timestamp
     ts = now_iso_utc()
     for i, r in enumerate(rows, start=1):
         r["rank_position"] = i
         r["last_recalc_at"] = ts
 
-    # Reescrever Standings do zero
     header = [
         "cycle","player_id","matches_played","match_points","mwp_percent",
         "game_wins","game_losses","games_played","gw_percent",
@@ -343,6 +330,21 @@ async def sheets(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Erro ao acessar planilha: `{e}`")
 
 
+@client.tree.command(name="forcesync", description="Força sincronização dos comandos (ADM)")
+async def forcesync(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    if not GUILD_ID:
+        await interaction.response.send_message("⚠️ DISCORD_GUILD_ID não configurado.", ephemeral=True)
+        return
+
+    guild = discord.Object(id=GUILD_ID)
+    await client.tree.sync(guild=guild)
+    await interaction.response.send_message("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
+
+
 # =========================
 # FASE 2 - /inscrever
 # =========================
@@ -361,8 +363,6 @@ async def inscrever(interaction: discord.Interaction):
         row = find_player_row(ws, discord_id)
 
         if row is None:
-            # Players columns (A..H):
-            # discord_id, nick, deck, decklist_url, status, reports_unique, created_at, updated_at
             new_row = [
                 str(discord_id),
                 nick,
@@ -382,10 +382,10 @@ async def inscrever(interaction: discord.Interaction):
                 ephemeral=True
             )
         else:
-            # Atualiza apenas: nick (B), status (E), updated_at (H)
-            ws.update(f"B{row}", [[nick]])
-            ws.update(f"E{row}", [["active"]])
-            ws.update(f"H{row}", [[now]])
+            # gspread novo: values primeiro, range_name depois
+            ws.update([[nick]], range_name=f"B{row}")
+            ws.update([["active"]], range_name=f"E{row}")
+            ws.update([[now]], range_name=f"H{row}")
 
             await interaction.followup.send(
                 "Seu cadastro já existia. Atualizei seu nick/status ✅\n"
@@ -401,10 +401,49 @@ async def inscrever(interaction: discord.Interaction):
         )
 
 
+# =========================
+# FASE 2 - /deck
+# =========================
+@client.tree.command(name="deck", description="Define ou altera o nome do seu deck.")
+@app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
+async def deck(interaction: discord.Interaction, nome: str):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_id = interaction.user.id
+    now = now_br_str()
+
+    try:
+        sh = open_sheet()
+        ws = sh.worksheet("Players")
+
+        row = find_player_row(ws, discord_id)
+
+        if row is None:
+            await interaction.followup.send(
+                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
+                ephemeral=True
+            )
+            return
+
+        # Coluna C = deck | Coluna H = updated_at
+        ws.update([[nome]], range_name=f"C{row}")
+        ws.update([[now]], range_name=f"H{row}")
+
+        await interaction.followup.send(
+            f"✅ Deck atualizado com sucesso.\nDeck atual: **{nome}**",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro ao atualizar deck: {e}",
+            ephemeral=True
+        )
+
+
 @client.tree.command(name="recalcular", description="Recalcula ranking do ciclo (ADM/Organizador)")
 @app_commands.describe(cycle="Número do ciclo (ex: 1)")
 async def recalcular(interaction: discord.Interaction, cycle: int):
-    # Permissão simples: admin ou gerenciar servidor
     if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         await interaction.response.send_message("❌ Sem permissão para usar este comando.", ephemeral=True)
         return
@@ -429,39 +468,3 @@ if not DISCORD_TOKEN:
 
 keep_alive()
 client.run(DISCORD_TOKEN)
-@client.tree.command(name="deck", description="Define ou altera o nome do seu deck.")
-@app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
-async def deck(interaction: discord.Interaction, nome: str):
-    await interaction.response.defer(ephemeral=True)
-
-    discord_id = interaction.user.id
-    now = now_br_str()
-
-    try:
-        sh = open_sheet()
-        ws = sh.worksheet("Players")
-
-        row = find_player_row(ws, discord_id)
-
-        if row is None:
-            await interaction.followup.send(
-                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
-                ephemeral=True
-            )
-            return
-
-        # Coluna C = deck
-        ws.update(f"C{row}", [[nome]])
-        # Coluna H = updated_at
-        ws.update(f"H{row}", [[now]])
-
-        await interaction.followup.send(
-            f"✅ Deck atualizado com sucesso.\nDeck atual: **{nome}**",
-            ephemeral=True
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro ao atualizar deck: {e}",
-            ephemeral=True
-        )
