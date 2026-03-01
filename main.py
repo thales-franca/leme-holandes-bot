@@ -2,6 +2,7 @@ import os
 import json
 import threading
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 import discord
 from discord import app_commands
@@ -116,6 +117,7 @@ def recalculate_cycle(cycle: int):
     ws_matches = sh.worksheet("Matches")
     ws_standings = sh.worksheet("Standings")
 
+    # Players: discord_id -> nick
     players_rows = ws_players.get_all_records()
     all_player_ids = set()
 
@@ -124,6 +126,7 @@ def recalculate_cycle(cycle: int):
         if pid:
             all_player_ids.add(pid)
 
+    # Estruturas
     stats = {}
     opponents = {}
 
@@ -141,6 +144,7 @@ def recalculate_cycle(cycle: int):
     for pid in list(all_player_ids):
         ensure(pid)
 
+    # Matches válidos (ciclo + confirmed + active TRUE)
     matches_rows = ws_matches.get_all_records()
     valid = []
 
@@ -162,6 +166,7 @@ def recalculate_cycle(cycle: int):
         if not a or not b:
             continue
 
+        # Ignorar BYE como oponente (futuro) - por enquanto, não entra no ranking
         result_type = str(r.get("result_type", "normal")).strip().lower()
         if result_type == "bye":
             continue
@@ -174,10 +179,12 @@ def recalculate_cycle(cycle: int):
 
         valid.append((a, b, a_gw, b_gw))
 
+    # 1º passe: pontos, jogos, games, oponentes
     for a, b, a_gw, b_gw in valid:
         stats[a]["matches_played"] += 1
         stats[b]["matches_played"] += 1
 
+        # games
         stats[a]["game_wins"] += a_gw
         stats[a]["game_losses"] += b_gw
         stats[a]["games_played"] += (a_gw + b_gw)
@@ -186,6 +193,7 @@ def recalculate_cycle(cycle: int):
         stats[b]["game_losses"] += a_gw
         stats[b]["games_played"] += (a_gw + b_gw)
 
+        # match points (W=3, D=1, L=0) usando games para decidir
         if a_gw > b_gw:
             stats[a]["match_points"] += 3
         elif b_gw > a_gw:
@@ -197,6 +205,7 @@ def recalculate_cycle(cycle: int):
         opponents[a].append(b)
         opponents[b].append(a)
 
+    # MWP% e GW% com piso 33,3%
     mwp = {}
     gwp = {}
 
@@ -214,6 +223,7 @@ def recalculate_cycle(cycle: int):
         else:
             gwp[pid] = floor_333(s["game_wins"] / float(gplayed))
 
+    # OMW% e OGW% (média simples dos oponentes; piso aplicado por oponente via mwp/gwp)
     omw = {}
     ogw = {}
 
@@ -228,11 +238,12 @@ def recalculate_cycle(cycle: int):
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
+    # Montar linhas para Standings
     rows = []
     for pid, s in stats.items():
         rows.append({
             "cycle": cycle,
-            "player_id": pid,
+            "player_id": pid,  # compat com sua aba Standings
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
             "mwp_percent": pct1(mwp[pid]),
@@ -244,16 +255,19 @@ def recalculate_cycle(cycle: int):
             "ogw_percent": pct1(ogw[pid]),
         })
 
+    # Ordenação oficial: Pontos > OMW% > GW% > OGW%
     rows.sort(
         key=lambda r: (r["match_points"], r["omw_percent"], r["gw_percent"], r["ogw_percent"]),
         reverse=True
     )
 
+    # rank_position e timestamp
     ts = now_iso_utc()
     for i, r in enumerate(rows, start=1):
         r["rank_position"] = i
         r["last_recalc_at"] = ts
 
+    # Reescrever Standings do zero
     header = [
         "cycle","player_id","matches_played","match_points","mwp_percent",
         "game_wins","game_losses","games_played","gw_percent",
@@ -335,7 +349,6 @@ async def forcesync(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
-
     if not GUILD_ID:
         await interaction.response.send_message("⚠️ DISCORD_GUILD_ID não configurado.", ephemeral=True)
         return
@@ -437,6 +450,81 @@ async def deck(interaction: discord.Interaction, nome: str):
     except Exception as e:
         await interaction.followup.send(
             f"❌ Erro ao atualizar deck: {e}",
+            ephemeral=True
+        )
+
+
+# =========================
+# FASE 2 - /decklist (somente Moxfield e LigaMagic)
+# =========================
+@client.tree.command(name="decklist", description="Define ou altera o link da sua decklist (Moxfield ou LigaMagic).")
+@app_commands.describe(url="Link da decklist (moxfield.com ou ligamagic.com.br)")
+async def decklist(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_id = interaction.user.id
+    now = now_br_str()
+
+    try:
+        raw = url.strip()
+
+        # Normaliza: se vier sem http/https, adiciona https://
+        if not raw.startswith("http://") and not raw.startswith("https://"):
+            raw = "https://" + raw
+
+        # Regras básicas
+        if " " in raw or len(raw) < 10 or len(raw) > 300:
+            await interaction.followup.send(
+                "❌ Link inválido. Envie uma URL completa (sem espaços).",
+                ephemeral=True
+            )
+            return
+
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").lower()
+
+        if host.startswith("www."):
+            host = host[4:]
+
+        allowed_hosts = {"moxfield.com", "ligamagic.com.br"}
+        if host not in allowed_hosts:
+            await interaction.followup.send(
+                "❌ Link não permitido.\nUse apenas:\n• moxfield.com\n• ligamagic.com.br",
+                ephemeral=True
+            )
+            return
+
+        if not parsed.path or parsed.path == "/":
+            await interaction.followup.send(
+                "❌ Link incompleto. Envie o link do deck (não apenas o site).",
+                ephemeral=True
+            )
+            return
+
+        sh = open_sheet()
+        ws = sh.worksheet("Players")
+
+        row = find_player_row(ws, discord_id)
+        if row is None:
+            await interaction.followup.send(
+                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
+                ephemeral=True
+            )
+            return
+
+        # Coluna D = decklist_url | Coluna H = updated_at
+        ws.update([[raw]], range_name=f"D{row}")
+        ws.update([[now]], range_name=f"H{row}")
+
+        await interaction.followup.send(
+            "✅ Decklist atualizada com sucesso.\n"
+            f"Link: {raw}",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro ao atualizar decklist: {e}",
             ephemeral=True
         )
 
