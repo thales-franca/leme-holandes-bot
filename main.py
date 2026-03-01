@@ -24,7 +24,6 @@ def home():
     return "LEME HOLANDÊS BOT online", 200
 
 def _run_web():
-    # Render define a porta na variável PORT
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
@@ -36,11 +35,15 @@ def keep_alive():
 # =========================
 # Configs
 # =========================
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # opcional
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # recomendado para sync rápido
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
 SHEET_ID = os.getenv("SHEET_ID", "")
 SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+# Nomes EXATOS dos cargos no Discord (pode sobrescrever no Render se quiser)
+ROLE_ORGANIZADOR = os.getenv("ROLE_ORGANIZADOR", "Organizador")
+ROLE_ADM = os.getenv("ROLE_ADM", "ADM")
 
 
 # =========================
@@ -49,19 +52,34 @@ SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 BR_TZ = timezone(timedelta(hours=-3))
 
 def now_br_str() -> str:
-    # Formato padrão para created_at / updated_at (Brasil)
     return datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 def now_iso_utc() -> str:
-    # ISO em UTC para logs internos (ex: last_recalc_at)
     return datetime.now(timezone.utc).isoformat()
+
+
+# =========================
+# Auth helpers (Discord)
+# =========================
+def has_role(interaction: discord.Interaction, role_name: str) -> bool:
+    if not interaction.guild or not interaction.user:
+        return False
+    member = interaction.guild.get_member(interaction.user.id)
+    if not member:
+        return False
+    return any(r.name == role_name for r in member.roles)
+
+def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
+    # Permite por permissão do Discord OU por cargo
+    if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
+        return True
+    return has_role(interaction, ROLE_ADM) or has_role(interaction, ROLE_ORGANIZADOR)
 
 
 # =========================
 # Google Sheets helpers
 # =========================
 def get_sheets_client():
-    """Cria cliente do Google Sheets usando JSON da conta de serviço em variável de ambiente."""
     if not SERVICE_JSON:
         return None
     data = json.loads(SERVICE_JSON)
@@ -89,23 +107,49 @@ def as_bool(v):
     return s in ("true", "1", "yes", "y", "sim")
 
 def floor_333(x: float) -> float:
-    # piso 33,3% = 1/3
     return max(x, 1/3)
 
 def pct1(x: float) -> float:
-    # retorna percentual com 1 casa (ex: 50.0)
     return round(x * 100.0, 1)
 
 def find_player_row(ws_players, discord_id: int):
-    """
-    Procura discord_id na coluna A (discord_id).
-    Retorna o número da linha (int) se encontrar, ou None se não encontrar.
-    """
     try:
         cell = ws_players.find(str(discord_id))
         return cell.row
     except Exception:
         return None
+
+def get_player_fields(ws_players, row: int):
+    """
+    Lê os campos principais do jogador na linha.
+    A..H:
+    A discord_id
+    B nick
+    C deck
+    D decklist_url
+    E status
+    F reports_unique
+    G created_at
+    H updated_at
+    """
+    # range A..H da linha
+    vals = ws_players.get(f"A{row}:H{row}")
+    if not vals or not vals[0]:
+        return {}
+    r = vals[0]
+    # garante tamanho 8
+    while len(r) < 8:
+        r.append("")
+    return {
+        "discord_id": str(r[0]).strip(),
+        "nick": str(r[1]).strip(),
+        "deck": str(r[2]).strip(),
+        "decklist_url": str(r[3]).strip(),
+        "status": str(r[4]).strip(),
+        "reports_unique": str(r[5]).strip(),
+        "created_at": str(r[6]).strip(),
+        "updated_at": str(r[7]).strip(),
+    }
 
 
 # =========================
@@ -117,7 +161,6 @@ def recalculate_cycle(cycle: int):
     ws_matches = sh.worksheet("Matches")
     ws_standings = sh.worksheet("Standings")
 
-    # Players: discord_id -> nick
     players_rows = ws_players.get_all_records()
     all_player_ids = set()
 
@@ -126,7 +169,6 @@ def recalculate_cycle(cycle: int):
         if pid:
             all_player_ids.add(pid)
 
-    # Estruturas
     stats = {}
     opponents = {}
 
@@ -144,7 +186,6 @@ def recalculate_cycle(cycle: int):
     for pid in list(all_player_ids):
         ensure(pid)
 
-    # Matches válidos (ciclo + confirmed + active TRUE)
     matches_rows = ws_matches.get_all_records()
     valid = []
 
@@ -166,7 +207,6 @@ def recalculate_cycle(cycle: int):
         if not a or not b:
             continue
 
-        # Ignorar BYE como oponente (futuro) - por enquanto, não entra no ranking
         result_type = str(r.get("result_type", "normal")).strip().lower()
         if result_type == "bye":
             continue
@@ -179,12 +219,10 @@ def recalculate_cycle(cycle: int):
 
         valid.append((a, b, a_gw, b_gw))
 
-    # 1º passe: pontos, jogos, games, oponentes
     for a, b, a_gw, b_gw in valid:
         stats[a]["matches_played"] += 1
         stats[b]["matches_played"] += 1
 
-        # games
         stats[a]["game_wins"] += a_gw
         stats[a]["game_losses"] += b_gw
         stats[a]["games_played"] += (a_gw + b_gw)
@@ -193,7 +231,6 @@ def recalculate_cycle(cycle: int):
         stats[b]["game_losses"] += a_gw
         stats[b]["games_played"] += (a_gw + b_gw)
 
-        # match points (W=3, D=1, L=0) usando games para decidir
         if a_gw > b_gw:
             stats[a]["match_points"] += 3
         elif b_gw > a_gw:
@@ -205,25 +242,17 @@ def recalculate_cycle(cycle: int):
         opponents[a].append(b)
         opponents[b].append(a)
 
-    # MWP% e GW% com piso 33,3%
     mwp = {}
     gwp = {}
 
     for pid, s in stats.items():
         mp = s["match_points"]
         mplayed = s["matches_played"]
-        if mplayed == 0:
-            mwp[pid] = 1/3
-        else:
-            mwp[pid] = floor_333(mp / (3.0 * mplayed))
+        mwp[pid] = 1/3 if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
 
         gplayed = s["games_played"]
-        if gplayed == 0:
-            gwp[pid] = 1/3
-        else:
-            gwp[pid] = floor_333(s["game_wins"] / float(gplayed))
+        gwp[pid] = 1/3 if gplayed == 0 else floor_333(s["game_wins"] / float(gplayed))
 
-    # OMW% e OGW% (média simples dos oponentes; piso aplicado por oponente via mwp/gwp)
     omw = {}
     ogw = {}
 
@@ -238,12 +267,11 @@ def recalculate_cycle(cycle: int):
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
-    # Montar linhas para Standings
     rows = []
     for pid, s in stats.items():
         rows.append({
             "cycle": cycle,
-            "player_id": pid,  # compat com sua aba Standings
+            "player_id": pid,
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
             "mwp_percent": pct1(mwp[pid]),
@@ -255,19 +283,16 @@ def recalculate_cycle(cycle: int):
             "ogw_percent": pct1(ogw[pid]),
         })
 
-    # Ordenação oficial: Pontos > OMW% > GW% > OGW%
     rows.sort(
         key=lambda r: (r["match_points"], r["omw_percent"], r["gw_percent"], r["ogw_percent"]),
         reverse=True
     )
 
-    # rank_position e timestamp
     ts = now_iso_utc()
     for i, r in enumerate(rows, start=1):
         r["rank_position"] = i
         r["last_recalc_at"] = ts
 
-    # Reescrever Standings do zero
     header = [
         "cycle","player_id","matches_played","match_points","mwp_percent",
         "game_wins","game_losses","games_played","gw_percent",
@@ -344,18 +369,22 @@ async def sheets(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Erro ao acessar planilha: `{e}`")
 
 
-@client.tree.command(name="forcesync", description="Força sincronização dos comandos (ADM)")
+@client.tree.command(name="forcesync", description="Força sincronização dos comandos (ADM/Organizador)")
 async def forcesync(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
+    if not is_admin_or_organizer(interaction):
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
     if not GUILD_ID:
         await interaction.response.send_message("⚠️ DISCORD_GUILD_ID não configurado.", ephemeral=True)
         return
 
-    guild = discord.Object(id=GUILD_ID)
-    await client.tree.sync(guild=guild)
-    await interaction.response.send_message("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        await client.tree.sync(guild=guild)
+        await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Falha ao sincronizar: {type(e).__name__}", ephemeral=True)
 
 
 # =========================
@@ -391,7 +420,7 @@ async def inscrever(interaction: discord.Interaction):
             await interaction.followup.send(
                 "Inscrição realizada ✅\n"
                 f"Nick: **{nick}**\n"
-                "Próximo passo: use `/deck` e `/decklist` quando quiser.",
+                "Agora você pode definir seu deck e decklist 1 única vez usando `/deck` e `/decklist`.",
                 ephemeral=True
             )
         else:
@@ -414,9 +443,9 @@ async def inscrever(interaction: discord.Interaction):
 
 
 # =========================
-# FASE 2 - /deck
+# FASE 2 - /deck (jogador só 1x; ADM/Organizador pode sempre)
 # =========================
-@client.tree.command(name="deck", description="Define ou altera o nome do seu deck.")
+@client.tree.command(name="deck", description="Define seu deck (apenas 1 vez). ADM/Organizador podem alterar.")
 @app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
 async def deck(interaction: discord.Interaction, nome: str):
     await interaction.response.defer(ephemeral=True)
@@ -429,10 +458,18 @@ async def deck(interaction: discord.Interaction, nome: str):
         ws = sh.worksheet("Players")
 
         row = find_player_row(ws, discord_id)
-
         if row is None:
+            await interaction.followup.send("❌ Você ainda não está inscrito. Use `/inscrever` primeiro.", ephemeral=True)
+            return
+
+        fields = get_player_fields(ws, row)
+        current_deck = (fields.get("deck") or "").strip()
+
+        # Se já existe deck e não é ADM/Organizador, bloqueia
+        if current_deck and not is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
+                "❌ Você já definiu seu deck e não pode alterar.\n"
+                "Se precisar mudar, peça para um ADM/Organizador.",
                 ephemeral=True
             )
             return
@@ -441,21 +478,18 @@ async def deck(interaction: discord.Interaction, nome: str):
         ws.update([[now]], range_name=f"H{row}")
 
         await interaction.followup.send(
-            f"✅ Deck atualizado com sucesso.\nDeck atual: **{nome}**",
+            f"✅ Deck salvo com sucesso.\nDeck: **{nome}**",
             ephemeral=True
         )
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro ao atualizar deck: {e}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Erro ao salvar deck: {e}", ephemeral=True)
 
 
 # =========================
-# FASE 2 - /decklist (somente Moxfield e LigaMagic)
+# FASE 2 - /decklist (jogador só 1x; ADM/Organizador pode sempre)
 # =========================
-@client.tree.command(name="decklist", description="Define ou altera o link da sua decklist (Moxfield ou LigaMagic).")
+@client.tree.command(name="decklist", description="Define sua decklist (apenas 1 vez). ADM/Organizador podem alterar.")
 @app_commands.describe(url="Link da decklist (moxfield.com ou ligamagic.com.br)")
 async def decklist(interaction: discord.Interaction, url: str):
     await interaction.response.defer(ephemeral=True)
@@ -465,17 +499,11 @@ async def decklist(interaction: discord.Interaction, url: str):
 
     try:
         raw = url.strip()
-
-        # Normaliza: se vier sem http/https, adiciona https://
         if not raw.startswith("http://") and not raw.startswith("https://"):
             raw = "https://" + raw
 
-        # Regras básicas
         if " " in raw or len(raw) < 10 or len(raw) > 400:
-            await interaction.followup.send(
-                "❌ Link inválido. Envie uma URL completa (sem espaços).",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Link inválido. Envie uma URL completa (sem espaços).", ephemeral=True)
             return
 
         parsed = urlparse(raw)
@@ -491,7 +519,6 @@ async def decklist(interaction: discord.Interaction, url: str):
             )
             return
 
-        # Validação por domínio
         if host == "moxfield.com":
             if "/decks/" not in (parsed.path or ""):
                 await interaction.followup.send(
@@ -505,7 +532,7 @@ async def decklist(interaction: discord.Interaction, url: str):
             deck_id = (qs.get("id", [""])[0] or "").strip()
             if not deck_id.isdigit():
                 await interaction.followup.send(
-                    "❌ Link inválido da LigaMagic.\nUse um link com `id=`.\nExemplo: https://www.ligamagic.com.br/?view=dks/deck&id=123456",
+                    "❌ Link inválido da LigaMagic.\nExemplo: https://www.ligamagic.com.br/?view=dks/deck&id=123456",
                     ephemeral=True
                 )
                 return
@@ -515,8 +542,17 @@ async def decklist(interaction: discord.Interaction, url: str):
 
         row = find_player_row(ws, discord_id)
         if row is None:
+            await interaction.followup.send("❌ Você ainda não está inscrito. Use `/inscrever` primeiro.", ephemeral=True)
+            return
+
+        fields = get_player_fields(ws, row)
+        current_link = (fields.get("decklist_url") or "").strip()
+
+        # Se já existe decklist e não é ADM/Organizador, bloqueia
+        if current_link and not is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você ainda não está inscrito.\nUse `/inscrever` primeiro.",
+                "❌ Você já definiu sua decklist e não pode alterar.\n"
+                "Se precisar mudar, peça para um ADM/Organizador.",
                 ephemeral=True
             )
             return
@@ -525,23 +561,23 @@ async def decklist(interaction: discord.Interaction, url: str):
         ws.update([[now]], range_name=f"H{row}")
 
         await interaction.followup.send(
-            "✅ Decklist atualizada com sucesso.\n"
+            "✅ Decklist salva com sucesso.\n"
             f"Link: {raw}",
             ephemeral=True
         )
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro ao atualizar decklist: {e}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Erro ao salvar decklist: {e}", ephemeral=True)
 
 
+# =========================
+# /recalcular (ADM/Organizador)
+# =========================
 @client.tree.command(name="recalcular", description="Recalcula ranking do ciclo (ADM/Organizador)")
 @app_commands.describe(cycle="Número do ciclo (ex: 1)")
 async def recalcular(interaction: discord.Interaction, cycle: int):
-    if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
-        await interaction.response.send_message("❌ Sem permissão para usar este comando.", ephemeral=True)
+    if not is_admin_or_organizer(interaction):
+        await interaction.response.send_message("❌ Sem permissão. Apenas ADM/Organizador.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
