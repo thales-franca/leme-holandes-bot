@@ -35,13 +35,13 @@ def keep_alive():
 # =========================
 # Configs
 # =========================
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # recomendado para sync rápido
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # recomendado para sync por guild
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
 SHEET_ID = os.getenv("SHEET_ID", "")
 SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-# Nomes EXATOS dos cargos no Discord (pode sobrescrever no Render se quiser)
+# Nomes EXATOS dos cargos no Discord (batem com seu print)
 ROLE_ORGANIZADOR = os.getenv("ROLE_ORGANIZADOR", "Organizador")
 ROLE_ADM = os.getenv("ROLE_ADM", "ADM")
 
@@ -56,24 +56,6 @@ def now_br_str() -> str:
 
 def now_iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-# =========================
-# Auth helpers (Discord)
-# =========================
-def has_role(interaction: discord.Interaction, role_name: str) -> bool:
-    if not interaction.guild or not interaction.user:
-        return False
-    member = interaction.guild.get_member(interaction.user.id)
-    if not member:
-        return False
-    return any(r.name == role_name for r in member.roles)
-
-def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
-    # Permite por permissão do Discord OU por cargo
-    if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
-        return True
-    return has_role(interaction, ROLE_ADM) or has_role(interaction, ROLE_ORGANIZADOR)
 
 
 # =========================
@@ -121,23 +103,13 @@ def find_player_row(ws_players, discord_id: int):
 
 def get_player_fields(ws_players, row: int):
     """
-    Lê os campos principais do jogador na linha.
-    A..H:
-    A discord_id
-    B nick
-    C deck
-    D decklist_url
-    E status
-    F reports_unique
-    G created_at
-    H updated_at
+    Lê A..H (Players) na linha.
+    A discord_id | B nick | C deck | D decklist_url | E status | F reports_unique | G created_at | H updated_at
     """
-    # range A..H da linha
     vals = ws_players.get(f"A{row}:H{row}")
     if not vals or not vals[0]:
         return {}
     r = vals[0]
-    # garante tamanho 8
     while len(r) < 8:
         r.append("")
     return {
@@ -150,6 +122,38 @@ def get_player_fields(ws_players, row: int):
         "created_at": str(r[6]).strip(),
         "updated_at": str(r[7]).strip(),
     }
+
+
+# =========================
+# Auth helpers (GARANTIDO: cache + fetch_member)
+# =========================
+async def has_role(interaction: discord.Interaction, role_name: str) -> bool:
+    if not interaction.guild or not interaction.user:
+        return False
+
+    guild = interaction.guild
+    member = guild.get_member(interaction.user.id)
+
+    # Se não estiver no cache, busca via API
+    if member is None:
+        try:
+            member = await guild.fetch_member(interaction.user.id)
+        except Exception:
+            return False
+
+    return any(r.name == role_name for r in member.roles)
+
+async def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
+    # Permissão do Discord (alternativa ao cargo)
+    if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
+        return True
+
+    if await has_role(interaction, ROLE_ADM):
+        return True
+    if await has_role(interaction, ROLE_ORGANIZADOR):
+        return True
+
+    return False
 
 
 # =========================
@@ -337,6 +341,7 @@ class LemeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # sync por guild (mais rápido)
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -369,9 +374,12 @@ async def sheets(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Erro ao acessar planilha: `{e}`")
 
 
+# =========================
+# Admin utilities
+# =========================
 @client.tree.command(name="forcesync", description="Força sincronização dos comandos (ADM/Organizador)")
 async def forcesync(interaction: discord.Interaction):
-    if not is_admin_or_organizer(interaction):
+    if not await is_admin_or_organizer(interaction):
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
     if not GUILD_ID:
@@ -420,7 +428,7 @@ async def inscrever(interaction: discord.Interaction):
             await interaction.followup.send(
                 "Inscrição realizada ✅\n"
                 f"Nick: **{nick}**\n"
-                "Agora você pode definir seu deck e decklist 1 única vez usando `/deck` e `/decklist`.",
+                "Você pode definir seu deck e decklist **apenas 1 vez** com `/deck` e `/decklist`.",
                 ephemeral=True
             )
         else:
@@ -443,9 +451,9 @@ async def inscrever(interaction: discord.Interaction):
 
 
 # =========================
-# FASE 2 - /deck (jogador só 1x; ADM/Organizador pode sempre)
+# /deck (Jogador 1x | ADM/Organizador pode alterar)
 # =========================
-@client.tree.command(name="deck", description="Define seu deck (apenas 1 vez). ADM/Organizador podem alterar.")
+@client.tree.command(name="deck", description="Define seu deck (1 vez). ADM/Organizador podem alterar.")
 @app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
 async def deck(interaction: discord.Interaction, nome: str):
     await interaction.response.defer(ephemeral=True)
@@ -465,11 +473,9 @@ async def deck(interaction: discord.Interaction, nome: str):
         fields = get_player_fields(ws, row)
         current_deck = (fields.get("deck") or "").strip()
 
-        # Se já existe deck e não é ADM/Organizador, bloqueia
-        if current_deck and not is_admin_or_organizer(interaction):
+        if current_deck and not await is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você já definiu seu deck e não pode alterar.\n"
-                "Se precisar mudar, peça para um ADM/Organizador.",
+                "❌ Você já definiu seu deck e não pode alterar.\nPeça para um **ADM/Organizador** se precisar mudar.",
                 ephemeral=True
             )
             return
@@ -477,19 +483,16 @@ async def deck(interaction: discord.Interaction, nome: str):
         ws.update([[nome]], range_name=f"C{row}")
         ws.update([[now]], range_name=f"H{row}")
 
-        await interaction.followup.send(
-            f"✅ Deck salvo com sucesso.\nDeck: **{nome}**",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"✅ Deck salvo.\nDeck: **{nome}**", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro ao salvar deck: {e}", ephemeral=True)
 
 
 # =========================
-# FASE 2 - /decklist (jogador só 1x; ADM/Organizador pode sempre)
+# /decklist (Jogador 1x | ADM/Organizador pode alterar) - Moxfield/LigaMagic
 # =========================
-@client.tree.command(name="decklist", description="Define sua decklist (apenas 1 vez). ADM/Organizador podem alterar.")
+@client.tree.command(name="decklist", description="Define sua decklist (1 vez). ADM/Organizador podem alterar.")
 @app_commands.describe(url="Link da decklist (moxfield.com ou ligamagic.com.br)")
 async def decklist(interaction: discord.Interaction, url: str):
     await interaction.response.defer(ephemeral=True)
@@ -548,11 +551,9 @@ async def decklist(interaction: discord.Interaction, url: str):
         fields = get_player_fields(ws, row)
         current_link = (fields.get("decklist_url") or "").strip()
 
-        # Se já existe decklist e não é ADM/Organizador, bloqueia
-        if current_link and not is_admin_or_organizer(interaction):
+        if current_link and not await is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você já definiu sua decklist e não pode alterar.\n"
-                "Se precisar mudar, peça para um ADM/Organizador.",
+                "❌ Você já definiu sua decklist e não pode alterar.\nPeça para um **ADM/Organizador** se precisar mudar.",
                 ephemeral=True
             )
             return
@@ -560,11 +561,7 @@ async def decklist(interaction: discord.Interaction, url: str):
         ws.update([[raw]], range_name=f"D{row}")
         ws.update([[now]], range_name=f"H{row}")
 
-        await interaction.followup.send(
-            "✅ Decklist salva com sucesso.\n"
-            f"Link: {raw}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"✅ Decklist salva.\nLink: {raw}", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro ao salvar decklist: {e}", ephemeral=True)
@@ -576,7 +573,7 @@ async def decklist(interaction: discord.Interaction, url: str):
 @client.tree.command(name="recalcular", description="Recalcula ranking do ciclo (ADM/Organizador)")
 @app_commands.describe(cycle="Número do ciclo (ex: 1)")
 async def recalcular(interaction: discord.Interaction, cycle: int):
-    if not is_admin_or_organizer(interaction):
+    if not await is_admin_or_organizer(interaction):
         await interaction.response.send_message("❌ Sem permissão. Apenas ADM/Organizador.", ephemeral=True)
         return
 
