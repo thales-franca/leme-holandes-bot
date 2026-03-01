@@ -21,7 +21,7 @@ from google.oauth2.service_account import Credentials
 # Sheets (abas):
 # - Players: cadastro permanente
 # - Enrollments: inscrição por ciclo (active/dropped)
-# - Cycles: status do ciclo (open/locked/completed) + start_at + deadline_at
+# - Cycles: status do ciclo (open/locked/completed) + start_at_br + deadline_at_br
 # - PodsHistory: pods por ciclo
 # - Matches: confrontos + resultados
 # - Standings: ranking recalculado (bot escreve do zero)
@@ -39,6 +39,8 @@ from google.oauth2.service_account import Credentials
 #   POD 5 ou 6 -> 10 dias corridos
 #   Ciclo começa 14:00 (BR) e termina no último dia às 13:59 (BR)
 # - /final (ADM): aplica 0-0-3 para matches sem report
+# - /estender (Organizador): estende deadline por X dias (exceção)
+# - /comando (todos): mostra comandos disponíveis por cargo
 # =========================================================
 
 
@@ -104,6 +106,10 @@ def parse_br_dt(s: str):
         return datetime.strptime(str(s).strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=BR_TZ)
     except Exception:
         return None
+
+def fmt_br_dt(dt: datetime) -> str:
+    # mantém sempre HH:MM:SS
+    return dt.astimezone(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # =========================
@@ -233,6 +239,18 @@ async def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
         return True
     return False
 
+async def is_organizer_only(interaction: discord.Interaction) -> bool:
+    # Regra do Thales: /estender é SOMENTE Organizador (sem exceção)
+    return await has_role(interaction, ROLE_ORGANIZADOR)
+
+async def get_access_level(interaction: discord.Interaction) -> str:
+    # Retorna: "organizador" | "adm" | "jogador"
+    if await has_role(interaction, ROLE_ORGANIZADOR):
+        return "organizador"
+    if await has_role(interaction, ROLE_ADM):
+        return "adm"
+    return "jogador"
+
 
 # =========================
 # URL validation (decklist)
@@ -302,7 +320,6 @@ ENROLLMENTS_REQUIRED = ["cycle","player_id","status","created_at","updated_at"]
 PODSHISTORY_HEADER = ["cycle","pod","player_id","created_at"]
 PODSHISTORY_REQUIRED = ["cycle","pod","player_id","created_at"]
 
-# Cycles: adicionamos start_at_br e deadline_at_br para /prazo e /final
 CYCLES_HEADER = ["cycle","status","start_at_br","deadline_at_br","created_at","updated_at"]  # status: open|locked|completed
 CYCLES_REQUIRED = ["cycle","status","start_at_br","deadline_at_br","created_at","updated_at"]
 
@@ -515,8 +532,7 @@ def cycle_days_by_max_pod(max_pod_size: int) -> int:
         return 5
     if max_pod_size == 4:
         return 8
-    # 5 ou 6 (ou mais)
-    return 10
+    return 10  # 5 ou 6 (ou mais)
 
 def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str, str, int, int]:
     """
@@ -531,7 +547,6 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
     else:
         start_dt = None
 
-    # Descobrir max_pod_size pelo PodsHistory
     rows = ws_pods.get_all_records()
     pods = {}
     for r in rows:
@@ -543,15 +558,11 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
             pods.setdefault(pod, set()).add(pid)
 
     if not pods:
-        # sem pods ainda
-        max_pod_size = 0
-        days = 0
-        return ("", "", max_pod_size, days)
+        return ("", "", 0, 0)
 
     max_pod_size = max(len(v) for v in pods.values())
     days = cycle_days_by_max_pod(max_pod_size)
 
-    # Se não havia start_dt, usamos o dia do primeiro registro do pod (created_at) ou hoje
     if start_dt is None:
         created_candidates = []
         for r in rows:
@@ -566,9 +577,7 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
     deadline_date = (start_dt.date() + timedelta(days=days))
     deadline_dt = datetime.combine(deadline_date, time(13, 59), tzinfo=BR_TZ)
 
-    start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    deadline_str = deadline_dt.strftime("%Y-%m-%d %H:%M:%S")
-    return (start_str, deadline_str, max_pod_size, days)
+    return (fmt_br_dt(start_dt), fmt_br_dt(deadline_dt), max_pod_size, days)
 
 
 # =========================
@@ -761,7 +770,6 @@ class LemeBot(discord.Client):
         else:
             await self.tree.sync()
 
-
 client = LemeBot()
 
 
@@ -825,7 +833,6 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         return []
 
 async def ac_match_id_any(interaction: discord.Interaction, current: str):
-    # Para admin editar/cancelar: qualquer match_id
     try:
         sh = open_sheet()
         ws_matches = sh.worksheet("Matches")
@@ -850,6 +857,50 @@ async def ac_match_id_any(interaction: discord.Interaction, current: str):
 
 
 # =========================
+# Catálogo de comandos (/comando)
+# =========================
+COMMANDS_CATALOG = [
+    # jogador
+    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
+    ("jogador", "/drop", "Sai do ciclo enquanto estiver open."),
+    ("jogador", "/deck", "Define seu deck (1 vez; ADM/Organizador podem ajustar)."),
+    ("jogador", "/decklist", "Define decklist (Moxfield/LigaMagic) (1 vez; ADM/Organizador podem ajustar)."),
+    ("jogador", "/pods_ver", "Mostra pods do ciclo."),
+    ("jogador", "/meus_matches", "Lista seus matches do ciclo (IDs, status e prazo 48h)."),
+    ("jogador", "/resultado", "Reporta resultado V-D-E (menu)."),
+    ("jogador", "/rejeitar", "Rejeita resultado pendente dentro de 48h."),
+    ("jogador", "/ranking", "Mostra ranking público do ciclo."),
+    ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
+    ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
+
+    # ADM / Organizador
+    ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
+    ("adm", "/ciclo_abrir", "Cria/abre um ciclo (status=open)."),
+    ("adm", "/ciclo_encerrar", "Encerra ciclo (status=completed)."),
+    ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo (locked)."),
+    ("adm", "/deadline", "Lista pendências (pending) próximas de expirar (48h)."),
+    ("adm", "/recalcular", "Auto-confirm (48h) + recalcula ranking do zero."),
+    ("adm", "/standings_publicar", "Publica ranking em canal configurado (ou atual)."),
+    ("adm", "/final", "Aplica 0-0-3 em matches sem report após prazo."),
+    ("adm", "/admin_resultado_editar", "Edita resultado de match e opcionalmente confirma."),
+    ("adm", "/admin_resultado_cancelar", "Cancela match (active=FALSE)."),
+    ("adm", "/status_ciclo", "Resumo do ciclo (inscritos, pods, matches, pendências)."),
+    ("adm", "/exportar_ciclo", "Exporta CSV do ciclo (Matches e Standings)."),
+    ("adm", "/fechar_resultados_atrasados", "Força auto-confirm expirados (48h)."),
+    ("adm", "/substituir_jogador", "Substitui jogador no ciclo (somente matches sem report)."),
+    ("adm", "/historico_confronto", "Mostra histórico confirmado entre dois jogadores."),
+    ("adm", "/estatisticas", "Mostra estatísticas confirmadas de um jogador."),
+
+    # Organizador-only
+    ("organizador", "/estender", "Estende o prazo do ciclo em X dias (exceção, raro)."),
+]
+
+def level_allows(user_level: str, cmd_level: str) -> bool:
+    order = {"jogador": 1, "adm": 2, "organizador": 3}
+    return order.get(user_level, 1) >= order.get(cmd_level, 1)
+
+
+# =========================
 # Basics
 # =========================
 @client.tree.command(name="ping", description="Teste do bot")
@@ -867,6 +918,25 @@ async def sheets(interaction: discord.Interaction):
         await interaction.response.send_message(f"✅ Conectado na planilha: **{sh.title}**")
     except Exception as e:
         await interaction.response.send_message(f"❌ Erro ao acessar planilha: `{e}`")
+
+@client.tree.command(name="comando", description="Mostra seus comandos disponíveis (de acordo com seu cargo).")
+async def comando(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
+    try:
+        user_level = await get_access_level(interaction)
+
+        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+        for lvl, cmd, desc in COMMANDS_CATALOG:
+            if level_allows(user_level, lvl):
+                lines.append(f"• **{cmd}** — {desc}")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
 
 @client.tree.command(name="forcesync", description="Força sincronização dos comandos (ADM/Organizador)")
 async def forcesync(interaction: discord.Interaction):
@@ -969,7 +1039,6 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
         st = fields.get("status")
 
         if st is None:
-            # cria automaticamente open
             ws_cycles.append_row([str(c), "open", "", "", nowb, nowb], value_input_option="USER_ENTERED")
             st = "open"
 
@@ -983,7 +1052,6 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=20)
 
-        # Players
         prow = find_player_row(ws_players, discord_id)
         if prow is None:
             ws_players.append_row([str(discord_id), nick, "", "", "active", "0", nowb, nowb], value_input_option="USER_ENTERED")
@@ -992,7 +1060,6 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
             ws_players.update([["active"]], range_name=f"E{prow}")
             ws_players.update([[nowb]], range_name=f"H{prow}")
 
-        # Enrollments
         data = ws_enr.get_all_values()
         col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
@@ -1187,7 +1254,6 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, tamanho: int 
         ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        # se já existe PodsHistory no ciclo -> bloqueia
         pods_rows = ws_pods.get_all_records()
         if any(safe_int(r.get("cycle", 0), 0) == cycle for r in pods_rows):
             set_cycle_status(ws_cycles, cycle, "locked")
@@ -1198,7 +1264,6 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, tamanho: int 
             )
             return
 
-        # inscritos ativos
         enr_rows = ws_enr.get_all_records()
         players = []
         for r in enr_rows:
@@ -1221,7 +1286,6 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, tamanho: int 
         created_matches = 0
         nick_map = build_players_nick_map(ws_players)
 
-        # grava PodsHistory + cria matches
         for idx, pod_players in enumerate(pods):
             pod_name = letters[idx] if idx < len(letters) else f"P{idx+1}"
 
@@ -1245,10 +1309,8 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, tamanho: int 
                 ws_matches.append_row(row, value_input_option="USER_ENTERED")
                 created_matches += 1
 
-        # trava ciclo
         set_cycle_status(ws_cycles, cycle, "locked")
 
-        # calcula e grava prazo do ciclo no Cycles
         start_str, deadline_str, max_pod_size, days = compute_cycle_start_deadline_br(cycle, ws_pods, ws_cycles)
         if start_str and deadline_str:
             set_cycle_times(ws_cycles, cycle, start_str, deadline_str)
@@ -1325,7 +1387,6 @@ async def prazo(interaction: discord.Interaction, cycle: int):
             await interaction.followup.send("❌ Ainda não existem pods para esse ciclo. Gere os pods primeiro.", ephemeral=True)
             return
 
-        # grava para manter consistente
         set_cycle_times(ws_cycles, cycle, start_str, deadline_str)
 
         deadline_dt = parse_br_dt(deadline_str)
@@ -1350,6 +1411,78 @@ async def prazo(interaction: discord.Interaction, cycle: int):
         )
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+
+# =========================
+# /estender (Organizador-only)
+# =========================
+@client.tree.command(name="estender", description="(Organizador) Estende o prazo do ciclo em X dias corridos (exceção).")
+@app_commands.describe(cycle="Ciclo (ex: 1)", dias="Dias para estender (ex: 2, 3, 5)")
+async def estender(interaction: discord.Interaction, cycle: int, dias: int):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
+    if not await is_organizer_only(interaction):
+        return await interaction.followup.send("❌ Apenas **Organizador** pode usar este comando.", ephemeral=True)
+
+    if dias <= 0 or dias > 30:
+        return await interaction.followup.send("❌ Informe **dias** entre 1 e 30.", ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        rown = get_cycle_row(ws_cycles, cycle)
+        if rown is None:
+            return await interaction.followup.send(f"❌ Ciclo {cycle} não existe na aba Cycles.", ephemeral=True)
+
+        st = (ws_cycles.cell(rown, col["status"] + 1).value or "").strip().lower()
+        # (col dict é 0-based; cell() é 1-based)
+        # Ajuste rápido:
+        st = (ws_cycles.cell(rown, col["status"] + 1).value or "").strip().lower()
+
+        if st == "completed":
+            return await interaction.followup.send("❌ Ciclo está **completed**. Não é permitido estender.", ephemeral=True)
+
+        deadline_val = (ws_cycles.cell(rown, col["deadline_at_br"] + 1).value or "").strip()
+        if not deadline_val:
+            return await interaction.followup.send(
+                "❌ Esse ciclo ainda não tem **deadline_at_br** gravado.\n"
+                "Gere os pods (`/pods_gerar`) para o bot calcular e gravar o prazo.",
+                ephemeral=True
+            )
+
+        old_dt = parse_br_dt(deadline_val)
+        if not old_dt:
+            return await interaction.followup.send(
+                f"❌ deadline_at_br em formato inválido: `{deadline_val}` (esperado `YYYY-MM-DD HH:MM:SS`).",
+                ephemeral=True
+            )
+
+        new_dt = (old_dt + timedelta(days=dias)).replace(hour=13, minute=59, second=0, microsecond=0)
+        nowb = now_br_str()
+
+        ws_cycles.update([[fmt_br_dt(new_dt)]], range_name=f"{col_letter(col['deadline_at_br'])}{rown}")
+        ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+
+        await interaction.followup.send(
+            f"✅ Prazo do **Ciclo {cycle}** estendido em **{dias} dia(s)**.\n"
+            f"Antes: `{fmt_br_dt(old_dt)}`\n"
+            f"Agora: `{fmt_br_dt(new_dt)}`",
+            ephemeral=True
+        )
+
+        # publicar aviso (se canal configurado)
+        if RANKING_CHANNEL_ID and interaction.guild:
+            ch = interaction.guild.get_channel(RANKING_CHANNEL_ID)
+            if ch:
+                await ch.send(f"📌 **Prazo atualizado** — Ciclo {cycle} agora vai até **{fmt_br_dt(new_dt)} (Brasília)**.")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /estender: {e}", ephemeral=True)
 
 
 # =========================
@@ -1486,7 +1619,6 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: app
             await interaction.followup.send("❌ Você não faz parte deste match.", ephemeral=True)
             return
 
-        # grava no formato A/B do match
         if reporter_id == a_id:
             a_gw, b_gw, d_g = v, d, e
         else:
@@ -1772,7 +1904,6 @@ async def final(interaction: discord.Interaction, cycle: int):
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        # valida prazo (se já expirou)
         start_str, deadline_str, max_pod_size, days = compute_cycle_start_deadline_br(cycle, ws_pods, ws_cycles)
         if not deadline_str:
             await interaction.followup.send("❌ Este ciclo ainda não tem pods/prazo.", ephemeral=True)
@@ -1808,9 +1939,8 @@ async def final(interaction: discord.Interaction, cycle: int):
 
             rep = (getc("reported_by_id") or "").strip()
             if rep:
-                continue  # já tem report
+                continue
 
-            # aplicar 0-0-3 e confirmar como oficial
             ws_matches.update([["0"]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
             ws_matches.update([["0"]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
             ws_matches.update([["3"]], range_name=f"{col_letter(col['draw_games'])}{rown}")
@@ -1983,7 +2113,6 @@ async def status_ciclo(interaction: discord.Interaction, cycle: int):
         confirmed = [r for r in m_cycle if str(r.get("confirmed_status","")).strip().lower() == "confirmed"]
         rejected = [r for r in m_cycle if str(r.get("confirmed_status","")).strip().lower() == "rejected"]
 
-        # pods count
         pod_names = set(str(r.get("pod","")).strip() for r in pods_cycle if str(r.get("pod","")).strip())
         out = [
             f"📊 **Status Ciclo {cycle}**",
@@ -2020,7 +2149,6 @@ async def exportar_ciclo(interaction: discord.Interaction, cycle: int):
         standings = ws_st.get_all_records()
         s_cycle = [r for r in standings if safe_int(r.get("cycle", 0), 0) == cycle]
 
-        # CSV em memória
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["=== MATCHES ==="])
@@ -2069,7 +2197,6 @@ async def fechar_resultados_atrasados(interaction: discord.Interaction, cycle: i
 
 # =========================
 # Luxo: substituir jogador
-# - troca player_id no ciclo em PodsHistory e Matches (somente matches SEM report)
 # =========================
 @client.tree.command(name="substituir_jogador", description="(ADM) Substitui um jogador no ciclo (somente matches sem report).")
 @app_commands.describe(cycle="Ciclo", antigo_id="Discord ID antigo", novo_id="Discord ID novo")
@@ -2092,7 +2219,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        # PodsHistory: substituir
         pods_vals = ws_pods.get_all_values()
         pods_col = ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
 
@@ -2105,7 +2231,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
                 ws_pods.update([[novo_id]], range_name=f"{col_letter(pods_col['player_id'])}{rown}")
                 pods_changed += 1
 
-        # Matches: substituir SOMENTE se sem report
         mv = ws_matches.get_all_values()
         mcol = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         matches_changed = 0
@@ -2121,7 +2246,7 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
             if not as_bool(getc("active") or "TRUE"):
                 continue
             if (getc("reported_by_id") or "").strip():
-                continue  # não mexe se já tem report
+                continue
 
             a = (getc("player_a_id") or "").strip()
             b = (getc("player_b_id") or "").strip()
@@ -2238,7 +2363,6 @@ async def estatisticas(interaction: discord.Interaction, jogador_id: str):
             matches += 1
             gd += d_g
 
-            # ponto de match
             if a_gw > b_gw:
                 winner = a
             elif b_gw > a_gw:
@@ -2252,7 +2376,6 @@ async def estatisticas(interaction: discord.Interaction, jogador_id: str):
                 if winner == pid:
                     mp += 3
 
-            # games
             if pid == a:
                 gw += a_gw
                 gl += b_gw
