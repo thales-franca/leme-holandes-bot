@@ -2,7 +2,7 @@ import os
 import json
 import threading
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import discord
 from discord import app_commands
@@ -395,7 +395,6 @@ async def inscrever(interaction: discord.Interaction):
                 ephemeral=True
             )
         else:
-            # gspread novo: values primeiro, range_name depois
             ws.update([[nick]], range_name=f"B{row}")
             ws.update([["active"]], range_name=f"E{row}")
             ws.update([[now]], range_name=f"H{row}")
@@ -438,7 +437,6 @@ async def deck(interaction: discord.Interaction, nome: str):
             )
             return
 
-        # Coluna C = deck | Coluna H = updated_at
         ws.update([[nome]], range_name=f"C{row}")
         ws.update([[now]], range_name=f"H{row}")
 
@@ -473,7 +471,7 @@ async def decklist(interaction: discord.Interaction, url: str):
             raw = "https://" + raw
 
         # Regras básicas
-        if " " in raw or len(raw) < 10 or len(raw) > 300:
+        if " " in raw or len(raw) < 10 or len(raw) > 400:
             await interaction.followup.send(
                 "❌ Link inválido. Envie uma URL completa (sem espaços).",
                 ephemeral=True
@@ -482,7 +480,6 @@ async def decklist(interaction: discord.Interaction, url: str):
 
         parsed = urlparse(raw)
         host = (parsed.netloc or "").lower()
-
         if host.startswith("www."):
             host = host[4:]
 
@@ -494,12 +491,24 @@ async def decklist(interaction: discord.Interaction, url: str):
             )
             return
 
-        if not parsed.path or parsed.path == "/":
-            await interaction.followup.send(
-                "❌ Link incompleto. Envie o link do deck (não apenas o site).",
-                ephemeral=True
-            )
-            return
+        # Validação por domínio
+        if host == "moxfield.com":
+            if "/decks/" not in (parsed.path or ""):
+                await interaction.followup.send(
+                    "❌ Link inválido do Moxfield.\nExemplo: https://www.moxfield.com/decks/SEU_ID",
+                    ephemeral=True
+                )
+                return
+
+        if host == "ligamagic.com.br":
+            qs = parse_qs(parsed.query or "")
+            deck_id = (qs.get("id", [""])[0] or "").strip()
+            if not deck_id.isdigit():
+                await interaction.followup.send(
+                    "❌ Link inválido da LigaMagic.\nUse um link com `id=`.\nExemplo: https://www.ligamagic.com.br/?view=dks/deck&id=123456",
+                    ephemeral=True
+                )
+                return
 
         sh = open_sheet()
         ws = sh.worksheet("Players")
@@ -512,7 +521,6 @@ async def decklist(interaction: discord.Interaction, url: str):
             )
             return
 
-        # Coluna D = decklist_url | Coluna H = updated_at
         ws.update([[raw]], range_name=f"D{row}")
         ws.update([[now]], range_name=f"H{row}")
 
