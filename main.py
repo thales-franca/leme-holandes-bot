@@ -1117,16 +1117,9 @@ def recalculate_cycle(season_id: int, cycle: int):
 
 # =========================================================
 # [BLOCO 4/8 termina aqui]
-# No BLOCO 5/8 eu trago:
-# - Discord Client + setup_hook
-# - Autocompletes
-# - /comando (catálogo completo e por permissão)
-# - Gate de entrada novo usuário (Participar/Assistir) + cargo automático Jogador
 # =========================================================
-
-# =========================================================
-# [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING (Participar/Assistir)
-# (REVISADO: /comando com split 2000 chars + ac_cycle_open com CACHE (só OPEN existentes) + envio blindado)
+# [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING
+# (VERSÃO FINAL — Modal de Nome + Cache Autocomplete + Envio Blindado)
 # =========================================================
 
 from time import time
@@ -1137,12 +1130,11 @@ from time import time
 class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True  # necessário para on_member_join + cargos
+        intents.members = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # sync dos comandos (guild-scoped quando possível)
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -1154,118 +1146,15 @@ client = LemeBot()
 
 
 # =========================
-# Config extra (onboarding)
+# Autocomplete Cache (Ciclos OPEN)
 # =========================
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))  # fallback se DM falhar
-
-
-# =========================
-# Logs (canal admin) — usa GUILD (sem duplicar log_admin do Bloco 1)
-# =========================
-async def log_admin_guild(guild: discord.Guild | None, text: str):
-    if not guild:
-        return
-    if not LOG_ADMIN_CHANNEL_ID:
-        return
-    ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
-    if not ch:
-        try:
-            ch = await guild.fetch_channel(LOG_ADMIN_CHANNEL_ID)
-        except Exception:
-            ch = None
-    if ch:
-        try:
-            await ch.send(text)
-        except Exception:
-            pass
-
-
-# =========================
-# Nick map helper (compat)
-# =========================
-def build_players_nick_map(ws_players) -> dict[str, str]:
-    # compat com blocos anteriores: usa helper oficial do Bloco 2
-    return get_player_nick_map(ws_players)
-
-
-# =========================================================
-# Helper: split de mensagens (limite Discord 2000 chars)
-# =========================================================
-def split_text_lines(text: str, limit: int = 1900) -> list[str]:
-    """
-    Divide texto em partes <= limit, preservando quebras de linha.
-    Usamos 1900 para folga.
-    """
-    lines = text.split("\n")
-    chunks: list[str] = []
-    buf = ""
-
-    for ln in lines:
-        piece = (ln + "\n")
-        if len(buf) + len(piece) > limit:
-            if buf.strip():
-                chunks.append(buf.rstrip("\n"))
-            buf = piece
-        else:
-            buf += piece
-
-    if buf.strip():
-        chunks.append(buf.rstrip("\n"))
-
-    # fallback extremo: se uma linha isolada for gigante
-    safe_chunks: list[str] = []
-    for c in chunks:
-        if len(c) <= limit:
-            safe_chunks.append(c)
-            continue
-        for i in range(0, len(c), limit):
-            safe_chunks.append(c[i:i+limit])
-
-    return safe_chunks
-
-
-async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
-    """
-    Envia texto em partes.
-    - Se a resposta ainda NÃO foi concluída, usa response.send_message no 1º chunk.
-    - Se já foi concluída (defer feito), usa followup.
-    """
-    chunks = split_text_lines(text, limit=1900)
-    if not chunks:
-        return
-
-    # 1º chunk: response se ainda não respondeu; senão followup
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
-        else:
-            await interaction.followup.send(chunks[0], ephemeral=ephemeral)
-    except Exception:
-        # não trava o bot
-        pass
-
-    # demais chunks sempre followup
-    for c in chunks[1:]:
-        try:
-            await interaction.followup.send(c, ephemeral=ephemeral)
-        except Exception:
-            pass
-
-
-# =========================================================
-# Autocomplete CACHE: ciclos OPEN (evita Sheets a cada tecla)
-# =========================================================
 _OPEN_CYCLES_CACHE = {
     "ts": 0.0,
     "season_id": 0,
-    "cycles": [],  # list[int]
+    "cycles": [],
 }
 
-def _load_open_cycles_from_sheets(sh) -> tuple[int, list[int]]:
-    """
-    Busca no Sheets os ciclos OPEN da season atual.
-    Retorna (season_id, [cycles_open]).
-    """
+def _load_open_cycles_from_sheets(sh):
     season_id = get_current_season_id(sh)
     if season_id <= 0:
         return 0, []
@@ -1274,342 +1163,192 @@ def _load_open_cycles_from_sheets(sh) -> tuple[int, list[int]]:
     ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
     rows = ws_cycles.get_all_records()
-    open_cycles: list[int] = []
+    open_cycles = []
     for r in rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
-        st = str(r.get("status", "")).strip().lower()
-        if st != "open":
+        if str(r.get("status", "")).strip().lower() != "open":
             continue
-        c = safe_int(r.get("cycle", 0), 0)
-        if c > 0:
-            open_cycles.append(c)
+        cyc = safe_int(r.get("cycle", 0), 0)
+        if cyc > 0:
+            open_cycles.append(cyc)
 
-    open_cycles = sorted(set(open_cycles))
-    return season_id, open_cycles
+    return season_id, sorted(set(open_cycles))
 
 
-def get_open_cycles_cached(max_age_seconds: int = 60) -> tuple[int, list[int]]:
-    """
-    Retorna (season_id, cycles_open) usando cache.
-    Atualiza no máximo a cada max_age_seconds.
-    """
+def get_open_cycles_cached(max_age_seconds=60):
     now = time()
     if (_OPEN_CYCLES_CACHE["season_id"] > 0) and ((now - _OPEN_CYCLES_CACHE["ts"]) < max_age_seconds):
         return _OPEN_CYCLES_CACHE["season_id"], list(_OPEN_CYCLES_CACHE["cycles"])
 
-    # tenta atualizar; se falhar, devolve cache antigo (rápido)
     try:
         sh = open_sheet()
         sid, cycles = _load_open_cycles_from_sheets(sh)
         _OPEN_CYCLES_CACHE["ts"] = now
         _OPEN_CYCLES_CACHE["season_id"] = sid
         _OPEN_CYCLES_CACHE["cycles"] = cycles
-        return sid, list(cycles)
+        return sid, cycles
     except Exception:
         return _OPEN_CYCLES_CACHE.get("season_id", 0), list(_OPEN_CYCLES_CACHE.get("cycles", []))
 
 
-# =========================================================
-# Autocomplete helpers (season/cycle/match)
-# =========================================================
-async def ac_season_active(interaction: discord.Interaction, current: str):
-    """
-    Retorna seasons disponíveis (preferindo a current/active).
-    """
-    try:
-        sh = open_sheet()
-        ws_seasons = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-        ensure_sheet_columns(ws_seasons, SEASONS_HEADER)
-
-        rows = ws_seasons.get_all_records()
-        cur = str(current).strip()
-        choices = []
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            st = str(r.get("status", "")).strip().lower()
-            if sid <= 0:
-                continue
-            name = str(r.get("name", "")).strip() or f"Season {sid}"
-            label = f"{name} (id {sid}, {st})"
-            if cur and cur not in str(sid):
-                continue
-            choices.append(app_commands.Choice(name=label[:100], value=str(sid)))
-
-        def keyf(c: app_commands.Choice):
-            v = safe_int(c.value, 0)
-            is_active = ("active" in c.name.lower()) or ("open" in c.name.lower())
-            return (0 if is_active else 1, v)
-
-        choices.sort(key=keyf)
-        return choices[:25]
-    except Exception:
-        base = [str(i) for i in range(1, 21)]
-        cur = str(current).strip()
-        if cur:
-            base = [x for x in base if x.startswith(cur)]
-        return [app_commands.Choice(name=f"Season {x}", value=x) for x in base[:25]]
-
-
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
-    """
-    Retorna APENAS ciclos OPEN existentes na aba Cycles (season atual).
-    CACHEADO para não estourar tempo do autocomplete.
-    """
     try:
-        _, cycles = get_open_cycles_cached(max_age_seconds=60)
-
+        _, cycles = get_open_cycles_cached()
         cur = str(current or "").strip()
         if cur:
             cycles = [c for c in cycles if cur in str(c)]
-
-        cycles = cycles[:25]
-        return [app_commands.Choice(name=f"Ciclo {c} (open)", value=str(c)) for c in cycles]
-    except Exception:
-        return []
-
-
-async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
-    """
-    Match_id pending do usuário, na season atual (independente do ciclo).
-    """
-    try:
-        user_id = str(interaction.user.id)
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return []
-
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
-
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        nick_map = build_players_nick_map(ws_players)
-
-        rows = ws_matches.get_all_records()
-        cur = str(current).strip().lower()
-
-        out = []
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if not as_bool(r.get("active", "TRUE")):
-                continue
-            if str(r.get("confirmed_status", "")).strip().lower() != "pending":
-                continue
-
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
-            if user_id not in (a, b):
-                continue
-
-            mid = str(r.get("match_id", "")).strip()
-            if not mid:
-                continue
-            if cur and cur not in mid.lower():
-                continue
-
-            pod = str(r.get("pod", "")).strip()
-            cyc = safe_int(r.get("cycle", 0), 0)
-            na = nick_map.get(a, a)
-            nb = nick_map.get(b, b)
-            label = f"S{season_id} C{cyc} Pod {pod}: {na} vs {nb} | {mid}"
-            out.append(app_commands.Choice(name=label[:100], value=mid))
-
-        return out[:25]
-    except Exception:
-        return []
-
-
-async def ac_match_id_any(interaction: discord.Interaction, current: str):
-    """
-    Qualquer match_id (season atual), qualquer status.
-    """
-    try:
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return []
-
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-
-        rows = ws_matches.get_all_records()
-        cur = str(current).strip().lower()
-        out = []
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            mid = str(r.get("match_id", "")).strip()
-            if not mid:
-                continue
-            if cur and cur not in mid.lower():
-                continue
-            cyc = safe_int(r.get("cycle", 0), 0)
-            pod = str(r.get("pod", "")).strip()
-            st = str(r.get("confirmed_status", "")).strip().lower()
-            label = f"S{season_id} C{cyc} Pod {pod} [{st}] | {mid}"
-            out.append(app_commands.Choice(name=label[:100], value=mid))
-        return out[:25]
+        return [app_commands.Choice(name=f"Ciclo {c} (open)", value=str(c)) for c in cycles[:25]]
     except Exception:
         return []
 
 
 # =========================================================
-# Catálogo de comandos (para /comando)
-# IMPORTANTE: listar TODOS, mesmo se alguns forem "luxo"
+# /comando (com split seguro)
 # =========================================================
-COMMANDS_CATALOG = [
-    # Jogador
-    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto (com escolha de ciclo)."),
-    ("jogador", "/drop", "Sai do ciclo (somente enquanto estiver open)."),
-    ("jogador", "/deck", "Define seu deck (1 vez POR CICLO, escolhendo o ciclo)."),
-    ("jogador", "/decklist", "Define decklist (1 vez POR CICLO, escolhendo o ciclo)."),
-    ("jogador", "/deck_ver", "Mostra o deck do jogador em um ciclo."),
-    ("jogador", "/decklist_ver", "Mostra a decklist do jogador em um ciclo."),
-    ("jogador", "/pods_ver", "Mostra pods do ciclo."),
-    ("jogador", "/meus_matches", "Lista seus matches do ciclo (IDs, status e prazo 48h)."),
-    ("jogador", "/resultado", "Reporta resultado V-D-E (menu)."),
-    ("jogador", "/rejeitar", "Rejeita resultado pendente dentro de 48h."),
-    ("jogador", "/ranking", "Mostra ranking público do ciclo."),
-    ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
-    ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
-    ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
-
-    # ADM
-    ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
-    ("adm", "/ciclo_abrir", "Cria/abre um ciclo (status=open)."),
-    ("adm", "/ciclo_reabrir", "Reabre um ciclo (somente se NÃO estiver completed e sem PodsHistory)."),
-    ("adm", "/ciclo_fechar", "Fecha ciclo aberto por engano (status=locked)."),
-    ("adm", "/ciclo_encerrar", "Encerra ciclo (status=completed)."),
-    ("adm", "/ciclo_status", "Resumo do ciclo."),
-    ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo (locked)."),
-    ("adm", "/pods_publicar", "Publica pods do ciclo em um canal."),
-    ("adm", "/deadline", "Lista pendências (pending) próximas de expirar (48h)."),
-    ("adm", "/recalcular", "Auto-confirm (48h) + recalcula ranking do zero."),
-    ("adm", "/standings_publicar", "Publica ranking em canal configurado."),
-    ("adm", "/final", "Aplica 0-0-3 em matches sem report após prazo."),
-    ("adm", "/resultado_admin", "Edita/força resultado de match (admin)."),
-    ("adm", "/match_cancelar", "Inativa um match (active=FALSE)."),
-    ("adm", "/substituir_jogador", "Substitui jogador no ciclo (somente matches sem report)."),
-    ("adm", "/historico_confronto", "Histórico confirmado entre dois jogadores."),
-    ("adm", "/estatisticas", "Estatísticas gerais confirmadas do jogador."),
-    ("adm", "/export", "Exporta CSV (cycle/season)."),
-
-    # Organizador
-    ("organizador", "/estender", "Estende o prazo do ciclo em X dias corridos (exceção)."),
-
-    # Dono do servidor (Owner-only)
-    ("owner", "/season_abrir", "Cria/abre nova season e fecha a anterior (mantém histórico)."),
-    ("owner", "/season_fechar", "Fecha a season ativa (não apaga dados)."),
-    ("owner", "/season_status", "Mostra seasons e qual está ativa."),
-]
-
-def level_allows(user_level: str, cmd_level: str) -> bool:
-    order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
-    return order.get(user_level, 1) >= order.get(cmd_level, 1)
+def split_text_lines(text: str, limit: int = 1900):
+    lines = text.split("\n")
+    chunks = []
+    buf = ""
+    for ln in lines:
+        piece = ln + "\n"
+        if len(buf) + len(piece) > limit:
+            chunks.append(buf.rstrip())
+            buf = piece
+        else:
+            buf += piece
+    if buf.strip():
+        chunks.append(buf.rstrip())
+    return chunks
 
 
-# =========================
-# /comando (menu/lista) — split 2000 chars (blindado)
-# =========================
-@client.tree.command(name="comando", description="Mostra seus comandos disponíveis (de acordo com seu cargo).")
+async def send_followup_chunks(interaction, text, ephemeral=True):
+    chunks = split_text_lines(text)
+    if not chunks:
+        return
+
+    if not interaction.response.is_done():
+        await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
+    else:
+        await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+
+    for c in chunks[1:]:
+        await interaction.followup.send(c, ephemeral=ephemeral)
+
+
+@client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True)
-    except Exception:
-        pass
+    await interaction.response.defer(ephemeral=True)
+    user_level = await get_access_level(interaction)
 
-    try:
-        user_level = await get_access_level(interaction)  # helper do BLOCO 1
+    lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+    for lvl, cmd, desc in COMMANDS_CATALOG:
+        if level_allows(user_level, lvl):
+            lines.append(f"• **{cmd}** — {desc}")
 
-        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
-        for lvl, cmd, desc in COMMANDS_CATALOG:
-            if level_allows(user_level, lvl):
-                lines.append(f"• **{cmd}** — {desc}")
+    await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
 
-        text = "\n".join(lines)
-        await send_followup_chunks(interaction, text, ephemeral=True)
 
-    except Exception as e:
+# =========================================================
+# MODAL — Nome e Sobrenome
+# =========================================================
+class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
+    nome = discord.ui.TextInput(
+        label="Insira seu Nome e Sobrenome igual no WhatsApp, para facilitar a localização das Matchs",
+        required=True,
+        max_length=32,
+    )
+
+    def __init__(self, member_id: int):
+        super().__init__()
+        self.member_id = member_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.nome.value).strip()
+
+        if len(raw.split()) < 2:
+            return await interaction.response.send_message(
+                "⚠️ Informe Nome e Sobrenome.\nExemplo: João Silva",
+                ephemeral=True
+            )
+
+        # buscar membro no servidor (mesmo se for DM)
         try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Erro no /comando: {e}", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
+            member = guild.get_member(self.member_id) or await guild.fetch_member(self.member_id)
+        except Exception:
+            member = None
+
+        # salvar no Sheets
+        try:
+            sh = open_sheet()
+            ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=20)
+            ensure_sheet_columns(ws_players, PLAYERS_HEADER)
+            upsert_player(ws_players, str(self.member_id), raw)
         except Exception:
             pass
 
+        # tentar alterar nickname
+        nick_ok = False
+        if member:
+            try:
+                await member.edit(nick=raw, reason="Onboarding - Nome informado pelo jogador")
+                nick_ok = True
+            except Exception:
+                pass
+
+        if nick_ok:
+            await interaction.response.send_message(
+                f"✅ Cadastro concluído!\nSeu nome foi definido como **{raw}**.\n\n"
+                "Agora use `/inscrever`.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ Nome salvo: **{raw}**.\n\n"
+                "⚠️ Não consegui alterar seu apelido automaticamente.\n"
+                "Peça para um ADM ajustar se necessário.\n\n"
+                "Agora use `/inscrever`.",
+                ephemeral=True
+            )
+
 
 # =========================================================
-# ONBOARDING — Participar/Assistir
-# Regras finais:
-# - Participar: aplica SOMENTE cargo "Jogador"
-# - Assistir: não aplica cargo
+# ONBOARDING (Participar / Assistir)
 # =========================================================
 class OnboardingView(discord.ui.View):
-    def __init__(self, member_id: int, timeout: int = 3600):
-        super().__init__(timeout=timeout)
+    def __init__(self, member_id: int):
+        super().__init__(timeout=3600)
         self.member_id = member_id
 
-    async def _get_member(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return None
+    async def _get_member(self):
         try:
-            m = interaction.guild.get_member(self.member_id)
-            if m is None:
-                m = await interaction.guild.fetch_member(self.member_id)
-            return m
+            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
+            return guild.get_member(self.member_id) or await guild.fetch_member(self.member_id)
         except Exception:
             return None
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success)
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        m = await self._get_member(interaction)
-        if not m:
+        member = await self._get_member()
+        if not member:
             return await interaction.response.send_message("⚠️ Não consegui localizar seu usuário no servidor.", ephemeral=True)
 
-        role_jog = discord.utils.get(m.guild.roles, name=ROLE_JOGADOR)
+        role_jog = discord.utils.get(member.guild.roles, name=ROLE_JOGADOR)
         if not role_jog:
-            return await interaction.response.send_message(
-                "⚠️ Cargo **Jogador** não encontrado. Crie o cargo com esse nome exato ou ajuste ROLE_JOGADOR no Render.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("⚠️ Cargo Jogador não encontrado.", ephemeral=True)
 
-        try:
-            await m.add_roles(role_jog, reason="Onboarding: escolheu Participar")
-        except Exception:
-            return await interaction.response.send_message(
-                "❌ Eu não tenho permissão para atribuir cargos. Ajuste minhas permissões/cargo do bot.",
-                ephemeral=True
-            )
+        await member.add_roles(role_jog, reason="Onboarding - Participar")
 
-        await interaction.response.send_message(
-            "✅ Perfeito. Você entrou como **Jogador**.\n"
-            "Próximo passo: use `/inscrever` e depois `/deck` e `/decklist` (cada um 1 vez por ciclo).",
-            ephemeral=True
-        )
-
-        try:
-            await log_admin_guild(m.guild, f"👤 Onboarding: {m.mention} escolheu **Participar** (cargo Jogador aplicado).")
-        except Exception:
-            pass
-
-        self.stop()
+        # abre modal
+        await interaction.response.send_modal(NicknameModal(member.id))
 
     @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary)
     async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        m = await self._get_member(interaction)
         await interaction.response.send_message(
-            "✅ Tranquilo. Você entrou como **Assistir**.\n"
-            "Para jogar depois, peça para um ADM/Organizador aplicar o cargo **Jogador**.",
+            "✅ Você entrou como Assistir.\nPeça a um ADM o cargo Jogador caso queira participar.",
             ephemeral=True
         )
-        try:
-            if m and m.guild:
-                await log_admin_guild(m.guild, f"👀 Onboarding: {m.mention} escolheu **Assistir** (sem cargo).")
-        except Exception:
-            pass
         self.stop()
 
 
@@ -1617,88 +1356,31 @@ async def send_onboarding(member: discord.Member):
     text = (
         "⚓ **Bem-vindo ao Leme Holandês!**\n\n"
         "Você pretende:\n"
-        "✅ **Participar** (jogar a liga)\n"
-        "👀 **Assistir** (somente acompanhar)\n\n"
+        "✅ Participar (jogar a liga)\n"
+        "👀 Assistir (somente acompanhar)\n\n"
         "Escolha abaixo:"
     )
     view = OnboardingView(member.id)
 
-    # 1) tenta DM
     try:
         await member.send(text, view=view)
-        try:
-            await log_admin_guild(member.guild, f"📩 Onboarding enviado por DM para {member.mention}.")
-        except Exception:
-            pass
-        return
-    except Exception:
-        pass
-
-    # 2) fallback em canal configurado
-    if WELCOME_CHANNEL_ID and member.guild:
-        ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
-        if not ch:
-            try:
-                ch = await member.guild.fetch_channel(WELCOME_CHANNEL_ID)
-            except Exception:
-                ch = None
-        if ch:
-            try:
-                await ch.send(f"{member.mention}\n{text}", view=view)
-                try:
-                    await log_admin_guild(member.guild, f"💬 Onboarding enviado no canal {ch.mention} para {member.mention}.")
-                except Exception:
-                    pass
-                return
-            except Exception:
-                pass
-
-    # 3) se tudo falhar, só loga
-    try:
-        await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (DM e canal). Usuário: {member.mention}")
     except Exception:
         pass
 
 
 @client.event
 async def on_member_join(member: discord.Member):
-    if getattr(member, "bot", False):
+    if member.bot:
         return
     await send_onboarding(member)
 
 
 # =========================================================
-# Comandos básicos que sempre ajudam
+# Comando básico
 # =========================================================
 @client.tree.command(name="ping", description="Teste do bot")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("⚓ Pong! Bot online.")
-
-
-@client.tree.command(name="forcesync", description="(ADM) Força sincronização dos comandos no servidor")
-async def forcesync(interaction: discord.Interaction):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-
-    if not GUILD_ID:
-        return await interaction.response.send_message("⚠️ DISCORD_GUILD_ID não configurado.", ephemeral=True)
-
-    try:
-        await interaction.response.defer(ephemeral=True)
-    except Exception:
-        pass
-
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        await client.tree.sync(guild=guild)
-        await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ Falha ao sincronizar: {type(e).__name__} — {e}", ephemeral=True)
-
-
-# =========================================================
-# [BLOCO 5/8 termina aqui]
-# =========================================================
 
 
 
