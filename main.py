@@ -1126,8 +1126,10 @@ def recalculate_cycle(season_id: int, cycle: int):
 
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING (Participar/Assistir)
-# (REVISADO: /comando com split 2000 chars + ac_cycle_open só ciclos OPEN existentes)
+# (REVISADO: /comando com split 2000 chars + ac_cycle_open com CACHE (só OPEN existentes) + envio blindado)
 # =========================================================
+
+from time import time
 
 # =========================
 # Discord Bot (Client)
@@ -1216,7 +1218,6 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
         if len(c) <= limit:
             safe_chunks.append(c)
             continue
-        # quebra duro
         for i in range(0, len(c), limit):
             safe_chunks.append(c[i:i+limit])
 
@@ -1224,16 +1225,89 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
+    """
+    Envia texto em partes.
+    - Se a resposta ainda NÃO foi concluída, usa response.send_message no 1º chunk.
+    - Se já foi concluída (defer feito), usa followup.
+    """
     chunks = split_text_lines(text, limit=1900)
     if not chunks:
         return
-    # envia a primeira e depois as demais
-    for i, c in enumerate(chunks):
+
+    # 1º chunk: response se ainda não respondeu; senão followup
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
+        else:
+            await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+    except Exception:
+        # não trava o bot
+        pass
+
+    # demais chunks sempre followup
+    for c in chunks[1:]:
         try:
             await interaction.followup.send(c, ephemeral=ephemeral)
         except Exception:
-            # se falhar, não trava o bot
             pass
+
+
+# =========================================================
+# Autocomplete CACHE: ciclos OPEN (evita Sheets a cada tecla)
+# =========================================================
+_OPEN_CYCLES_CACHE = {
+    "ts": 0.0,
+    "season_id": 0,
+    "cycles": [],  # list[int]
+}
+
+def _load_open_cycles_from_sheets(sh) -> tuple[int, list[int]]:
+    """
+    Busca no Sheets os ciclos OPEN da season atual.
+    Retorna (season_id, [cycles_open]).
+    """
+    season_id = get_current_season_id(sh)
+    if season_id <= 0:
+        return 0, []
+
+    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+    rows = ws_cycles.get_all_records()
+    open_cycles: list[int] = []
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        st = str(r.get("status", "")).strip().lower()
+        if st != "open":
+            continue
+        c = safe_int(r.get("cycle", 0), 0)
+        if c > 0:
+            open_cycles.append(c)
+
+    open_cycles = sorted(set(open_cycles))
+    return season_id, open_cycles
+
+
+def get_open_cycles_cached(max_age_seconds: int = 60) -> tuple[int, list[int]]:
+    """
+    Retorna (season_id, cycles_open) usando cache.
+    Atualiza no máximo a cada max_age_seconds.
+    """
+    now = time()
+    if (_OPEN_CYCLES_CACHE["season_id"] > 0) and ((now - _OPEN_CYCLES_CACHE["ts"]) < max_age_seconds):
+        return _OPEN_CYCLES_CACHE["season_id"], list(_OPEN_CYCLES_CACHE["cycles"])
+
+    # tenta atualizar; se falhar, devolve cache antigo (rápido)
+    try:
+        sh = open_sheet()
+        sid, cycles = _load_open_cycles_from_sheets(sh)
+        _OPEN_CYCLES_CACHE["ts"] = now
+        _OPEN_CYCLES_CACHE["season_id"] = sid
+        _OPEN_CYCLES_CACHE["cycles"] = cycles
+        return sid, list(cycles)
+    except Exception:
+        return _OPEN_CYCLES_CACHE.get("season_id", 0), list(_OPEN_CYCLES_CACHE.get("cycles", []))
 
 
 # =========================================================
@@ -1262,7 +1336,6 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
                 continue
             choices.append(app_commands.Choice(name=label[:100], value=str(sid)))
 
-        # active/open primeiro (best-effort)
         def keyf(c: app_commands.Choice):
             v = safe_int(c.value, 0)
             is_active = ("active" in c.name.lower()) or ("open" in c.name.lower())
@@ -1280,38 +1353,18 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
 
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
-    Retorna APENAS ciclos que EXISTEM na aba Cycles e estão com status OPEN,
-    na season atual.
+    Retorna APENAS ciclos OPEN existentes na aba Cycles (season atual).
+    CACHEADO para não estourar tempo do autocomplete.
     """
     try:
-        sh = open_sheet()
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        _, cycles = get_open_cycles_cached(max_age_seconds=60)
 
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return []
-
-        rows = ws_cycles.get_all_records()
-        cur = str(current).strip()
-
-        open_cycles: list[int] = []
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            cyc = safe_int(r.get("cycle", 0), 0)
-            st = str(r.get("status", "")).strip().lower()
-            if cyc <= 0:
-                continue
-            if st != "open":
-                continue
-            open_cycles.append(cyc)
-
-        open_cycles = sorted(set(open_cycles))
+        cur = str(current or "").strip()
         if cur:
-            open_cycles = [c for c in open_cycles if str(c).startswith(cur)]
+            cycles = [c for c in cycles if cur in str(c)]
 
-        return [app_commands.Choice(name=f"Ciclo {c} (open)", value=str(c)) for c in open_cycles[:25]]
+        cycles = cycles[:25]
+        return [app_commands.Choice(name=f"Ciclo {c} (open)", value=str(c)) for c in cycles]
     except Exception:
         return []
 
@@ -1458,7 +1511,7 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
 
 
 # =========================
-# /comando (menu/lista) — REVISADO: split de 2000 chars
+# /comando (menu/lista) — split 2000 chars (blindado)
 # =========================
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis (de acordo com seu cargo).")
 async def comando(interaction: discord.Interaction):
@@ -1476,20 +1529,21 @@ async def comando(interaction: discord.Interaction):
                 lines.append(f"• **{cmd}** — {desc}")
 
         text = "\n".join(lines)
-
-        # manda em partes para não estourar limite de 2000 chars
         await send_followup_chunks(interaction, text, ephemeral=True)
 
     except Exception as e:
         try:
-            await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Erro no /comando: {e}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
         except Exception:
             pass
 
 
 # =========================================================
-# ONBOARDING — Participar/Assistir (SEM DUPLICAR NO BLOCO 8)
-# Regras finais (confirmadas por você):
+# ONBOARDING — Participar/Assistir
+# Regras finais:
 # - Participar: aplica SOMENTE cargo "Jogador"
 # - Assistir: não aplica cargo
 # =========================================================
