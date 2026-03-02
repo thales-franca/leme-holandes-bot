@@ -2596,174 +2596,187 @@ async def rejeitar(interaction: discord.Interaction, match_id: str, motivo: str 
 
 
 # =========================================================
-# [BLOCO 8/8 — CORRIGIDO] — RANKING + EXPORT + DEADLINE + FINAL + ADMIN TOOLS + ONBOARDING + /comando
-# (cole este BLOCO 8/8 por cima do seu BLOCO 8 atual)
-#
-# Correções importantes:
-# 1) Garante que NÃO exista duplicidade de on_member_join (apenas UM listener).
-# 2) /comando lista TODOS os comandos conforme seu escopo (Jogador / ADM / Dono).
-# 3) Mantém comandos:
-#    - /ranking
-#    - /ranking_geral
-#    - /export (equivalente ao exportar_ciclo)
-#    - /deadline
-#    - /final
-#    - /forcesync
-#    - /historico_confronto
-#    - /estatisticas
+# [BLOCO 8/8] — ADMIN/LUXO + RANKINGS + EXPORT + START (REVISADO / SEM DUPLICATAS)
+# (cole abaixo do BLOCO 7/8)
 # =========================================================
+
+# =========================================================
+# Batch helpers (reduz chamadas ao Google Sheets)
+# =========================================================
+def _chunk_list(items, size: int):
+    size = max(1, int(size))
+    for i in range(0, len(items), size):
+        yield items[i:i+size]
+
+
+def ws_batch_update(ws, updates: list[dict], chunk: int = 400):
+    """
+    updates: [{"range": "A2", "values": [["x"]]}, ...]
+    Faz batch_update em chunks para evitar limite de payload.
+    """
+    if not updates:
+        return
+    for part in _chunk_list(updates, chunk):
+        ws.batch_update(part, value_input_option="USER_ENTERED")
 
 
 # =========================================================
-# /ranking — ranking do ciclo (season atual)
+# Auto-confirm (48h) — versão batch (substitui/otimiza)
+# - Confirma PENDING que já expirou auto_confirm_at
+# - Só se houver reported_by_id (ou seja, alguém reportou)
 # =========================================================
-@client.tree.command(name="ranking", description="Mostra ranking público do ciclo.")
-@app_commands.describe(cycle="Ciclo (ex: 1)")
-async def ranking(interaction: discord.Interaction, cycle: int):
+def sweep_auto_confirm(sh, cycle: int) -> int:
+    season_id = require_current_season(sh)
+    ws = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+    col = ensure_sheet_columns(ws, MATCHES_REQUIRED_COLS)
+
+    vals = ws.get_all_values()
+    if len(vals) <= 1:
+        return 0
+
+    nowu = utc_now_dt()
+    nowb = now_br_str()
+    updates = []
+    changed = 0
+
+    # map coluna -> letra uma vez
+    c_a = col_letter(col["a_games_won"])
+    c_b = col_letter(col["b_games_won"])
+    c_d = col_letter(col["draw_games"])
+    c_rt = col_letter(col["result_type"])
+    c_cs = col_letter(col["confirmed_status"])
+    c_rep = col_letter(col["reported_by_id"])
+    c_conf = col_letter(col["confirmed_by_id"])
+    c_upd = col_letter(col["updated_at"])
+    c_ac = col_letter(col["auto_confirm_at"])
+    c_sid = col_letter(col["season_id"])
+    c_cyc = col_letter(col["cycle"])
+    c_act = col_letter(col["active"])
+
+    for rown in range(2, len(vals) + 1):
+        r = vals[rown - 1]
+
+        def getv(key: str) -> str:
+            idx = col[key]
+            return r[idx] if idx < len(r) else ""
+
+        if safe_int(getv("season_id"), 0) != season_id:
+            continue
+        if safe_int(getv("cycle"), 0) != cycle:
+            continue
+        if not as_bool(getv("active") or "TRUE"):
+            continue
+
+        st = (getv("confirmed_status") or "").strip().lower()
+        if st != "pending":
+            continue
+
+        rep = (getv("reported_by_id") or "").strip()
+        if not rep:
+            continue
+
+        ac = parse_iso_dt(getv("auto_confirm_at") or "")
+        if not ac:
+            continue
+
+        if nowu <= ac:
+            continue
+
+        # expirou -> confirma
+        updates.append({"range": f"{c_cs}{rown}", "values": [["confirmed"]]})
+        updates.append({"range": f"{c_conf}{rown}", "values": [[rep]]})
+        updates.append({"range": f"{c_upd}{rown}", "values": [[nowb]]})
+        changed += 1
+
+    ws_batch_update(ws, updates, chunk=400)
+    return changed
+
+
+# =========================================================
+# ADMIN: editar resultado + ALIAS /resultado_admin
+# =========================================================
+@client.tree.command(name="resultado_admin", description="(ADM) Edita resultado de um match e opcionalmente confirma (alias).")
+@app_commands.autocomplete(match_id=ac_match_id_any)
+@app_commands.describe(match_id="match_id", placar="Placar V-D-E do player_a (formato do match)", confirmar="confirmar agora?")
+@app_commands.choices(
+    placar=[
+        app_commands.Choice(name="2-0-0", value="2-0-0"),
+        app_commands.Choice(name="2-1-0", value="2-1-0"),
+        app_commands.Choice(name="1-2-0", value="1-2-0"),
+        app_commands.Choice(name="0-2-0", value="0-2-0"),
+        app_commands.Choice(name="1-1-1 (empate jogado)", value="1-1-1"),
+        app_commands.Choice(name="0-0-0 (empate sem jogo)", value="0-0-0"),
+        app_commands.Choice(name="0-0-3 (empate intencional)", value="0-0-3"),
+    ],
+    confirmar=[
+        app_commands.Choice(name="Sim (confirmar)", value="yes"),
+        app_commands.Choice(name="Não (manter pending)", value="no"),
+    ]
+)
+async def resultado_admin(interaction: discord.Interaction, match_id: str, placar: app_commands.Choice[str], confirmar: app_commands.Choice[str]):
+    return await admin_resultado_editar(interaction, match_id, placar, confirmar)
+
+
+# =========================================================
+# ADMIN: cancelar/inativar match + ALIAS /match_cancelar
+# =========================================================
+@client.tree.command(name="match_cancelar", description="(ADM) Inativa um match (active=FALSE) (alias).")
+@app_commands.autocomplete(match_id=ac_match_id_any)
+@app_commands.describe(match_id="match_id", motivo="Opcional")
+async def match_cancelar(interaction: discord.Interaction, match_id: str, motivo: str = ""):
+    return await admin_resultado_cancelar(interaction, match_id, motivo)
+
+
+# =========================================================
+# /deadline (pendências próximas de expirar)
+# =========================================================
+@client.tree.command(name="deadline", description="Lista resultados pendentes próximos de expirar (48h).")
+@app_commands.describe(cycle="Ciclo (ex: 1)", horas="Janela (ex: 12)")
+async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12):
     await interaction.response.defer(ephemeral=True)
     try:
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=20000, cols=30)
-        rows = ws.get_all_records()
+        ws = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+        ensure_sheet_columns(ws, MATCHES_REQUIRED_COLS)
 
-        data = []
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        nick_map = build_players_nick_map(ws_players)
+
+        nowu = utc_now_dt()
+        hours = max(1, min(horas, 48))
+        limit_dt = nowu + timedelta(hours=hours)
+
+        rows = ws.get_all_records()
+        items = []
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
                 continue
             if safe_int(r.get("cycle", 0), 0) != cycle:
                 continue
-            data.append(r)
-
-        if not data:
-            return await interaction.followup.send("Nenhum ranking encontrado para esse ciclo.", ephemeral=True)
-
-        data.sort(key=lambda x: (
-            -safe_int(x.get("points", 0), 0),
-            -float(x.get("omw", 0)),
-            -float(x.get("gw", 0)),
-            -float(x.get("ogw", 0))
-        ))
-
-        out = [f"🏆 Ranking — Season {season_id} | Ciclo {cycle}"]
-        pos = 1
-        for r in data:
-            out.append(
-                f"{pos}. {r.get('player_name','?')} — "
-                f"{r.get('points',0)} pts | "
-                f"OMW {r.get('omw',0)} | GW {r.get('gw',0)} | OGW {r.get('ogw',0)} | "
-                f"J {r.get('jogos',0)}"
-            )
-            pos += 1
-
-        await interaction.followup.send("\n".join(out[:50]), ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /ranking: {e}", ephemeral=True)
-
-
-# =========================================================
-# /ranking_geral — season inteira
-# =========================================================
-@client.tree.command(name="ranking_geral", description="Mostra ranking geral da season atual.")
-async def ranking_geral(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        sh = open_sheet()
-        season_id = require_current_season(sh)
-
-        ws = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=20000, cols=30)
-        rows = ws.get_all_records()
-
-        data = [r for r in rows if safe_int(r.get("season_id", 0), 0) == season_id]
-
-        if not data:
-            return await interaction.followup.send("Nenhum ranking geral encontrado.", ephemeral=True)
-
-        data.sort(key=lambda x: -safe_int(x.get("points", 0), 0))
-
-        out = [f"🏆 Ranking Geral — Season {season_id}"]
-        pos = 1
-        for r in data:
-            out.append(f"{pos}. {r.get('player_name','?')} — {r.get('points',0)} pts")
-            pos += 1
-
-        await interaction.followup.send("\n".join(out[:50]), ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-
-# =========================================================
-# /export — exporta CSV do ciclo
-# =========================================================
-@client.tree.command(name="export", description="(ADM) Exporta CSV do ciclo.")
-@app_commands.describe(cycle="Ciclo (ex: 1)")
-async def export(interaction: discord.Interaction, cycle: int):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        sh = open_sheet()
-        season_id = require_current_season(sh)
-
-        ws = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        rows = ws.get_all_records()
-
-        data = [r for r in rows if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle]
-
-        if not data:
-            return await interaction.followup.send("Nada para exportar.", ephemeral=True)
-
-        import csv, io
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=data[0].keys())
-        writer.writeheader()
-        writer.writerows(data)
-
-        file = discord.File(fp=io.BytesIO(output.getvalue().encode()), filename=f"S{season_id}_C{cycle}.csv")
-        await interaction.followup.send("📁 Export gerado:", file=file, ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /export: {e}", ephemeral=True)
-
-
-# =========================================================
-# /deadline — matches próximos de expirar 48h
-# =========================================================
-@client.tree.command(name="deadline", description="(ADM) Lista pendências próximas de expirar 48h.")
-async def deadline(interaction: discord.Interaction):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        sh = open_sheet()
-        season_id = require_current_season(sh)
-        ws = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        rows = ws.get_all_records()
-
-        nowu = utc_now_dt()
-        out = ["⏳ Pendências próximas de expirar:"]
-
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+            if not as_bool(r.get("active", "TRUE")):
                 continue
-            if str(r.get("confirmed_status","")).lower() != "pending":
+            if str(r.get("confirmed_status", "")).strip().lower() != "pending":
                 continue
-            ac = parse_iso_dt(r.get("auto_confirm_at",""))
-            if ac:
-                secs = (ac - nowu).total_seconds()
-                if 0 < secs <= 3600*6:
-                    out.append(f"{r.get('match_id')} expira em {int(secs//3600)}h")
+            if not str(r.get("reported_by_id", "")).strip():
+                continue
+            ac = parse_iso_dt(r.get("auto_confirm_at", "") or "")
+            if not ac:
+                continue
+            if ac <= limit_dt:
+                a = str(r.get("player_a_id", "")).strip()
+                b = str(r.get("player_b_id", "")).strip()
+                pod = str(r.get("pod", "")).strip()
+                mid = str(r.get("match_id", "")).strip()
+                items.append((ac, f"• `{mid}` Pod {pod}: {nick_map.get(a,a)} vs {nick_map.get(b,b)} | expira {ac.isoformat()} UTC"))
 
-        if len(out) == 1:
-            out.append("Nenhuma.")
+        if not items:
+            return await interaction.followup.send(f"✅ Nenhum pending expira nas próximas {hours}h (S{season_id} C{cycle}).", ephemeral=True)
 
+        items.sort(key=lambda x: x[0])
+        out = [f"⏰ Pendências (Season {season_id} / Ciclo {cycle}) que expiram em até {hours}h:"]
+        out.extend([x[1] for x in items[:40]])
         await interaction.followup.send("\n".join(out), ephemeral=True)
 
     except Exception as e:
@@ -2771,11 +2784,141 @@ async def deadline(interaction: discord.Interaction):
 
 
 # =========================================================
-# /final — aplica 0-0-3 após prazo do ciclo
+# /fechar_resultados_atrasados (comando separado)
 # =========================================================
-@client.tree.command(name="final", description="(ADM) Aplica 0-0-3 em matches sem report após prazo do ciclo.")
+@client.tree.command(name="fechar_resultados_atrasados", description="(ADM) Força auto-confirm expirados (48h) no ciclo.")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def fechar_resultados_atrasados(interaction: discord.Interaction, cycle: int):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        _ = require_current_season(sh)
+        changed = sweep_auto_confirm(sh, cycle)
+        await interaction.followup.send(f"✅ Auto-confirm aplicado. Alterados: **{changed}**", ephemeral=True)
+
+        try:
+            season_id = require_current_season(sh)
+            await log_admin(interaction.guild, f"🕒 Auto-confirm manual: S{season_id} C{cycle} | alterados {changed}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+
+# =========================================================
+# /final — versão batch (blindado p/ até 90 matches e além)
+# Aplica 0-0-3 em matches sem report após prazo do ciclo.
+# =========================================================
+@client.tree.command(name="final", description="(ADM) Aplica 0-0-3 em todos os matches sem resultado reportado no ciclo (após prazo).")
 @app_commands.describe(cycle="Ciclo (ex: 1)")
 async def final(interaction: discord.Interaction, cycle: int):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=20000, cols=25)
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+        start_str, deadline_str, max_pod_size, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
+        if not deadline_str:
+            return await interaction.followup.send("❌ Este ciclo ainda não tem pods/prazo.", ephemeral=True)
+
+        set_cycle_times(ws_cycles, season_id, cycle, start_str, deadline_str)
+
+        deadline_dt = parse_br_dt(deadline_str)
+        if deadline_dt and now_br_dt() < deadline_dt:
+            return await interaction.followup.send(
+                f"❌ Ainda não chegou o fim do ciclo.\nFim: **{deadline_str} (BR)**\nUse `/prazo` para ver.",
+                ephemeral=True
+            )
+
+        vals = ws_matches.get_all_values()
+        if len(vals) <= 1:
+            return await interaction.followup.send("Nada para finalizar (Matches vazio).", ephemeral=True)
+
+        nowb = now_br_str()
+        updates = []
+        changed = 0
+
+        # colunas -> letras
+        c_sid = col_letter(col["season_id"])
+        c_cyc = col_letter(col["cycle"])
+        c_act = col_letter(col["active"])
+        c_rep = col_letter(col["reported_by_id"])
+
+        c_agw = col_letter(col["a_games_won"])
+        c_bgw = col_letter(col["b_games_won"])
+        c_drw = col_letter(col["draw_games"])
+        c_rt = col_letter(col["result_type"])
+        c_cs = col_letter(col["confirmed_status"])
+        c_cb = col_letter(col["confirmed_by_id"])
+        c_upd = col_letter(col["updated_at"])
+
+        for rown in range(2, len(vals) + 1):
+            r = vals[rown - 1]
+
+            def getc(name: str) -> str:
+                idx = col[name]
+                return r[idx] if idx < len(r) else ""
+
+            if safe_int(getc("season_id"), 0) != season_id:
+                continue
+            if safe_int(getc("cycle"), 0) != cycle:
+                continue
+            if not as_bool(getc("active") or "TRUE"):
+                continue
+
+            rep = (getc("reported_by_id") or "").strip()
+            if rep:
+                continue
+
+            # aplica 0-0-3 + confirma
+            updates.append({"range": f"{c_agw}{rown}", "values": [["0"]]})
+            updates.append({"range": f"{c_bgw}{rown}", "values": [["0"]]})
+            updates.append({"range": f"{c_drw}{rown}", "values": [["3"]]})
+            updates.append({"range": f"{c_rt}{rown}", "values": [["intentional_draw"]]})
+            updates.append({"range": f"{c_cs}{rown}", "values": [["confirmed"]]})
+            updates.append({"range": f"{c_rep}{rown}", "values": [["FINAL"]]})
+            updates.append({"range": f"{c_cb}{rown}", "values": [["FINAL"]]})
+            updates.append({"range": f"{c_upd}{rown}", "values": [[nowb]]})
+            changed += 1
+
+        ws_batch_update(ws_matches, updates, chunk=400)
+
+        await interaction.followup.send(
+            f"✅ Finalização aplicada no **Ciclo {cycle}** (Season {season_id}).\n"
+            f"Matches sem report que receberam **0-0-3**: **{changed}**\n"
+            "Agora rode `/recalcular` para atualizar o ranking.",
+            ephemeral=True
+        )
+
+        try:
+            await log_admin(interaction.guild, f"🏁 FINAL (batch): S{season_id} C{cycle} | 0-0-3 aplicados {changed}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /final: {e}", ephemeral=True)
+
+
+# =========================================================
+# /recalcular (auto-confirm + ranking)
+# =========================================================
+@client.tree.command(name="recalcular", description="(ADM) Auto-confirm (48h) + recalcula ranking do ciclo do zero.")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def recalcular(interaction: discord.Interaction, cycle: int):
     if not await is_admin_or_organizer(interaction):
         return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
@@ -2783,115 +2926,361 @@ async def final(interaction: discord.Interaction, cycle: int):
 
     try:
         sh = open_sheet()
-        season_id = require_current_season(sh)
-        ws = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        rows = ws.get_all_records()
-        count = 0
+        _ = require_current_season(sh)
 
-        for r in rows:
-            if safe_int(r.get("season_id",0),0) != season_id:
-                continue
-            if safe_int(r.get("cycle",0),0) != cycle:
-                continue
-            if str(r.get("confirmed_status","")).lower() != "pending":
-                continue
-            if not r.get("reported_by_id"):
-                # aplicar empate intencional
-                ws.update_cell(r["row"], MATCHES_REQUIRED_COLS.index("a_games_won")+1, "0")
-                count += 1
+        changed = sweep_auto_confirm(sh, cycle)
+        rows = recalculate_cycle(cycle)
 
-        await interaction.followup.send(f"✅ Aplicado 0-0-3 em {count} matches.", ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /final: {e}", ephemeral=True)
-
-
-# =========================================================
-# /forcesync
-# =========================================================
-@client.tree.command(name="forcesync", description="(ADM) Força sincronização dos comandos.")
-async def forcesync(interaction: discord.Interaction):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-    await client.tree.sync()
-    await interaction.response.send_message("🔄 Comandos sincronizados.", ephemeral=True)
-
-
-# =========================================================
-# /comando — menu inteligente por permissão
-# =========================================================
-@client.tree.command(name="comando", description="Mostra os comandos que você tem acesso.")
-async def comando(interaction: discord.Interaction):
-    is_admin = await is_admin_or_organizer(interaction)
-
-    jogador_cmds = [
-        "/inscrever", "/drop", "/deck", "/decklist",
-        "/pods_ver", "/meus_matches", "/confrontos_pendentes",
-        "/resultado", "/rejeitar", "/ranking", "/ranking_geral"
-    ]
-
-    adm_cmds = [
-        "/forcesync", "/ciclo_abrir", "/ciclo_fechar",
-        "/ciclo_encerrar", "/pods_gerar", "/deadline",
-        "/final", "/export"
-    ]
-
-    out = ["📌 Seus comandos disponíveis:\n"]
-    out.extend(jogador_cmds)
-
-    if is_admin:
-        out.append("\n🔐 Comandos ADM:")
-        out.extend(adm_cmds)
-
-    await interaction.response.send_message("\n".join(out), ephemeral=True)
-
-
-# =========================================================
-# ONBOARDING — apenas UM listener
-# =========================================================
-@client.event
-async def on_member_join(member: discord.Member):
-    if member.bot:
-        return
-
-    try:
-        view = discord.ui.View(timeout=None)
-
-        class Participar(discord.ui.Button):
-            def __init__(self):
-                super().__init__(label="Participar", style=discord.ButtonStyle.success)
-
-            async def callback(self, interaction: discord.Interaction):
-                role = discord.utils.get(interaction.guild.roles, name="Jogador")
-                if role:
-                    await interaction.user.add_roles(role)
-                await interaction.response.send_message("✅ Você agora é Jogador.", ephemeral=True)
-
-        class Assistir(discord.ui.Button):
-            def __init__(self):
-                super().__init__(label="Assistir", style=discord.ButtonStyle.secondary)
-
-            async def callback(self, interaction: discord.Interaction):
-                await interaction.response.send_message(
-                    "👀 Você entrou como espectador.\nPara jogar, peça cargo a um ADM.",
-                    ephemeral=True
-                )
-
-        view.add_item(Participar())
-        view.add_item(Assistir())
+        await interaction.followup.send(
+            f"✅ Recalculo concluído. Ciclo {cycle} atualizado.\n"
+            f"Auto-confirm (48h) feitos: **{changed}**\n"
+            f"Jogadores no Standings: **{len(rows)}**",
+            ephemeral=True
+        )
 
         try:
-            await member.send(
-                "🎉 Bem-vindo ao Leme Holandês!\nVocê pretende:",
-                view=view
-            )
-        except:
+            season_id = require_current_season(sh)
+            await log_admin(interaction.guild, f"🔁 RECALC: S{season_id} C{cycle} | auto-confirm {changed} | standings {len(rows)}")
+        except Exception:
             pass
 
-    except Exception:
-        pass
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erro no recálculo: {e}", ephemeral=True)
 
 
 # =========================================================
-# [BLOCO 8/8 — CORRIGIDO termina aqui]
+# /ranking (público) + /standings_publicar
+# =========================================================
+@client.tree.command(name="ranking", description="Mostra o ranking do ciclo (público).")
+@app_commands.describe(cycle="Ciclo (ex: 1)", top="Quantos mostrar (padrão 20)")
+async def ranking(interaction: discord.Interaction, cycle: int, top: int = 20):
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_st = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=10000, cols=30)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        nick_map = build_players_nick_map(ws_players)
+
+        data = ws_st.get_all_records()
+        rows = [r for r in data if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle]
+        if not rows:
+            return await interaction.followup.send("Sem standings para esse ciclo. Rode `/recalcular`.", ephemeral=False)
+
+        top = max(5, min(top, 50))
+        rows.sort(key=lambda r: safe_int(r.get("rank_position", 9999), 9999))
+
+        out = [f"🏆 **Ranking — Season {season_id} | Ciclo {cycle}** (Top {top})"]
+        out.append("pos | jogador | pts | OMW | GW | OGW")
+        out.append("--- | ------ | --- | --- | --- | ---")
+
+        for r in rows[:top]:
+            pid = str(r.get("player_id", "")).strip()
+            pos = str(r.get("rank_position", ""))
+            pts = str(r.get("match_points", ""))
+            omw = str(r.get("omw_percent", ""))
+            gw = str(r.get("gw_percent", ""))
+            ogw = str(r.get("ogw_percent", ""))
+            out.append(f"{pos} | {nick_map.get(pid, pid)} | {pts} | {omw} | {gw} | {ogw}")
+
+        await interaction.followup.send("\n".join(out), ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /ranking: {e}", ephemeral=False)
+
+
+@client.tree.command(name="standings_publicar", description="(ADM) Publica o ranking no canal configurado (ou no atual).")
+@app_commands.describe(cycle="Ciclo (ex: 1)", top="Quantos mostrar (padrão 20)")
+async def standings_publicar(interaction: discord.Interaction, cycle: int, top: int = 20):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_st = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=10000, cols=30)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        nick_map = build_players_nick_map(ws_players)
+
+        data = ws_st.get_all_records()
+        rows = [r for r in data if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle]
+        if not rows:
+            return await interaction.followup.send("Sem standings. Rode `/recalcular`.", ephemeral=True)
+
+        top = max(5, min(top, 50))
+        rows.sort(key=lambda r: safe_int(r.get("rank_position", 9999), 9999))
+
+        msg = [f"🏆 **Ranking — Season {season_id} | Ciclo {cycle}** (Top {top})"]
+        for r in rows[:top]:
+            pid = str(r.get("player_id", "")).strip()
+            msg.append(
+                f"{r.get('rank_position','?')}. {nick_map.get(pid,pid)} "
+                f"| pts {r.get('match_points','')} | OMW {r.get('omw_percent','')} | GW {r.get('gw_percent','')} | OGW {r.get('ogw_percent','')}"
+            )
+
+        channel = interaction.channel
+        if RANKING_CHANNEL_ID and interaction.guild:
+            ch = interaction.guild.get_channel(RANKING_CHANNEL_ID)
+            if ch:
+                channel = ch
+
+        await channel.send("\n".join(msg))
+        await interaction.followup.send("✅ Ranking publicado.", ephemeral=True)
+
+        try:
+            await log_admin(interaction.guild, f"📣 Ranking publicado: S{season_id} C{cycle} top {top}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+
+# =========================================================
+# /ranking_geral — SEASON atual (todos os ciclos somados)
+# =========================================================
+@client.tree.command(name="ranking_geral", description="Mostra ranking geral da SEASON atual (todos os ciclos somados).")
+@app_commands.describe(top="Quantos mostrar (padrão 30)")
+async def ranking_geral(interaction: discord.Interaction, top: int = 30):
+    await interaction.response.defer(ephemeral=False)
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        nick_map = build_players_nick_map(ws_players)
+
+        rows = ws_matches.get_all_records()
+
+        stats = {}
+        opponents = {}
+
+        def ensure(pid: str):
+            if pid not in stats:
+                stats[pid] = {
+                    "match_points": 0,
+                    "matches_played": 0,
+                    "game_wins": 0,
+                    "game_losses": 0,
+                    "game_draws": 0,
+                    "games_played": 0,
+                }
+                opponents[pid] = []
+
+        valid = []
+        for r in rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
+                continue
+            if not as_bool(r.get("active", "TRUE")):
+                continue
+            if str(r.get("result_type", "normal")).strip().lower() == "bye":
+                continue
+
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+            if not a or not b:
+                continue
+
+            ensure(a)
+            ensure(b)
+
+            a_gw = safe_int(r.get("a_games_won", 0), 0)
+            b_gw = safe_int(r.get("b_games_won", 0), 0)
+            d_g = safe_int(r.get("draw_games", 0), 0)
+            valid.append((a, b, a_gw, b_gw, d_g))
+
+        for a, b, a_gw, b_gw, d_g in valid:
+            stats[a]["matches_played"] += 1
+            stats[b]["matches_played"] += 1
+
+            stats[a]["game_wins"] += a_gw
+            stats[a]["game_losses"] += b_gw
+            stats[a]["game_draws"] += d_g
+            stats[a]["games_played"] += (a_gw + b_gw + d_g)
+
+            stats[b]["game_wins"] += b_gw
+            stats[b]["game_losses"] += a_gw
+            stats[b]["game_draws"] += d_g
+            stats[b]["games_played"] += (a_gw + b_gw + d_g)
+
+            if a_gw > b_gw:
+                stats[a]["match_points"] += 3
+            elif b_gw > a_gw:
+                stats[b]["match_points"] += 3
+            else:
+                stats[a]["match_points"] += 1
+                stats[b]["match_points"] += 1
+
+            opponents[a].append(b)
+            opponents[b].append(a)
+
+        if not stats:
+            return await interaction.followup.send("Sem matches confirmados na season atual.", ephemeral=False)
+
+        mwp = {}
+        gwp = {}
+        for pid, s in stats.items():
+            mp = s["match_points"]
+            mplayed = s["matches_played"]
+            mwp[pid] = 1/3 if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
+
+            gplayed = s["games_played"]
+            if gplayed == 0:
+                gwp[pid] = 1/3
+            else:
+                gwp_raw = (s["game_wins"] + 0.5 * s["game_draws"]) / float(gplayed)
+                gwp[pid] = floor_333(gwp_raw)
+
+        omw = {}
+        ogw = {}
+        for pid in stats.keys():
+            opps = opponents.get(pid, [])
+            if not opps:
+                omw[pid] = 1/3
+                ogw[pid] = 1/3
+            else:
+                omw_vals = [mwp.get(oid, 1/3) for oid in opps]
+                ogw_vals = [gwp.get(oid, 1/3) for oid in opps]
+                omw[pid] = sum(omw_vals) / len(omw_vals)
+                ogw[pid] = sum(ogw_vals) / len(ogw_vals)
+
+        table = []
+        for pid, s in stats.items():
+            table.append({
+                "pid": pid,
+                "pts": s["match_points"],
+                "omw": pct1(omw[pid]),
+                "gw": pct1(gwp[pid]),
+                "ogw": pct1(ogw[pid]),
+                "j": s["matches_played"],
+            })
+
+        table.sort(key=lambda r: (r["pts"], r["omw"], r["gw"], r["ogw"]), reverse=True)
+
+        top = max(10, min(top, 60))
+        out = [f"🏆 **Ranking Geral — Season {season_id}** (Top {top})"]
+        out.append("pos | jogador | pts | OMW | GW | OGW | J")
+        out.append("--- | ------ | --- | --- | --- | --- | ---")
+        for i, r in enumerate(table[:top], start=1):
+            out.append(f"{i} | {nick_map.get(r['pid'], r['pid'])} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}")
+
+        await interaction.followup.send("\n".join(out), ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /ranking_geral: {e}", ephemeral=False)
+
+
+# =========================================================
+# /export (alias do exportar_ciclo) — mantém seu nome preferido
+# =========================================================
+@client.tree.command(name="export", description="(ADM) Exporta CSV do ciclo (Matches e Standings).")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def export_cmd(interaction: discord.Interaction, cycle: int):
+    return await exportar_ciclo(interaction, cycle)
+
+
+# =========================================================
+# /ciclo_status (alias) — você pediu esse nome
+# =========================================================
+@client.tree.command(name="ciclo_status", description="Mostra status geral do ciclo (alias).")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def ciclo_status(interaction: discord.Interaction, cycle: int):
+    return await status_ciclo(interaction, cycle)
+
+
+# =========================================================
+# /ciclo_fechar e /ciclo_reabrir (blindado contra erro humano)
+# =========================================================
+@client.tree.command(name="ciclo_fechar", description="(ADM) Fecha um ciclo OPEN por engano (status=locked).")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def ciclo_fechar(interaction: discord.Interaction, cycle: int):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        st = require_cycle_exists_and_get_status(ws_cycles, season_id, cycle)
+        if st == "completed":
+            return await interaction.followup.send("❌ Ciclo COMPLETED não pode ser fechado/reaberto por este comando.", ephemeral=True)
+
+        set_cycle_status(ws_cycles, season_id, cycle, "locked")
+        await interaction.followup.send(f"✅ Ciclo {cycle} (Season {season_id}) fechado: status = LOCKED.", ephemeral=True)
+
+        try:
+            await log_admin(interaction.guild, f"🔒 Ciclo fechado manualmente: S{season_id} C{cycle} (por {interaction.user.mention})")
+        except Exception:
+            pass
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+
+@client.tree.command(name="ciclo_reabrir", description="(ADM) Reabre ciclo para OPEN (apenas se não houver PodsHistory e não estiver completed).")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def ciclo_reabrir(interaction: discord.Interaction, cycle: int):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=20000, cols=25)
+
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
+
+        st = require_cycle_exists_and_get_status(ws_cycles, season_id, cycle)
+        if st == "completed":
+            return await interaction.followup.send("❌ Ciclo COMPLETED não pode ser reaberto.", ephemeral=True)
+
+        pods_rows = ws_pods.get_all_records()
+        has_pods = any(safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle for r in pods_rows)
+        if has_pods:
+            return await interaction.followup.send(
+                "❌ Não posso reabrir: este ciclo já tem PodsHistory.\n"
+                "Se precisa corrigir algo, use comandos administrativos (cancelar match, substituir jogador, etc).",
+                ephemeral=True
+            )
+
+        set_cycle_status(ws_cycles, season_id, cycle, "open")
+        await interaction.followup.send(f"✅ Ciclo {cycle} (Season {season_id}) reaberto: status = OPEN.", ephemeral=True)
+
+        try:
+            await log_admin(interaction.guild, f"🔓 Ciclo reaberto: S{season_id} C{cycle} (por {interaction.user.mention})")
+        except Exception:
+            pass
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+
+# =========================
+# START
+# =========================
+if not DISCORD_TOKEN:
+    raise RuntimeError("Faltou a variável DISCORD_TOKEN no ambiente.")
+
+keep_alive()
+client.run(DISCORD_TOKEN)
+
+# =========================================================
+# [BLOCO 8/8 termina aqui]
 # =========================================================
