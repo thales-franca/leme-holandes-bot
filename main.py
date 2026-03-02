@@ -1126,7 +1126,7 @@ def recalculate_cycle(season_id: int, cycle: int):
 
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING (Participar/Assistir)
-# (REVISADO FINAL: ac_cycle_open agora só lista ciclos OPEN reais da aba Cycles)
+# (REVISADO: /comando com split 2000 chars + ac_cycle_open só ciclos OPEN existentes)
 # =========================================================
 
 # =========================
@@ -1187,6 +1187,56 @@ def build_players_nick_map(ws_players) -> dict[str, str]:
 
 
 # =========================================================
+# Helper: split de mensagens (limite Discord 2000 chars)
+# =========================================================
+def split_text_lines(text: str, limit: int = 1900) -> list[str]:
+    """
+    Divide texto em partes <= limit, preservando quebras de linha.
+    Usamos 1900 para folga.
+    """
+    lines = text.split("\n")
+    chunks: list[str] = []
+    buf = ""
+
+    for ln in lines:
+        piece = (ln + "\n")
+        if len(buf) + len(piece) > limit:
+            if buf.strip():
+                chunks.append(buf.rstrip("\n"))
+            buf = piece
+        else:
+            buf += piece
+
+    if buf.strip():
+        chunks.append(buf.rstrip("\n"))
+
+    # fallback extremo: se uma linha isolada for gigante
+    safe_chunks: list[str] = []
+    for c in chunks:
+        if len(c) <= limit:
+            safe_chunks.append(c)
+            continue
+        # quebra duro
+        for i in range(0, len(c), limit):
+            safe_chunks.append(c[i:i+limit])
+
+    return safe_chunks
+
+
+async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
+    chunks = split_text_lines(text, limit=1900)
+    if not chunks:
+        return
+    # envia a primeira e depois as demais
+    for i, c in enumerate(chunks):
+        try:
+            await interaction.followup.send(c, ephemeral=ephemeral)
+        except Exception:
+            # se falhar, não trava o bot
+            pass
+
+
+# =========================================================
 # Autocomplete helpers (season/cycle/match)
 # =========================================================
 async def ac_season_active(interaction: discord.Interaction, current: str):
@@ -1212,10 +1262,10 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
                 continue
             choices.append(app_commands.Choice(name=label[:100], value=str(sid)))
 
-        # active primeiro (best-effort)
+        # active/open primeiro (best-effort)
         def keyf(c: app_commands.Choice):
             v = safe_int(c.value, 0)
-            is_active = ("open" in c.name.lower())
+            is_active = ("active" in c.name.lower()) or ("open" in c.name.lower())
             return (0 if is_active else 1, v)
 
         choices.sort(key=keyf)
@@ -1230,10 +1280,8 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
 
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
-    Ciclos OPEN REAIS da season atual:
-    - Só lista ciclos que EXISTEM na aba Cycles
-    - status == open
-    - Sem "sugestão" e sem ciclo futuro inexistente
+    Retorna APENAS ciclos que EXISTEM na aba Cycles e estão com status OPEN,
+    na season atual.
     """
     try:
         sh = open_sheet()
@@ -1260,7 +1308,6 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
             open_cycles.append(cyc)
 
         open_cycles = sorted(set(open_cycles))
-
         if cur:
             open_cycles = [c for c in open_cycles if str(c).startswith(cur)]
 
@@ -1411,7 +1458,7 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
 
 
 # =========================
-# /comando (menu/lista)
+# /comando (menu/lista) — REVISADO: split de 2000 chars
 # =========================
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis (de acordo com seu cargo).")
 async def comando(interaction: discord.Interaction):
@@ -1422,20 +1469,27 @@ async def comando(interaction: discord.Interaction):
 
     try:
         user_level = await get_access_level(interaction)  # helper do BLOCO 1
-        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
 
+        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
         for lvl, cmd, desc in COMMANDS_CATALOG:
             if level_allows(user_level, lvl):
                 lines.append(f"• **{cmd}** — {desc}")
 
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        text = "\n".join(lines)
+
+        # manda em partes para não estourar limite de 2000 chars
+        await send_followup_chunks(interaction, text, ephemeral=True)
+
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+        try:
+            await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+        except Exception:
+            pass
 
 
 # =========================================================
 # ONBOARDING — Participar/Assistir (SEM DUPLICAR NO BLOCO 8)
-# Regras finais:
+# Regras finais (confirmadas por você):
 # - Participar: aplica SOMENTE cargo "Jogador"
 # - Assistir: não aplica cargo
 # =========================================================
