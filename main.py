@@ -1121,6 +1121,7 @@ def recalculate_cycle(season_id: int, cycle: int):
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING
 # (VERSÃO FINAL — Modal de Nome + Cache Autocomplete + Envio Blindado + /forcesync robusto)
+# FIX: localizar membro mesmo em DM (não depender só do GUILD_ID)
 # =========================================================
 
 import asyncio
@@ -1138,7 +1139,6 @@ class LemeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # sync dos comandos (guild-scoped quando possível)
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1147,7 +1147,6 @@ class LemeBot(discord.Client):
             else:
                 await self.tree.sync()
         except Exception:
-            # não derruba o bot se Discord estiver lento
             pass
 
 
@@ -1157,11 +1156,11 @@ client = LemeBot()
 # =========================
 # Config extra (onboarding)
 # =========================
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))  # fallback se DM falhar
+WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 
 
 # =========================
-# Logs (canal admin) — usa GUILD (sem depender do interaction)
+# Logs (admin)
 # =========================
 async def log_admin_guild(guild: discord.Guild | None, text: str):
     if not guild:
@@ -1185,16 +1184,12 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
 # Helper: split de mensagens (limite Discord 2000 chars)
 # =========================================================
 def split_text_lines(text: str, limit: int = 1900) -> list[str]:
-    """
-    Divide texto em partes <= limit, preservando quebras de linha.
-    Usamos 1900 para folga.
-    """
     lines = str(text).split("\n")
     chunks: list[str] = []
     buf = ""
 
     for ln in lines:
-        piece = (ln + "\n")
+        piece = ln + "\n"
         if len(buf) + len(piece) > limit:
             if buf.strip():
                 chunks.append(buf.rstrip("\n"))
@@ -1205,7 +1200,6 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
     if buf.strip():
         chunks.append(buf.rstrip("\n"))
 
-    # fallback extremo: se uma linha isolada for gigante
     safe_chunks: list[str] = []
     for c in chunks:
         if len(c) <= limit:
@@ -1218,22 +1212,16 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
-    """
-    Envia em partes sem travar o bot caso o Discord descarte a interação.
-    """
     chunks = split_text_lines(text, limit=1900)
     if not chunks:
         return
 
-    # Se o handler já deu defer(), a resposta já está "done" e deve usar followup.
-    # Se ainda não, tenta responder normal.
     try:
         if not interaction.response.is_done():
             await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
         else:
             await interaction.followup.send(chunks[0], ephemeral=ephemeral)
     except Exception:
-        # se falhar, não tenta continuar
         return
 
     for c in chunks[1:]:
@@ -1244,20 +1232,52 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 
 
 # =========================================================
-# Players upsert (seguro) — grava nickname no Sheets
+# Localizar membro: funciona em clique no servidor OU em DM
+# =========================================================
+async def find_member_anywhere(interaction: discord.Interaction, member_id: int) -> tuple[discord.Guild | None, discord.Member | None]:
+    # 1) Se a interação veio de dentro do servidor, é o melhor caso
+    if interaction.guild:
+        try:
+            m = interaction.guild.get_member(member_id)
+            if m is None:
+                m = await interaction.guild.fetch_member(member_id)
+            return interaction.guild, m
+        except Exception:
+            return interaction.guild, None
+
+    # 2) Se veio por DM, tenta GUILD_ID (se configurado)
+    if GUILD_ID:
+        try:
+            g = client.get_guild(GUILD_ID)
+            if g is None:
+                g = await client.fetch_guild(GUILD_ID)
+            try:
+                m = g.get_member(member_id)
+                if m is None:
+                    m = await g.fetch_member(member_id)
+                return g, m
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 3) Último recurso: varre todos os servidores onde o bot está
+    for g in list(client.guilds):
+        try:
+            m = g.get_member(member_id)
+            if m is None:
+                m = await g.fetch_member(member_id)
+            return g, m
+        except Exception:
+            continue
+
+    return None, None
+
+
+# =========================================================
+# Players upsert (Sheets)
 # =========================================================
 def upsert_player(ws_players, discord_id: str, nickname: str):
-    """
-    Atualiza ou cria jogador na aba Players:
-    - discord_id (A)
-    - nick (B)
-    - name (C) (opcional)
-    - notes (D) (opcional)
-    - status (E) (opcional)
-    - rating (F) (opcional)
-    - created_at (G)
-    - updated_at (H)
-    """
     did = str(discord_id).strip()
     nick = str(nickname).strip()
     if not did or not nick:
@@ -1266,9 +1286,8 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
     col = ensure_sheet_columns(ws_players, PLAYERS_HEADER)
     rows = ws_players.get_all_values()
 
-    # procura discord_id na coluna A
-    found_row = None
     did_col = col.get("discord_id", 0)
+    found_row = None
     for i in range(2, len(rows) + 1):
         r = rows[i - 1]
         v = r[did_col] if did_col < len(r) else ""
@@ -1279,7 +1298,6 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
     nowc = now_br_str()
 
     if found_row:
-        # atualiza nick + updated_at
         try:
             ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
         except Exception:
@@ -1291,7 +1309,6 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
                 pass
         return
 
-    # cria novo
     row = [""] * len(PLAYERS_HEADER)
     row[col.get("discord_id", 0)] = did
     row[col.get("nick", 1)] = nick
@@ -1308,11 +1325,7 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 # =========================================================
 # Autocomplete Cache (Ciclos OPEN)
 # =========================================================
-_OPEN_CYCLES_CACHE = {
-    "ts": 0.0,
-    "season_id": 0,
-    "cycles": [],
-}
+_OPEN_CYCLES_CACHE = {"ts": 0.0, "season_id": 0, "cycles": []}
 
 def _load_open_cycles_from_sheets(sh):
     season_id = get_current_season_id(sh)
@@ -1364,10 +1377,9 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
 
 
 # =========================================================
-# Catálogo /comando (precisa existir neste bloco)
+# Catálogo /comando
 # =========================================================
 COMMANDS_CATALOG = [
-    # Jogador
     ("jogador", "/inscrever", "Se inscreve em um ciclo aberto (com escolha de ciclo)."),
     ("jogador", "/drop", "Sai do ciclo (somente enquanto estiver open)."),
     ("jogador", "/deck", "Define seu deck (1 vez POR CICLO, escolhendo o ciclo)."),
@@ -1383,33 +1395,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
 
-    # ADM
     ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
-    ("adm", "/ciclo_abrir", "Cria/abre um ciclo (status=open)."),
-    ("adm", "/ciclo_reabrir", "Reabre um ciclo (somente se NÃO estiver completed e sem PodsHistory)."),
-    ("adm", "/ciclo_fechar", "Fecha ciclo aberto por engano (status=locked)."),
-    ("adm", "/ciclo_encerrar", "Encerra ciclo (status=completed)."),
-    ("adm", "/ciclo_status", "Resumo do ciclo."),
-    ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo (locked)."),
-    ("adm", "/pods_publicar", "Publica pods do ciclo em um canal."),
-    ("adm", "/deadline", "Lista pendências (pending) próximas de expirar (48h)."),
-    ("adm", "/recalcular", "Auto-confirm (48h) + recalcula ranking do zero."),
-    ("adm", "/standings_publicar", "Publica ranking em canal configurado."),
-    ("adm", "/final", "Aplica 0-0-3 em matches sem report após prazo."),
-    ("adm", "/resultado_admin", "Edita/força resultado de match (admin)."),
-    ("adm", "/match_cancelar", "Inativa um match (active=FALSE)."),
-    ("adm", "/substituir_jogador", "Substitui jogador no ciclo (somente matches sem report)."),
-    ("adm", "/historico_confronto", "Histórico confirmado entre dois jogadores."),
-    ("adm", "/estatisticas", "Estatísticas gerais confirmadas do jogador."),
-    ("adm", "/export", "Exporta CSV (cycle/season)."),
-
-    # Organizador
-    ("organizador", "/estender", "Estende o prazo do ciclo em X dias corridos (exceção)."),
-
-    # Dono do servidor (Owner-only)
-    ("owner", "/season_abrir", "Cria/abre nova season e fecha a anterior (mantém histórico)."),
-    ("owner", "/season_fechar", "Fecha a season ativa (não apaga dados)."),
-    ("owner", "/season_status", "Mostra seasons e qual está ativa."),
 ]
 
 def level_allows(user_level: str, cmd_level: str) -> bool:
@@ -1417,9 +1403,6 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
     return order.get(user_level, 1) >= order.get(cmd_level, 1)
 
 
-# =========================================================
-# /comando — split seguro + envio blindado
-# =========================================================
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
     try:
@@ -1429,7 +1412,6 @@ async def comando(interaction: discord.Interaction):
 
     try:
         user_level = await get_access_level(interaction)
-
         lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
         for lvl, cmd, desc in COMMANDS_CATALOG:
             if level_allows(user_level, lvl):
@@ -1445,7 +1427,7 @@ async def comando(interaction: discord.Interaction):
 
 
 # =========================================================
-# /forcesync (ADM) — com timeout + resposta garantida
+# /forcesync (ADM) — timeout + resposta garantida
 # =========================================================
 @client.tree.command(name="forcesync", description="(ADM) Força sincronização dos comandos no servidor")
 async def forcesync(interaction: discord.Interaction):
@@ -1462,29 +1444,12 @@ async def forcesync(interaction: discord.Interaction):
 
     try:
         guild = discord.Object(id=GUILD_ID)
-
-        # Timeout pra não ficar “pensando” infinito
         await asyncio.wait_for(client.tree.sync(guild=guild), timeout=15)
-
-        try:
-            await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
-        except Exception:
-            pass
-
+        await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
     except asyncio.TimeoutError:
-        try:
-            await interaction.followup.send(
-                "⚠️ O Discord demorou para responder ao sync (timeout).\n"
-                "Tente novamente em 30s.",
-                ephemeral=True
-            )
-        except Exception:
-            pass
+        await interaction.followup.send("⚠️ O Discord demorou para responder (timeout). Tente novamente em 30s.", ephemeral=True)
     except Exception as e:
-        try:
-            await interaction.followup.send(f"⚠️ Falha ao sincronizar: {type(e).__name__} — {e}", ephemeral=True)
-        except Exception:
-            pass
+        await interaction.followup.send(f"⚠️ Falha ao sincronizar: {type(e).__name__} — {e}", ephemeral=True)
 
 
 # =========================================================
@@ -1510,16 +1475,9 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 ephemeral=True
             )
 
-        # localizar membro no servidor (mesmo se a interação foi via DM)
-        member = None
-        guild = None
-        try:
-            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
-            member = guild.get_member(self.member_id) or await guild.fetch_member(self.member_id)
-        except Exception:
-            member = None
+        guild, member = await find_member_anywhere(interaction, self.member_id)
 
-        # salvar no Sheets
+        # salva no Sheets
         try:
             sh = open_sheet()
             ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
@@ -1528,7 +1486,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
         except Exception:
             pass
 
-        # tentar alterar nickname
+        # tenta alterar nickname
         nick_ok = False
         if member:
             try:
@@ -1539,22 +1497,20 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
 
         if nick_ok:
             await interaction.response.send_message(
-                f"✅ Cadastro concluído!\nSeu nome foi definido como **{raw}**.\n\n"
-                "Agora use `/inscrever`.",
+                f"✅ Cadastro concluído!\nSeu nome foi definido como **{raw}**.\n\nAgora use `/inscrever`.",
                 ephemeral=True
             )
         else:
             await interaction.response.send_message(
                 f"✅ Nome salvo: **{raw}**.\n\n"
                 "⚠️ Não consegui alterar seu apelido automaticamente.\n"
-                "Verifique se o bot tem permissão **Gerenciar Apelidos** e se o cargo do bot está acima do cargo do jogador.\n\n"
+                "Verifique permissão do bot: **Gerenciar Apelidos** e cargo do bot acima do Jogador.\n\n"
                 "Agora use `/inscrever`.",
                 ephemeral=True
             )
 
         try:
-            if guild:
-                await log_admin_guild(guild, f"📝 NicknameModal: <@{self.member_id}> informou nome: **{raw}** (nick_ok={nick_ok}).")
+            await log_admin_guild(guild, f"📝 NicknameModal: <@{self.member_id}> informou nome: **{raw}** (nick_ok={nick_ok}).")
         except Exception:
             pass
 
@@ -1567,20 +1523,18 @@ class OnboardingView(discord.ui.View):
         super().__init__(timeout=3600)
         self.member_id = member_id
 
-    async def _get_member(self):
-        try:
-            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
-            return guild.get_member(self.member_id) or await guild.fetch_member(self.member_id)
-        except Exception:
-            return None
-
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success)
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = await self._get_member()
-        if not member:
-            return await interaction.response.send_message("⚠️ Não consegui localizar seu usuário no servidor.", ephemeral=True)
+        guild, member = await find_member_anywhere(interaction, self.member_id)
 
-        role_jog = discord.utils.get(member.guild.roles, name=ROLE_JOGADOR)
+        if not member or not guild:
+            return await interaction.response.send_message(
+                "⚠️ Não consegui localizar seu usuário no servidor.\n"
+                "Confirme se você já entrou no servidor e aceitou as regras (se houver).",
+                ephemeral=True
+            )
+
+        role_jog = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
         if not role_jog:
             return await interaction.response.send_message(
                 "⚠️ Cargo **Jogador** não encontrado. Crie o cargo com esse nome exato ou ajuste ROLE_JOGADOR no Render.",
@@ -1592,24 +1546,24 @@ class OnboardingView(discord.ui.View):
         except Exception:
             return await interaction.response.send_message(
                 "❌ Não consegui aplicar o cargo.\n"
-                "Verifique se o bot tem permissão **Gerenciar Cargos** e se o cargo do bot está acima do cargo Jogador.",
+                "Verifique permissão do bot: **Gerenciar Cargos** e cargo do bot acima do cargo Jogador.",
                 ephemeral=True
             )
 
-        # abre modal
         try:
             await interaction.response.send_modal(NicknameModal(member.id))
         except Exception:
-            # fallback se modal falhar
-            await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Tente novamente.", ephemeral=True)
+            try:
+                await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Tente novamente.", ephemeral=True)
+            except Exception:
+                pass
 
         self.stop()
 
     @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary)
     async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "✅ Você entrou como **Assistir**.\n"
-            "Para jogar depois, peça para um ADM aplicar o cargo **Jogador**.",
+            "✅ Você entrou como **Assistir**.\nPara jogar depois, peça para um ADM aplicar o cargo **Jogador**.",
             ephemeral=True
         )
         self.stop()
@@ -1655,7 +1609,7 @@ async def send_onboarding(member: discord.Member):
             except Exception:
                 pass
 
-    # 3) se tudo falhar, só loga
+    # 3) log
     try:
         await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (DM e canal). Usuário: {member.mention}")
     except Exception:
