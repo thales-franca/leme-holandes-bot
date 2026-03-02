@@ -5,7 +5,7 @@ import random
 import csv
 import io
 from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timezone, timedelta, time, date
+from datetime import datetime, timezone, timedelta, time
 
 import discord
 from discord import app_commands
@@ -19,26 +19,37 @@ from google.oauth2.service_account import Credentials
 # LEME HOLANDÊS BOT (Discord + Google Sheets + Render)
 # =========================================================
 # Sheets (abas):
-# - Players: cadastro permanente
-# - Enrollments: inscrição por ciclo (active/dropped)
+# - Players: cadastro permanente (SEM deck/decklist por ciclo)
+# - Enrollments: inscrição por ciclo + deck/decklist por ciclo (1x por ciclo)
 # - Cycles: status do ciclo (open/locked/completed) + start_at_br + deadline_at_br
 # - PodsHistory: pods por ciclo
 # - Matches: confrontos + resultados
 # - Standings: ranking recalculado (bot escreve do zero)
 #
 # Regras:
-# - Ranking: Pontos > OMW% > GW% > OGW%
+# - Ciclos NÃO podem ser criados automaticamente por comando de jogador.
+# - Somente ADM/Organizador abre ciclo via /ciclo_abrir.
+# - /inscrever só funciona se ciclo existir e estiver open.
+# - Pods só geram se ciclo existir e estiver open (depois vira locked).
+#
+# Ranking:
+# - Pontos > OMW% > GW% > OGW%
 # - Piso 33,3% em MWP/GWP antes de calcular OMW/OGW
 # - Sempre recalcular tudo do zero (sem incremental)
-# - Resultado do jogador: V-D-E (Vitória-Derrota-Empate) em GAMES
+#
+# Resultados:
+# - Placar é em GAMES: V-D-E (Vitória-Derrota-Empate)
 # - Empate em games conta como 0.5 na GWP
 # - Rejeição: 48h para rejeitar (se não, vira confirmed na varredura /recalcular)
-# - Prazo do ciclo (/prazo):
-#   POD 3 -> 5 dias corridos
-#   POD 4 -> 8 dias corridos
-#   POD 5 ou 6 -> 10 dias corridos
-#   Ciclo começa 14:00 (BR) e termina no último dia às 13:59 (BR)
-# - /final (ADM): aplica 0-0-3 para matches sem report
+#
+# Prazo do ciclo (/prazo):
+# - POD 3 -> 5 dias corridos
+# - POD 4 -> 8 dias corridos
+# - POD 5 ou 6 -> 10 dias corridos
+# - Ciclo começa 14:00 (BR) e termina no último dia às 13:59 (BR)
+#
+# Comandos:
+# - /final (ADM): aplica 0-0-3 para matches sem report após prazo
 # - /estender (Organizador): estende deadline por X dias (exceção)
 # - /comando (todos): mostra comandos disponíveis por cargo
 # =========================================================
@@ -108,7 +119,6 @@ def parse_br_dt(s: str):
         return None
 
 def fmt_br_dt(dt: datetime) -> str:
-    # mantém sempre HH:MM:SS
     return dt.astimezone(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -174,9 +184,18 @@ def ensure_worksheet(sh, title: str, header: list[str], rows: int = 2000, cols: 
         ws = sh.worksheet(title)
     except Exception:
         ws = sh.add_worksheet(title=title, rows=rows, cols=cols)
+
     current = ws.row_values(1)
     if not current:
         ws.append_row(header)
+    else:
+        # garante que colunas novas existam (se o usuário já tinha a aba)
+        missing = [h for h in header if h not in current]
+        if missing:
+            # adiciona as colunas faltantes no final do cabeçalho (linha 1)
+            new_header = current + missing
+            ws.update([new_header], range_name=f"A1:{col_letter(len(new_header)-1)}1")
+
     return ws
 
 def find_player_row(ws_players, discord_id: int):
@@ -187,21 +206,18 @@ def find_player_row(ws_players, discord_id: int):
         return None
 
 def get_player_fields(ws_players, row: int):
-    vals = ws_players.get(f"A{row}:H{row}")
+    vals = ws_players.get(f"A{row}:E{row}")
     if not vals or not vals[0]:
         return {}
     r = vals[0]
-    while len(r) < 8:
+    while len(r) < 5:
         r.append("")
     return {
         "discord_id": str(r[0]).strip(),
         "nick": str(r[1]).strip(),
-        "deck": str(r[2]).strip(),
-        "decklist_url": str(r[3]).strip(),
-        "status": str(r[4]).strip(),
-        "reports_unique": str(r[5]).strip(),
-        "created_at": str(r[6]).strip(),
-        "updated_at": str(r[7]).strip(),
+        "status": str(r[2]).strip(),
+        "created_at": str(r[3]).strip(),
+        "updated_at": str(r[4]).strip(),
     }
 
 def build_players_nick_map(ws_players) -> dict[str, str]:
@@ -240,11 +256,9 @@ async def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
     return False
 
 async def is_organizer_only(interaction: discord.Interaction) -> bool:
-    # Regra do Thales: /estender é SOMENTE Organizador (sem exceção)
     return await has_role(interaction, ROLE_ORGANIZADOR)
 
 async def get_access_level(interaction: discord.Interaction) -> str:
-    # Retorna: "organizador" | "adm" | "jogador"
     if await has_role(interaction, ROLE_ORGANIZADOR):
         return "organizador"
     if await has_role(interaction, ROLE_ADM):
@@ -312,16 +326,26 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 # =========================
 # Sheets schema (headers)
 # =========================
-PLAYERS_HEADER = ["discord_id","nick","deck","decklist_url","status","reports_unique","created_at","updated_at"]
+# Players agora é permanente (sem deck/decklist por ciclo)
+PLAYERS_HEADER = ["discord_id", "nick", "status", "created_at", "updated_at"]
 
-ENROLLMENTS_HEADER = ["cycle","player_id","status","created_at","updated_at"]
-ENROLLMENTS_REQUIRED = ["cycle","player_id","status","created_at","updated_at"]
+# Enrollments agora guarda deck/decklist por ciclo (1x por ciclo)
+ENROLLMENTS_HEADER = [
+    "cycle",
+    "player_id",
+    "status",           # active/dropped
+    "deck",             # 1x por ciclo (para jogador)
+    "decklist_url",     # 1x por ciclo (para jogador)
+    "created_at",
+    "updated_at"
+]
+ENROLLMENTS_REQUIRED = ["cycle", "player_id", "status", "deck", "decklist_url", "created_at", "updated_at"]
 
-PODSHISTORY_HEADER = ["cycle","pod","player_id","created_at"]
-PODSHISTORY_REQUIRED = ["cycle","pod","player_id","created_at"]
+PODSHISTORY_HEADER = ["cycle", "pod", "player_id", "created_at"]
+PODSHISTORY_REQUIRED = ["cycle", "pod", "player_id", "created_at"]
 
-CYCLES_HEADER = ["cycle","status","start_at_br","deadline_at_br","created_at","updated_at"]  # status: open|locked|completed
-CYCLES_REQUIRED = ["cycle","status","start_at_br","deadline_at_br","created_at","updated_at"]
+CYCLES_HEADER = ["cycle", "status", "start_at_br", "deadline_at_br", "created_at", "updated_at"]  # open|locked|completed
+CYCLES_REQUIRED = ["cycle", "status", "start_at_br", "deadline_at_br", "created_at", "updated_at"]
 
 MATCHES_REQUIRED_COLS = [
     "match_id",
@@ -374,26 +398,34 @@ def get_cycle_fields(ws_cycles, cycle: int) -> dict:
     return out
 
 def set_cycle_status(ws_cycles, cycle: int, status: str):
+    """
+    BLOQUEADO: não cria ciclo.
+    Só atualiza se ciclo existir.
+    """
     status = str(status).strip().lower()
     nowb = now_br_str()
     rown = get_cycle_row(ws_cycles, cycle)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
     if rown is None:
-        ws_cycles.append_row([str(cycle), status, "", "", nowb, nowb], value_input_option="USER_ENTERED")
-    else:
-        ws_cycles.update([[status]], range_name=f"{col_letter(col['status'])}{rown}")
-        ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        raise RuntimeError(f"Ciclo {cycle} não existe em Cycles. Use /ciclo_abrir.")
+    ws_cycles.update([[status]], range_name=f"{col_letter(col['status'])}{rown}")
+    ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
 
 def set_cycle_times(ws_cycles, cycle: int, start_at_br: str, deadline_at_br: str):
+    """
+    BLOQUEADO: não cria ciclo.
+    Só atualiza se ciclo existir.
+    """
     nowb = now_br_str()
     rown = get_cycle_row(ws_cycles, cycle)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
     if rown is None:
-        ws_cycles.append_row([str(cycle), "open", start_at_br, deadline_at_br, nowb, nowb], value_input_option="USER_ENTERED")
-    else:
-        ws_cycles.update([[start_at_br]], range_name=f"{col_letter(col['start_at_br'])}{rown}")
-        ws_cycles.update([[deadline_at_br]], range_name=f"{col_letter(col['deadline_at_br'])}{rown}")
-        ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        raise RuntimeError(f"Ciclo {cycle} não existe em Cycles. Use /ciclo_abrir.")
+    ws_cycles.update([[start_at_br]], range_name=f"{col_letter(col['start_at_br'])}{rown}")
+    ws_cycles.update([[deadline_at_br]], range_name=f"{col_letter(col['deadline_at_br'])}{rown}")
+    ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
 
 def list_cycles(ws_cycles) -> list[tuple[int, str]]:
     out = []
@@ -406,15 +438,65 @@ def list_cycles(ws_cycles) -> list[tuple[int, str]]:
     return out
 
 def suggest_open_cycles(ws_cycles, limit: int = 20) -> list[int]:
+    """
+    Retorna apenas ciclos que EXISTEM e estão status=open.
+    Não sugere "próximo ciclo".
+    """
     items = list_cycles(ws_cycles)
-    if not items:
-        return [1]
-    max_cycle = max(c for c, _ in items)
     open_cycles = [c for c, st in items if st == "open"]
-    if (max_cycle + 1) not in open_cycles:
-        open_cycles.append(max_cycle + 1)
     open_cycles = sorted(set(open_cycles))
-    return open_cycles[:limit]
+    return open_cycles[:limit] if open_cycles else []
+
+
+# =========================
+# Enrollment helpers (deck/decklist por ciclo)
+# =========================
+def get_enrollment_row(ws_enr, cycle: int, player_id: str) -> int | None:
+    vals = ws_enr.get_all_values()
+    if len(vals) <= 1:
+        return None
+    col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+    for rown in range(2, len(vals) + 1):
+        r = vals[rown - 1]
+        c = r[col["cycle"]] if col["cycle"] < len(r) else ""
+        pid = r[col["player_id"]] if col["player_id"] < len(r) else ""
+        if safe_int(c, 0) == cycle and str(pid).strip() == str(player_id):
+            return rown
+    return None
+
+def get_enrollment_fields(ws_enr, rown: int) -> dict:
+    col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+    r = ws_enr.row_values(rown)
+    def getc(name: str) -> str:
+        idx = col[name]
+        return (r[idx] if idx < len(r) else "").strip()
+    return {
+        "cycle": safe_int(getc("cycle"), 0),
+        "player_id": getc("player_id"),
+        "status": getc("status").lower(),
+        "deck": getc("deck"),
+        "decklist_url": getc("decklist_url"),
+        "created_at": getc("created_at"),
+        "updated_at": getc("updated_at"),
+    }
+
+def get_latest_active_cycle_for_player(ws_enr, player_id: str) -> int | None:
+    # para /deck e /decklist não pedirem cycle: pega o MAIOR ciclo onde status=active
+    rows = ws_enr.get_all_records()
+    best = None
+    for r in rows:
+        pid = str(r.get("player_id", "")).strip()
+        if pid != str(player_id).strip():
+            continue
+        st = str(r.get("status", "")).strip().lower()
+        if st != "active":
+            continue
+        cyc = safe_int(r.get("cycle", 0), 0)
+        if cyc <= 0:
+            continue
+        if best is None or cyc > best:
+            best = cyc
+    return best
 
 
 # =========================
@@ -532,11 +614,12 @@ def cycle_days_by_max_pod(max_pod_size: int) -> int:
         return 5
     if max_pod_size == 4:
         return 8
-    return 10  # 5 ou 6 (ou mais)
+    return 10
 
 def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str, str, int, int]:
     """
     Retorna (start_at_br_str, deadline_at_br_str, max_pod_size, days)
+
     - start_at: 14:00 BR do dia que o ciclo foi "travado" (geração de pods)
       (se já existir no Cycles, reaproveita)
     - deadline_at: (start_date + days) às 13:59 BR
@@ -549,6 +632,8 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
 
     rows = ws_pods.get_all_records()
     pods = {}
+    created_candidates = []
+
     for r in rows:
         if safe_int(r.get("cycle", 0), 0) != cycle:
             continue
@@ -556,6 +641,9 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
         pid = str(r.get("player_id", "")).strip()
         if pod and pid:
             pods.setdefault(pod, set()).add(pid)
+        c = parse_br_dt(r.get("created_at", ""))
+        if c:
+            created_candidates.append(c)
 
     if not pods:
         return ("", "", 0, 0)
@@ -564,13 +652,6 @@ def compute_cycle_start_deadline_br(cycle: int, ws_pods, ws_cycles) -> tuple[str
     days = cycle_days_by_max_pod(max_pod_size)
 
     if start_dt is None:
-        created_candidates = []
-        for r in rows:
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
-            c = parse_br_dt(r.get("created_at", ""))
-            if c:
-                created_candidates.append(c)
         base_date = (min(created_candidates).astimezone(BR_TZ).date() if created_candidates else now_br_dt().date())
         start_dt = datetime.combine(base_date, time(14, 0), tzinfo=BR_TZ)
 
@@ -789,11 +870,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
 
         return [app_commands.Choice(name=f"Ciclo {c} (aberto)", value=str(c)) for c in open_cycles[:25]]
     except Exception:
-        base = [str(i) for i in range(1, 11)]
-        cur = str(current).strip()
-        if cur:
-            base = [x for x in base if x.startswith(cur)]
-        return [app_commands.Choice(name=f"Ciclo {x}", value=x) for x in base[:25]]
+        return []
 
 async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
     try:
@@ -861,10 +938,10 @@ async def ac_match_id_any(interaction: discord.Interaction, current: str):
 # =========================
 COMMANDS_CATALOG = [
     # jogador
-    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
+    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto (ciclo precisa existir)."),
     ("jogador", "/drop", "Sai do ciclo enquanto estiver open."),
-    ("jogador", "/deck", "Define seu deck (1 vez; ADM/Organizador podem ajustar)."),
-    ("jogador", "/decklist", "Define decklist (Moxfield/LigaMagic) (1 vez; ADM/Organizador podem ajustar)."),
+    ("jogador", "/deck", "Define seu deck (1 vez POR CICLO)."),
+    ("jogador", "/decklist", "Define decklist (1 vez POR CICLO)."),
     ("jogador", "/pods_ver", "Mostra pods do ciclo."),
     ("jogador", "/meus_matches", "Lista seus matches do ciclo (IDs, status e prazo 48h)."),
     ("jogador", "/resultado", "Reporta resultado V-D-E (menu)."),
@@ -874,8 +951,9 @@ COMMANDS_CATALOG = [
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
 
     # ADM / Organizador
-    ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
+    ("adm", "/forcesync", "Sincroniza comandos no servidor."),
     ("adm", "/ciclo_abrir", "Cria/abre um ciclo (status=open)."),
+    ("adm", "/ciclo_fechar", "Fecha ciclo aberto por engano (status=locked)."),
     ("adm", "/ciclo_encerrar", "Encerra ciclo (status=completed)."),
     ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo (locked)."),
     ("adm", "/deadline", "Lista pendências (pending) próximas de expirar (48h)."),
@@ -989,8 +1067,43 @@ async def ciclo_abrir(interaction: discord.Interaction, cycle: int):
             await interaction.followup.send("❌ Este ciclo está COMPLETED. Não reabrimos por segurança.", ephemeral=True)
             return
 
-        set_cycle_status(ws_cycles, cycle, "open")
+        rown = get_cycle_row(ws_cycles, cycle)
+        nowb = now_br_str()
+
+        if rown is None:
+            ws_cycles.append_row([str(cycle), "open", "", "", nowb, nowb], value_input_option="USER_ENTERED")
+        else:
+            set_cycle_status(ws_cycles, cycle, "open")
+
         await interaction.followup.send(f"✅ Ciclo {cycle} aberto (open).", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+@client.tree.command(name="ciclo_fechar", description="(ADM) Fecha um ciclo aberto por engano (status=locked).")
+@app_commands.describe(cycle="Ciclo (ex: 1)")
+async def ciclo_fechar(interaction: discord.Interaction, cycle: int):
+    if not await is_admin_or_organizer(interaction):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        sh = open_sheet()
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        rown = get_cycle_row(ws_cycles, cycle)
+        if rown is None:
+            await interaction.followup.send(f"❌ Ciclo {cycle} não existe.", ephemeral=True)
+            return
+
+        st = get_cycle_fields(ws_cycles, cycle).get("status") or ""
+        if st == "completed":
+            await interaction.followup.send("❌ Ciclo já está COMPLETED. Não vou alterar por segurança.", ephemeral=True)
+            return
+
+        set_cycle_status(ws_cycles, cycle, "locked")
+        await interaction.followup.send(f"✅ Ciclo {cycle} fechado (locked).", ephemeral=True)
+
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
@@ -1014,7 +1127,7 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 # =========================
 # Players + Enrollments por ciclo
 # =========================
-@client.tree.command(name="inscrever", description="Inscreve você em um CICLO (somente ciclo aberto).")
+@client.tree.command(name="inscrever", description="Inscreve você em um CICLO (somente ciclo existente e open).")
 @app_commands.describe(cycle="Número do ciclo (ex: 1)")
 @app_commands.autocomplete(cycle=ac_cycle_open)
 async def inscrever(interaction: discord.Interaction, cycle: str):
@@ -1038,51 +1151,55 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
         fields = get_cycle_fields(ws_cycles, c)
         st = fields.get("status")
 
+        # ✅ NUNCA cria ciclo por aqui
         if st is None:
-            ws_cycles.append_row([str(c), "open", "", "", nowb, nowb], value_input_option="USER_ENTERED")
-            st = "open"
+            await interaction.followup.send(
+                f"❌ O **Ciclo {c}** não existe.\n"
+                "Somente ADM/Organizador pode abrir ciclo com `/ciclo_abrir`.",
+                ephemeral=True
+            )
+            return
 
         if st == "completed":
             await interaction.followup.send("❌ Este ciclo já foi concluído. Escolha outro ciclo.", ephemeral=True)
             return
         if st == "locked":
-            await interaction.followup.send("❌ Este ciclo já teve pods gerados e está LOCKED (inscrição fechada).", ephemeral=True)
+            await interaction.followup.send("❌ Este ciclo está LOCKED (inscrição fechada).", ephemeral=True)
+            return
+        if st != "open":
+            await interaction.followup.send(f"❌ Ciclo não está open (status atual: {st}).", ephemeral=True)
             return
 
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=20)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
 
+        # Players: cadastro permanente
         prow = find_player_row(ws_players, discord_id)
         if prow is None:
-            ws_players.append_row([str(discord_id), nick, "", "", "active", "0", nowb, nowb], value_input_option="USER_ENTERED")
+            ws_players.append_row([str(discord_id), nick, "active", nowb, nowb], value_input_option="USER_ENTERED")
         else:
             ws_players.update([[nick]], range_name=f"B{prow}")
-            ws_players.update([["active"]], range_name=f"E{prow}")
-            ws_players.update([[nowb]], range_name=f"H{prow}")
+            ws_players.update([["active"]], range_name=f"C{prow}")
+            ws_players.update([[nowb]], range_name=f"E{prow}")
 
-        data = ws_enr.get_all_values()
+        # Enrollments: inscrição por ciclo
+        enr_row = get_enrollment_row(ws_enr, c, str(discord_id))
         col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
-        found_row = None
-        for r_i in range(2, len(data) + 1):
-            r = data[r_i - 1]
-            cc = r[col["cycle"]] if col["cycle"] < len(r) else ""
-            pid = r[col["player_id"]] if col["player_id"] < len(r) else ""
-            if safe_int(cc, 0) == c and str(pid).strip() == str(discord_id):
-                found_row = r_i
-                break
-
-        if found_row is None:
-            ws_enr.append_row([str(c), str(discord_id), "active", nowb, nowb], value_input_option="USER_ENTERED")
+        if enr_row is None:
+            # deck/decklist começam vazios e serão 1x por ciclo
+            ws_enr.append_row([str(c), str(discord_id), "active", "", "", nowb, nowb], value_input_option="USER_ENTERED")
             await interaction.followup.send(
                 f"✅ Inscrito no **Ciclo {c}**.\n"
-                "Você pode definir seu deck e decklist **apenas 1 vez** com `/deck` e `/decklist`.\n"
+                "Agora você pode definir seu deck e decklist **1 vez neste ciclo** com:\n"
+                "• `/deck`  (usa seu ciclo ativo mais recente)\n"
+                "• `/decklist` (usa seu ciclo ativo mais recente)\n"
                 "Se quiser sair do ciclo: `/drop cycle:...`",
                 ephemeral=True
             )
         else:
-            ws_enr.update([["active"]], range_name=f"{col_letter(col['status'])}{found_row}")
-            ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
+            ws_enr.update([["active"]], range_name=f"{col_letter(col['status'])}{enr_row}")
+            ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{enr_row}")
             await interaction.followup.send(f"✅ Inscrição no **Ciclo {c}** reativada.", ephemeral=True)
 
     except Exception as e:
@@ -1093,7 +1210,7 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
 async def drop(interaction: discord.Interaction, cycle: int, motivo: str = ""):
     await interaction.response.defer(ephemeral=True)
 
-    discord_id = interaction.user.id
+    discord_id = str(interaction.user.id)
     nowb = now_br_str()
 
     try:
@@ -1103,32 +1220,28 @@ async def drop(interaction: discord.Interaction, cycle: int, motivo: str = ""):
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
         st = get_cycle_fields(ws_cycles, cycle).get("status")
 
+        if st is None:
+            await interaction.followup.send("❌ Este ciclo não existe.", ephemeral=True)
+            return
         if st == "locked":
             await interaction.followup.send("❌ Ciclo LOCKED (pods já gerados). Drop não permitido.", ephemeral=True)
             return
         if st == "completed":
             await interaction.followup.send("❌ Ciclo COMPLETED. Drop não permitido.", ephemeral=True)
             return
+        if st != "open":
+            await interaction.followup.send(f"❌ Ciclo não está open (status atual: {st}).", ephemeral=True)
+            return
 
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=20)
-        data = ws_enr.get_all_values()
-        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-
-        found_row = None
-        for r_i in range(2, len(data) + 1):
-            r = data[r_i - 1]
-            c = r[col["cycle"]] if col["cycle"] < len(r) else ""
-            pid = r[col["player_id"]] if col["player_id"] < len(r) else ""
-            if safe_int(c, 0) == cycle and str(pid).strip() == str(discord_id):
-                found_row = r_i
-                break
-
-        if found_row is None:
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
+        enr_row = get_enrollment_row(ws_enr, cycle, discord_id)
+        if enr_row is None:
             await interaction.followup.send(f"❌ Você não está inscrito no Ciclo {cycle}.", ephemeral=True)
             return
 
-        ws_enr.update([["dropped"]], range_name=f"{col_letter(col['status'])}{found_row}")
-        ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
+        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ws_enr.update([["dropped"]], range_name=f"{col_letter(col['status'])}{enr_row}")
+        ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{enr_row}")
 
         msg = f"✅ Você saiu do **Ciclo {cycle}**.\nPara jogar outro ciclo, use `/inscrever cycle:...`"
         if motivo.strip():
@@ -1138,46 +1251,59 @@ async def drop(interaction: discord.Interaction, cycle: int, motivo: str = ""):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /drop: {e}", ephemeral=True)
 
-@client.tree.command(name="deck", description="Define seu deck (1 vez). ADM/Organizador podem alterar.")
+
+# =========================
+# Deck / Decklist (1x POR CICLO) - agora salva em Enrollments
+# =========================
+@client.tree.command(name="deck", description="Define seu deck (1 vez POR CICLO).")
 @app_commands.describe(nome="Nome do deck (ex: UR Murktide)")
 async def deck(interaction: discord.Interaction, nome: str):
     await interaction.response.defer(ephemeral=True)
 
-    discord_id = interaction.user.id
+    pid = str(interaction.user.id)
     nowb = now_br_str()
 
     try:
         sh = open_sheet()
-        ws = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
+        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
-        row = find_player_row(ws, discord_id)
-        if row is None:
-            await interaction.followup.send("❌ Use `/inscrever` primeiro.", ephemeral=True)
+        cyc = get_latest_active_cycle_for_player(ws_enr, pid)
+        if cyc is None:
+            await interaction.followup.send("❌ Você não tem inscrição ativa. Use `/inscrever` primeiro.", ephemeral=True)
             return
 
-        fields = get_player_fields(ws, row)
+        enr_row = get_enrollment_row(ws_enr, cyc, pid)
+        if enr_row is None:
+            await interaction.followup.send("❌ Inscrição não encontrada. Use `/inscrever` novamente.", ephemeral=True)
+            return
+
+        fields = get_enrollment_fields(ws_enr, enr_row)
         current = (fields.get("deck") or "").strip()
 
         if current and not await is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você já definiu seu deck e não pode alterar.\nPeça para ADM/Organizador se precisar.",
+                f"❌ Você já definiu seu deck no **Ciclo {cyc}** e não pode alterar.\n"
+                "Peça para ADM/Organizador se precisar.",
                 ephemeral=True
             )
             return
 
-        ws.update([[nome]], range_name=f"C{row}")
-        ws.update([[nowb]], range_name=f"H{row}")
-        await interaction.followup.send(f"✅ Deck salvo.\nDeck: **{nome}**", ephemeral=True)
+        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ws_enr.update([[nome]], range_name=f"{col_letter(col['deck'])}{enr_row}")
+        ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{enr_row}")
+
+        await interaction.followup.send(f"✅ Deck salvo no **Ciclo {cyc}**.\nDeck: **{nome}**", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro ao salvar deck: {e}", ephemeral=True)
 
-@client.tree.command(name="decklist", description="Define sua decklist (1 vez). ADM/Organizador podem alterar.")
+@client.tree.command(name="decklist", description="Define sua decklist (1 vez POR CICLO).")
 @app_commands.describe(url="Link (moxfield.com ou ligamagic.com.br)")
 async def decklist(interaction: discord.Interaction, url: str):
     await interaction.response.defer(ephemeral=True)
 
-    discord_id = interaction.user.id
+    pid = str(interaction.user.id)
     nowb = now_br_str()
 
     ok, val = validate_decklist_url(url)
@@ -1187,26 +1313,35 @@ async def decklist(interaction: discord.Interaction, url: str):
 
     try:
         sh = open_sheet()
-        ws = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
+        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
-        row = find_player_row(ws, discord_id)
-        if row is None:
-            await interaction.followup.send("❌ Use `/inscrever` primeiro.", ephemeral=True)
+        cyc = get_latest_active_cycle_for_player(ws_enr, pid)
+        if cyc is None:
+            await interaction.followup.send("❌ Você não tem inscrição ativa. Use `/inscrever` primeiro.", ephemeral=True)
             return
 
-        fields = get_player_fields(ws, row)
+        enr_row = get_enrollment_row(ws_enr, cyc, pid)
+        if enr_row is None:
+            await interaction.followup.send("❌ Inscrição não encontrada. Use `/inscrever` novamente.", ephemeral=True)
+            return
+
+        fields = get_enrollment_fields(ws_enr, enr_row)
         current = (fields.get("decklist_url") or "").strip()
 
         if current and not await is_admin_or_organizer(interaction):
             await interaction.followup.send(
-                "❌ Você já definiu sua decklist e não pode alterar.\nPeça para ADM/Organizador se precisar.",
+                f"❌ Você já definiu sua decklist no **Ciclo {cyc}** e não pode alterar.\n"
+                "Peça para ADM/Organizador se precisar.",
                 ephemeral=True
             )
             return
 
-        ws.update([[val]], range_name=f"D{row}")
-        ws.update([[nowb]], range_name=f"H{row}")
-        await interaction.followup.send(f"✅ Decklist salva.\nLink: {val}", ephemeral=True)
+        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ws_enr.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{enr_row}")
+        ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{enr_row}")
+
+        await interaction.followup.send(f"✅ Decklist salva no **Ciclo {cyc}**.\nLink: {val}", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro ao salvar decklist: {e}", ephemeral=True)
@@ -1234,18 +1369,26 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, tamanho: int 
         fields = get_cycle_fields(ws_cycles, cycle)
         st = fields.get("status")
 
+        # ✅ NUNCA cria ciclo aqui
         if st is None:
-            ws_cycles.append_row([str(cycle), "open", "", "", nowb, nowb], value_input_option="USER_ENTERED")
-            st = "open"
+            await interaction.followup.send(
+                f"❌ O **Ciclo {cycle}** não existe.\n"
+                "Abra primeiro com `/ciclo_abrir` e depois gere pods.",
+                ephemeral=True
+            )
+            return
 
         if st == "completed":
             await interaction.followup.send("❌ Ciclo COMPLETED. Não pode gerar pods.", ephemeral=True)
             return
         if st == "locked":
-            await interaction.followup.send("❌ Pods já foram gerados. Ciclo está LOCKED. Não pode gerar novamente.", ephemeral=True)
+            await interaction.followup.send("❌ Ciclo LOCKED. Não pode gerar novamente.", ephemeral=True)
+            return
+        if st != "open":
+            await interaction.followup.send(f"❌ Ciclo não está open (status atual: {st}).", ephemeral=True)
             return
 
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=20)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=10000, cols=20)
         ws_matches = sh.worksheet("Matches")
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
@@ -1382,6 +1525,11 @@ async def prazo(interaction: discord.Interaction, cycle: int):
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=10000, cols=20)
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
+        # ciclo precisa existir
+        if get_cycle_row(ws_cycles, cycle) is None:
+            await interaction.followup.send("❌ Este ciclo não existe. Abra com `/ciclo_abrir`.", ephemeral=True)
+            return
+
         start_str, deadline_str, max_pod_size, days = compute_cycle_start_deadline_br(cycle, ws_pods, ws_cycles)
         if not deadline_str:
             await interaction.followup.send("❌ Ainda não existem pods para esse ciclo. Gere os pods primeiro.", ephemeral=True)
@@ -1440,10 +1588,6 @@ async def estender(interaction: discord.Interaction, cycle: int, dias: int):
             return await interaction.followup.send(f"❌ Ciclo {cycle} não existe na aba Cycles.", ephemeral=True)
 
         st = (ws_cycles.cell(rown, col["status"] + 1).value or "").strip().lower()
-        # (col dict é 0-based; cell() é 1-based)
-        # Ajuste rápido:
-        st = (ws_cycles.cell(rown, col["status"] + 1).value or "").strip().lower()
-
         if st == "completed":
             return await interaction.followup.send("❌ Ciclo está **completed**. Não é permitido estender.", ephemeral=True)
 
@@ -1475,7 +1619,6 @@ async def estender(interaction: discord.Interaction, cycle: int, dias: int):
             ephemeral=True
         )
 
-        # publicar aviso (se canal configurado)
         if RANKING_CHANNEL_ID and interaction.guild:
             ch = interaction.guild.get_channel(RANKING_CHANNEL_ID)
             if ch:
@@ -1721,7 +1864,7 @@ async def rejeitar(interaction: discord.Interaction, match_id: str, motivo: str 
 
 
 # =========================
-# Admin: editar/cancelar resultado (ESSENCIAL)
+# Admin: editar/cancelar resultado
 # =========================
 @client.tree.command(name="admin_resultado_editar", description="(ADM) Edita resultado de um match e opcionalmente confirma.")
 @app_commands.autocomplete(match_id=ac_match_id_any)
@@ -1832,7 +1975,7 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
 
 
 # =========================
-# /deadline (48h) - recomendado forte
+# /deadline (48h)
 # =========================
 @client.tree.command(name="deadline", description="Lista resultados pendentes próximos de expirar (48h).")
 @app_commands.describe(cycle="Ciclo (ex: 1)", horas="Janela (ex: 12)")
@@ -1994,7 +2137,7 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
 
 
 # =========================
-# Ranking público (ESSENCIAL)
+# Ranking público
 # =========================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo (público).")
 @app_commands.describe(cycle="Ciclo (ex: 1)", top="Quantos mostrar (padrão 20)")
@@ -2079,7 +2222,7 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 
 
 # =========================
-# Status do ciclo (recomendado forte)
+# Status do ciclo
 # =========================
 @client.tree.command(name="status_ciclo", description="Mostra status geral do ciclo (inscritos, pods, matches, pendências).")
 @app_commands.describe(cycle="Ciclo (ex: 1)")
@@ -2088,7 +2231,7 @@ async def status_ciclo(interaction: discord.Interaction, cycle: int):
     try:
         sh = open_sheet()
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=20)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=5000, cols=25)
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=10000, cols=20)
         ws_matches = sh.worksheet("Matches")
 
@@ -2128,7 +2271,7 @@ async def status_ciclo(interaction: discord.Interaction, cycle: int):
 
 
 # =========================
-# Luxo competitivo: exportar ciclo (CSV)
+# Exportar ciclo (CSV)
 # =========================
 @client.tree.command(name="exportar_ciclo", description="(ADM) Exporta CSV do ciclo (Matches e Standings).")
 @app_commands.describe(cycle="Ciclo (ex: 1)")
@@ -2178,7 +2321,7 @@ async def exportar_ciclo(interaction: discord.Interaction, cycle: int):
 
 
 # =========================
-# Luxo: fechar resultados atrasados (administrativo)
+# Auto-confirm (48h) forçado
 # =========================
 @client.tree.command(name="fechar_resultados_atrasados", description="(ADM) Fecha matches pendentes expirados (48h) e aplica auto-confirm.")
 @app_commands.describe(cycle="Ciclo (ex: 1)")
@@ -2196,7 +2339,7 @@ async def fechar_resultados_atrasados(interaction: discord.Interaction, cycle: i
 
 
 # =========================
-# Luxo: substituir jogador
+# Substituir jogador
 # =========================
 @client.tree.command(name="substituir_jogador", description="(ADM) Substitui um jogador no ciclo (somente matches sem report).")
 @app_commands.describe(cycle="Ciclo", antigo_id="Discord ID antigo", novo_id="Discord ID novo")
@@ -2269,7 +2412,7 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
 
 # =========================
-# Recomendado forte: histórico confronto + estatísticas
+# Histórico confronto + estatísticas
 # =========================
 @client.tree.command(name="historico_confronto", description="Mostra histórico de confrontos confirmados entre dois jogadores.")
 @app_commands.describe(jogador_a_id="Discord ID A", jogador_b_id="Discord ID B")
