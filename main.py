@@ -1119,9 +1119,9 @@ def recalculate_cycle(season_id: int, cycle: int):
 # [BLOCO 4/8 termina aqui]
 # =========================================================
 # =========================================================
+# =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING
-# (VERSÃO FINAL — Modal de Nome + Cache Autocomplete + Envio Blindado + /forcesync robusto)
-# FIX: localizar membro mesmo em DM (não depender só do GUILD_ID)
+# (VERSÃO FINAL — Modal Nome/Sobrenome + Cache Autocomplete + Onboarding via CANAL + /cadastro backup)
 # =========================================================
 
 import asyncio
@@ -1235,7 +1235,7 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 # Localizar membro: funciona em clique no servidor OU em DM
 # =========================================================
 async def find_member_anywhere(interaction: discord.Interaction, member_id: int) -> tuple[discord.Guild | None, discord.Member | None]:
-    # 1) Se a interação veio de dentro do servidor, é o melhor caso
+    # 1) Se clique veio do servidor, melhor caso
     if interaction.guild:
         try:
             m = interaction.guild.get_member(member_id)
@@ -1245,7 +1245,7 @@ async def find_member_anywhere(interaction: discord.Interaction, member_id: int)
         except Exception:
             return interaction.guild, None
 
-    # 2) Se veio por DM, tenta GUILD_ID (se configurado)
+    # 2) DM: tenta pelo GUILD_ID fixo
     if GUILD_ID:
         try:
             g = client.get_guild(GUILD_ID)
@@ -1261,7 +1261,7 @@ async def find_member_anywhere(interaction: discord.Interaction, member_id: int)
         except Exception:
             pass
 
-    # 3) Último recurso: varre todos os servidores onde o bot está
+    # 3) varre todos os guilds do bot
     for g in list(client.guilds):
         try:
             m = g.get_member(member_id)
@@ -1377,24 +1377,18 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
 
 
 # =========================================================
-# Catálogo /comando
+# /comando (catálogo)
 # =========================================================
 COMMANDS_CATALOG = [
     ("jogador", "/inscrever", "Se inscreve em um ciclo aberto (com escolha de ciclo)."),
-    ("jogador", "/drop", "Sai do ciclo (somente enquanto estiver open)."),
     ("jogador", "/deck", "Define seu deck (1 vez POR CICLO, escolhendo o ciclo)."),
     ("jogador", "/decklist", "Define decklist (1 vez POR CICLO, escolhendo o ciclo)."),
-    ("jogador", "/deck_ver", "Mostra o deck do jogador em um ciclo."),
-    ("jogador", "/decklist_ver", "Mostra a decklist do jogador em um ciclo."),
-    ("jogador", "/pods_ver", "Mostra pods do ciclo."),
-    ("jogador", "/meus_matches", "Lista seus matches do ciclo (IDs, status e prazo 48h)."),
     ("jogador", "/resultado", "Reporta resultado V-D-E (menu)."),
-    ("jogador", "/rejeitar", "Rejeita resultado pendente dentro de 48h."),
     ("jogador", "/ranking", "Mostra ranking público do ciclo."),
     ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
     ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
+    ("jogador", "/cadastro", "Abre o cadastro do jogador (Nome/Sobrenome)."),
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
-
     ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
 ]
 
@@ -1427,7 +1421,7 @@ async def comando(interaction: discord.Interaction):
 
 
 # =========================================================
-# /forcesync (ADM) — timeout + resposta garantida
+# /forcesync (ADM) — resposta garantida
 # =========================================================
 @client.tree.command(name="forcesync", description="(ADM) Força sincronização dos comandos no servidor")
 async def forcesync(interaction: discord.Interaction):
@@ -1447,7 +1441,7 @@ async def forcesync(interaction: discord.Interaction):
         await asyncio.wait_for(client.tree.sync(guild=guild), timeout=15)
         await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
     except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ O Discord demorou para responder (timeout). Tente novamente em 30s.", ephemeral=True)
+        await interaction.followup.send("⚠️ Timeout no Discord. Tente novamente em 30s.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Falha ao sincronizar: {type(e).__name__} — {e}", ephemeral=True)
 
@@ -1477,7 +1471,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
 
         guild, member = await find_member_anywhere(interaction, self.member_id)
 
-        # salva no Sheets
+        # salvar no Sheets
         try:
             sh = open_sheet()
             ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
@@ -1486,7 +1480,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
         except Exception:
             pass
 
-        # tenta alterar nickname
+        # tentar alterar nickname
         nick_ok = False
         if member:
             try:
@@ -1510,7 +1504,26 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             )
 
         try:
-            await log_admin_guild(guild, f"📝 NicknameModal: <@{self.member_id}> informou nome: **{raw}** (nick_ok={nick_ok}).")
+            await log_admin_guild(guild, f"📝 Cadastro: <@{self.member_id}> -> {raw} (nick_ok={nick_ok})")
+        except Exception:
+            pass
+
+
+# =========================================================
+# /cadastro (backup) — funciona dentro do servidor
+# =========================================================
+@client.tree.command(name="cadastro", description="Cadastro do jogador (Nome e Sobrenome).")
+async def cadastro(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "⚠️ Use este comando dentro do servidor (não funciona por DM).",
+            ephemeral=True
+        )
+    try:
+        await interaction.response.send_modal(NicknameModal(interaction.user.id))
+    except Exception:
+        try:
+            await interaction.response.send_message("⚠️ Não consegui abrir o formulário agora. Tente novamente.", ephemeral=True)
         except Exception:
             pass
 
@@ -1530,7 +1543,7 @@ class OnboardingView(discord.ui.View):
         if not member or not guild:
             return await interaction.response.send_message(
                 "⚠️ Não consegui localizar seu usuário no servidor.\n"
-                "Confirme se você já entrou no servidor e aceitou as regras (se houver).",
+                "Entre no servidor e use `/cadastro` no canal de comandos.",
                 ephemeral=True
             )
 
@@ -1550,11 +1563,12 @@ class OnboardingView(discord.ui.View):
                 ephemeral=True
             )
 
+        # abre modal
         try:
             await interaction.response.send_modal(NicknameModal(member.id))
         except Exception:
             try:
-                await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Tente novamente.", ephemeral=True)
+                await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Use `/cadastro`.", ephemeral=True)
             except Exception:
                 pass
 
@@ -1579,7 +1593,23 @@ async def send_onboarding(member: discord.Member):
     )
     view = OnboardingView(member.id)
 
-    # 1) tenta DM
+    # 1) PRIORIDADE: enviar no canal do servidor (evita erro de DM)
+    try:
+        if WELCOME_CHANNEL_ID and member.guild:
+            ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
+            if not ch:
+                ch = await member.guild.fetch_channel(WELCOME_CHANNEL_ID)
+            if ch:
+                await ch.send(f"{member.mention}\n{text}", view=view)
+                try:
+                    await log_admin_guild(member.guild, f"💬 Onboarding enviado no canal {ch.mention} para {member.mention}.")
+                except Exception:
+                    pass
+                return
+    except Exception:
+        pass
+
+    # 2) fallback: DM
     try:
         await member.send(text, view=view)
         try:
@@ -1590,28 +1620,9 @@ async def send_onboarding(member: discord.Member):
     except Exception:
         pass
 
-    # 2) fallback em canal configurado
-    if WELCOME_CHANNEL_ID and member.guild:
-        ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
-        if not ch:
-            try:
-                ch = await member.guild.fetch_channel(WELCOME_CHANNEL_ID)
-            except Exception:
-                ch = None
-        if ch:
-            try:
-                await ch.send(f"{member.mention}\n{text}", view=view)
-                try:
-                    await log_admin_guild(member.guild, f"💬 Onboarding enviado no canal {ch.mention} para {member.mention}.")
-                except Exception:
-                    pass
-                return
-            except Exception:
-                pass
-
-    # 3) log
+    # 3) se falhar, loga
     try:
-        await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (DM e canal). Usuário: {member.mention}")
+        await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (canal e DM). Usuário: {member.mention}")
     except Exception:
         pass
 
