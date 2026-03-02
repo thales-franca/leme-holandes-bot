@@ -1124,15 +1124,9 @@ def recalculate_cycle(season_id: int, cycle: int):
 # - Gate de entrada novo usuário (Participar/Assistir) + cargo automático Jogador
 # =========================================================
 
-
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING (Participar/Assistir)
-# (REVISADO v2)
-# AJUSTES FEITOS NESTA REVISÃO:
-# - ONBOARDING blindado: só o usuário-alvo pode clicar nos botões (evita clique de terceiros no canal).
-# - setup_hook agora garante a BASE (ensure_all_sheets) na inicialização (não quebra se faltar Sheets).
-# - Remove duplicação desnecessária de build_players_nick_map aqui (usa a do BLOCO 2).
-# - Mantém catálogo completo de comandos como você pediu.
+# (REVISADO FINAL: ac_cycle_open agora só lista ciclos OPEN reais da aba Cycles)
 # =========================================================
 
 # =========================
@@ -1146,34 +1140,15 @@ class LemeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # 1) garante planilha/base (best-effort)
-        try:
-            sh = open_sheet()
-            ensure_all_sheets(sh)
-        except Exception:
-            # não derruba o bot se Sheets estiver fora (mas comandos que usam Sheets vão falhar)
-            pass
-
-        # 2) sync dos comandos (guild-scoped quando possível)
+        # sync dos comandos (guild-scoped quando possível)
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
-            try:
-                self.tree.copy_global_to(guild=guild)
-            except Exception:
-                pass
+            self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
 
 client = LemeBot()
-
-
-@client.event
-async def on_ready():
-    try:
-        print(f"[BOT] Online como {client.user} | guild_id={GUILD_ID}")
-    except Exception:
-        pass
 
 
 # =========================
@@ -1203,17 +1178,25 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
             pass
 
 
+# =========================
+# Nick map helper (compat)
+# =========================
+def build_players_nick_map(ws_players) -> dict[str, str]:
+    # compat com blocos anteriores: usa helper oficial do Bloco 2
+    return get_player_nick_map(ws_players)
+
+
 # =========================================================
 # Autocomplete helpers (season/cycle/match)
 # =========================================================
 async def ac_season_active(interaction: discord.Interaction, current: str):
     """
-    Retorna seasons disponíveis (preferindo a open).
+    Retorna seasons disponíveis (preferindo a current/active).
     """
     try:
         sh = open_sheet()
         ws_seasons = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-        ensure_sheet_columns(ws_seasons, SEASONS_REQUIRED)
+        ensure_sheet_columns(ws_seasons, SEASONS_HEADER)
 
         rows = ws_seasons.get_all_records()
         cur = str(current).strip()
@@ -1229,11 +1212,11 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
                 continue
             choices.append(app_commands.Choice(name=label[:100], value=str(sid)))
 
-        # open primeiro
+        # active primeiro (best-effort)
         def keyf(c: app_commands.Choice):
             v = safe_int(c.value, 0)
-            is_open = ("open" in c.name.lower())
-            return (0 if is_open else 1, v)
+            is_active = ("open" in c.name.lower())
+            return (0 if is_active else 1, v)
 
         choices.sort(key=keyf)
         return choices[:25]
@@ -1247,7 +1230,10 @@ async def ac_season_active(interaction: discord.Interaction, current: str):
 
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
-    Ciclos OPEN da SEASON atual.
+    Ciclos OPEN REAIS da season atual:
+    - Só lista ciclos que EXISTEM na aba Cycles
+    - status == open
+    - Sem "sugestão" e sem ciclo futuro inexistente
     """
     try:
         sh = open_sheet()
@@ -1258,21 +1244,29 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
         if season_id <= 0:
             return []
 
-        open_cycles = suggest_open_cycles(ws_cycles, season_id=season_id, limit=25)
-
+        rows = ws_cycles.get_all_records()
         cur = str(current).strip()
+
+        open_cycles: list[int] = []
+        for r in rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            cyc = safe_int(r.get("cycle", 0), 0)
+            st = str(r.get("status", "")).strip().lower()
+            if cyc <= 0:
+                continue
+            if st != "open":
+                continue
+            open_cycles.append(cyc)
+
+        open_cycles = sorted(set(open_cycles))
+
         if cur:
             open_cycles = [c for c in open_cycles if str(c).startswith(cur)]
 
-        # OBS: suggest_open_cycles pode incluir "próximo ciclo" inexistente.
-        # Isso é ok porque /inscrever valida existência + status OPEN.
-        return [app_commands.Choice(name=f"Ciclo {c} (open/sugestão)", value=str(c)) for c in open_cycles[:25]]
+        return [app_commands.Choice(name=f"Ciclo {c} (open)", value=str(c)) for c in open_cycles[:25]]
     except Exception:
-        base = [str(i) for i in range(1, 11)]
-        cur = str(current).strip()
-        if cur:
-            base = [x for x in base if x.startswith(cur)]
-        return [app_commands.Choice(name=f"Ciclo {x}", value=x) for x in base[:25]]
+        return []
 
 
 async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
@@ -1287,7 +1281,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
             return []
 
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
 
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         nick_map = build_players_nick_map(ws_players)
@@ -1363,6 +1357,7 @@ async def ac_match_id_any(interaction: discord.Interaction, current: str):
 
 # =========================================================
 # Catálogo de comandos (para /comando)
+# IMPORTANTE: listar TODOS, mesmo se alguns forem "luxo"
 # =========================================================
 COMMANDS_CATALOG = [
     # Jogador
@@ -1374,7 +1369,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/decklist_ver", "Mostra a decklist do jogador em um ciclo."),
     ("jogador", "/pods_ver", "Mostra pods do ciclo."),
     ("jogador", "/meus_matches", "Lista seus matches do ciclo (IDs, status e prazo 48h)."),
-    ("jogador", "/resultado", "Reporta resultado V-D-E."),
+    ("jogador", "/resultado", "Reporta resultado V-D-E (menu)."),
     ("jogador", "/rejeitar", "Rejeita resultado pendente dentro de 48h."),
     ("jogador", "/ranking", "Mostra ranking público do ciclo."),
     ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
@@ -1384,7 +1379,7 @@ COMMANDS_CATALOG = [
     # ADM
     ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
     ("adm", "/ciclo_abrir", "Cria/abre um ciclo (status=open)."),
-    ("adm", "/ciclo_reabrir", "Reabre um ciclo (se permitido)."),
+    ("adm", "/ciclo_reabrir", "Reabre um ciclo (somente se NÃO estiver completed e sem PodsHistory)."),
     ("adm", "/ciclo_fechar", "Fecha ciclo aberto por engano (status=locked)."),
     ("adm", "/ciclo_encerrar", "Encerra ciclo (status=completed)."),
     ("adm", "/ciclo_status", "Resumo do ciclo."),
@@ -1416,7 +1411,7 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
 
 
 # =========================
-# /comando
+# /comando (menu/lista)
 # =========================
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis (de acordo com seu cargo).")
 async def comando(interaction: discord.Interaction):
@@ -1439,7 +1434,7 @@ async def comando(interaction: discord.Interaction):
 
 
 # =========================================================
-# ONBOARDING — Participar/Assistir
+# ONBOARDING — Participar/Assistir (SEM DUPLICAR NO BLOCO 8)
 # Regras finais:
 # - Participar: aplica SOMENTE cargo "Jogador"
 # - Assistir: não aplica cargo
@@ -1448,13 +1443,6 @@ class OnboardingView(discord.ui.View):
     def __init__(self, member_id: int, timeout: int = 3600):
         super().__init__(timeout=timeout)
         self.member_id = member_id
-
-    def _guard(self, interaction: discord.Interaction) -> bool:
-        # Impede que outra pessoa clique caso isso esteja num canal público
-        try:
-            return interaction.user and interaction.user.id == self.member_id
-        except Exception:
-            return False
 
     async def _get_member(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -1469,9 +1457,6 @@ class OnboardingView(discord.ui.View):
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success)
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._guard(interaction):
-            return await interaction.response.send_message("⚠️ Este onboarding não é para você.", ephemeral=True)
-
         m = await self._get_member(interaction)
         if not m:
             return await interaction.response.send_message("⚠️ Não consegui localizar seu usuário no servidor.", ephemeral=True)
@@ -1506,9 +1491,6 @@ class OnboardingView(discord.ui.View):
 
     @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary)
     async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._guard(interaction):
-            return await interaction.response.send_message("⚠️ Este onboarding não é para você.", ephemeral=True)
-
         m = await self._get_member(interaction)
         await interaction.response.send_message(
             "✅ Tranquilo. Você entrou como **Assistir**.\n"
@@ -1520,7 +1502,6 @@ class OnboardingView(discord.ui.View):
                 await log_admin_guild(m.guild, f"👀 Onboarding: {m.mention} escolheu **Assistir** (sem cargo).")
         except Exception:
             pass
-
         self.stop()
 
 
@@ -1579,7 +1560,7 @@ async def on_member_join(member: discord.Member):
 
 
 # =========================================================
-# Comandos básicos
+# Comandos básicos que sempre ajudam
 # =========================================================
 @client.tree.command(name="ping", description="Teste do bot")
 async def ping(interaction: discord.Interaction):
@@ -1609,6 +1590,8 @@ async def forcesync(interaction: discord.Interaction):
 
 # =========================================================
 # [BLOCO 5/8 termina aqui]
+# =========================================================
+
 
 
 # =========================================================
