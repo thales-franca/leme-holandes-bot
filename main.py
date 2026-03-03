@@ -1513,7 +1513,7 @@ async def meuid(interaction: discord.Interaction):
 # =========================================================
 class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     nome = discord.ui.TextInput(
-        label="Insira seu Nome e Sobrenome igual no WhatsApp, para facilitar a localização das Matchs",
+        label="Insira seu Nome e Sobrenome sem Abreviações",
         required=True,
         max_length=32,
     )
