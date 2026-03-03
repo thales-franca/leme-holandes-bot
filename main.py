@@ -684,14 +684,8 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # =========================================================
 # [BLOCO 2/8 termina aqui]
 
-# No BLOCO 3/8 eu trago:
-# - Match helpers (IDs, auto-confirm, anti-repetição)
-# - Prazo do ciclo (dias por maior POD) e compute start/deadline
 # =========================================================
-
-
-# =========================================================
-# [BLOCO 3/8] — MATCH HELPERS + ANTI-REPETIÇÃO + PRAZO DO CICLO
+# [BLOCO 3/8] — MATCH HELPERS + ANTI-REPETIÇÃO + PRAZO DO CICLO + AUTOCOMPLETE
 # =========================================================
 
 # =========================
@@ -876,13 +870,108 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
     return (fmt_br_dt(start_dt), fmt_br_dt(deadline_dt), max_pod_size, days)
 
 
+# =========================
+# AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
+# =========================
+async def ac_cycle_open(interaction: discord.Interaction, current: str):
+    """
+    Sugere ciclos OPEN da season ativa.
+    Retorna Choices de string (Discord autocomplete).
+    """
+    try:
+        sh = open_sheet()
+        season_id = get_current_season_id(sh)
+        if season_id <= 0:
+            return []
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        candidates = suggest_open_cycles(ws_cycles, season_id, limit=25)
+        q = str(current or "").strip()
+
+        out = []
+        for c in candidates:
+            s = str(c)
+            if q and q not in s:
+                continue
+            out.append(app_commands.Choice(name=s, value=s))
+        return out[:25]
+    except Exception:
+        return []
+
+
+async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
+    """
+    Sugere match_id relevantes ao usuário:
+    - Matches "em aberto" (confirmed_status vazio/open e sem reported_by_id) para /resultado
+    - Matches "pending" onde o usuário é o oponente (reported_by_id != user) para /rejeitar
+    Sempre filtra season ativa e active=TRUE.
+    """
+    try:
+        sh = open_sheet()
+        season_id = get_current_season_id(sh)
+        if season_id <= 0:
+            return []
+
+        ws = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+        ensure_sheet_columns(ws, MATCHES_REQUIRED_COLS)
+
+        uid = str(interaction.user.id)
+        q = str(current or "").strip().lower()
+
+        rows = ws.get_all_records()
+        found = []
+
+        for r in rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            if not as_bool(r.get("active", "TRUE")):
+                continue
+
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+            if uid not in (a, b):
+                continue
+
+            mid = str(r.get("match_id", "")).strip()
+            if not mid:
+                continue
+
+            status = str(r.get("confirmed_status", "")).strip().lower()
+            status = status or "open"
+            reported_by = str(r.get("reported_by_id", "")).strip()
+
+            # 1) em aberto para reportar
+            is_open_for_report = (status in ("open", "") and not reported_by)
+
+            # 2) pending para rejeitar (somente o oponente)
+            is_pending_for_reject = (status == "pending" and reported_by and reported_by != uid)
+
+            if not (is_open_for_report or is_pending_for_reject):
+                continue
+
+            if q and q not in mid.lower():
+                continue
+
+            found.append(mid)
+
+        # dedup preservando ordem
+        seen = set()
+        uniq = []
+        for m in found:
+            if m not in seen:
+                uniq.append(m)
+                seen.add(m)
+
+        return [app_commands.Choice(name=m, value=m) for m in uniq[:25]]
+
+    except Exception:
+        return []
+
+
 # =========================================================
 # [BLOCO 3/8 termina aqui]
-# No BLOCO 4/8 eu trago:
-# - Recálculo oficial (Pontos > OMW% > GW% > OGW%, piso 33,3%)
-# - Escrita do Standings SEM incremental (zera e escreve do zero por season+ciclo)
-# =========================================================
-
 
 # =========================================================
 # [BLOCO 4/8] — RECÁLCULO OFICIAL (MWP/OMW/GWP/OGW) + STANDINGS (ZERADO)
