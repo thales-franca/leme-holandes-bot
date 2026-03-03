@@ -1254,9 +1254,16 @@ def recalculate_cycle(season_id: int, cycle: int):
 # =========================================================
 # [BLOCO 4/8 termina aqui]
 # =========================================================
+
+
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + /COMANDO + ONBOARDING (HANDSHAKE)
 # (ROBUSTO: somente no servidor + Views persistentes + modal nome/sobrenome)
+#
+# AJUSTE (BLINDAGEM A - MODAL):
+# - "Participar" NÃO abre modal no mesmo clique (evita timeout/unknown interaction).
+# - Após aplicar o cargo, envia botão "Abrir cadastro" (novo interaction) que abre o modal.
+# - Adiciona logs detalhados no canal LOG_ADMIN para não ficar cego.
 # =========================================================
 
 import asyncio
@@ -1277,6 +1284,7 @@ class LemeBot(discord.Client):
             self.add_view(OnboardingStartView())
             self.add_view(OnboardingConfirmIdView())
             self.add_view(OnboardingChoiceView())
+            self.add_view(OpenCadastroView())  # NOVO
         except Exception:
             pass
 
@@ -1535,7 +1543,8 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             member = guild.get_member(interaction.user.id)
             if member is None:
                 member = await guild.fetch_member(interaction.user.id)
-        except Exception:
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ NicknameModal fetch_member falhou: {type(e).__name__} — {e}")
             member = None
 
         # Membership Screening
@@ -1551,8 +1560,8 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
             ensure_sheet_columns(ws_players, PLAYERS_HEADER)
             upsert_player(ws_players, str(interaction.user.id), raw)
-        except Exception:
-            pass
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ NicknameModal Sheets falhou: {type(e).__name__} — {e}")
 
         # tentar alterar nickname
         nick_ok = False
@@ -1560,8 +1569,9 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             try:
                 await member.edit(nick=raw, reason="Cadastro - Nome informado pelo jogador")
                 nick_ok = True
-            except Exception:
+            except Exception as e:
                 nick_ok = False
+                await log_admin_guild(guild, f"⚠️ member.edit(nick) falhou: {type(e).__name__} — {e}")
 
         if nick_ok:
             await interaction.response.send_message(
@@ -1595,11 +1605,44 @@ async def cadastro(interaction: discord.Interaction):
         )
     try:
         await interaction.response.send_modal(NicknameModal())
-    except Exception:
+    except Exception as e:
+        try:
+            await log_admin_guild(interaction.guild, f"⚠️ /cadastro send_modal falhou: {type(e).__name__} — {e}")
+        except Exception:
+            pass
         await interaction.response.send_message(
             "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
             ephemeral=True
         )
+
+
+# =========================================================
+# NOVO: View persistente para abrir o Modal em um NOVO clique
+# =========================================================
+class OpenCadastroView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Abrir cadastro",
+        style=discord.ButtonStyle.primary,
+        custom_id="leme:onb_open_cadastro"
+    )
+    async def open_cadastro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            return await interaction.response.send_message("⚠️ Use dentro do servidor.", ephemeral=True)
+
+        try:
+            await interaction.response.send_modal(NicknameModal())
+        except Exception as e:
+            try:
+                await log_admin_guild(interaction.guild, f"⚠️ OpenCadastroView send_modal falhou: {type(e).__name__} — {e}")
+            except Exception:
+                pass
+            await interaction.response.send_message(
+                "⚠️ Não consegui abrir o formulário agora. Tente novamente em alguns segundos ou use `/cadastro`.",
+                ephemeral=True
+            )
 
 
 # =========================================================
@@ -1653,7 +1696,8 @@ class OnboardingConfirmIdView(discord.ui.View):
             member = guild.get_member(interaction.user.id)
             if member is None:
                 member = await guild.fetch_member(interaction.user.id)
-        except Exception:
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ ConfirmarID fetch_member falhou: {type(e).__name__} — {e}")
             member = None
 
         if not member:
@@ -1693,30 +1737,34 @@ class OnboardingChoiceView(discord.ui.View):
     )
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild:
-            return await interaction.response.send_message(
-                "⚠️ Use dentro do servidor.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("⚠️ Use dentro do servidor.", ephemeral=True)
 
         guild = interaction.guild
+
+        # ACK cedo para evitar expiração do interaction
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
 
         # buscar member
         try:
             member = guild.get_member(interaction.user.id)
             if member is None:
                 member = await guild.fetch_member(interaction.user.id)
-        except Exception:
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ Participar fetch_member falhou: {type(e).__name__} — {e}")
             member = None
 
         if not member:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Não consegui localizar seu usuário no servidor.\n"
                 "Finalize a entrada (aceite regras) e tente novamente.",
                 ephemeral=True
             )
 
         if getattr(member, "pending", False):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Você ainda está pendente (regras do servidor).\n"
                 "Conclua a entrada e tente novamente.",
                 ephemeral=True
@@ -1724,7 +1772,7 @@ class OnboardingChoiceView(discord.ui.View):
 
         role_jog = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
         if not role_jog:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Cargo **Jogador** não encontrado.\n"
                 "Crie o cargo com esse nome exato ou ajuste ROLE_JOGADOR no Render.",
                 ephemeral=True
@@ -1732,23 +1780,24 @@ class OnboardingChoiceView(discord.ui.View):
 
         try:
             await member.add_roles(role_jog, reason="Onboarding - Participar")
-        except Exception:
-            return await interaction.response.send_message(
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ add_roles falhou: {type(e).__name__} — {e}")
+            return await interaction.followup.send(
                 "❌ Não consegui aplicar o cargo.\n"
                 "Verifique permissão do bot: **Gerenciar Cargos** e se o cargo do bot está acima do cargo Jogador.",
                 ephemeral=True
             )
 
-        # MODAL precisa ser via response (não via followup)
+        # BLINDAGEM A: modal só no próximo clique
         try:
-            await interaction.response.send_modal(NicknameModal())
-        except Exception:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ Cargo **Jogador** aplicado.\n"
-                "⚠️ Não consegui abrir o formulário agora.\n"
-                "Use `/cadastro` no canal de comandos.",
-                ephemeral=True
+                "Agora clique em **Abrir cadastro** para informar Nome e Sobrenome.",
+                ephemeral=True,
+                view=OpenCadastroView()
             )
+        except Exception as e:
+            await log_admin_guild(guild, f"⚠️ followup do Participar falhou: {type(e).__name__} — {e}")
 
         try:
             await log_admin_guild(guild, f"👤 Onboarding: {member.mention} escolheu **Participar** (cargo Jogador aplicado).")
@@ -1795,7 +1844,7 @@ async def _get_welcome_channel(guild: discord.Guild) -> discord.TextChannel | No
     try:
         me = guild.me
         for c in guild.text_channels:
-            if c.permissions_for(me).send_messages:
+            if me and c.permissions_for(me).send_messages:
                 return c
     except Exception:
         pass
@@ -1811,6 +1860,7 @@ async def on_member_join(member: discord.Member):
     try:
         ch = await _get_welcome_channel(member.guild)
         if not ch:
+            await log_admin_guild(member.guild, f"⚠️ on_member_join: não achei canal de boas-vindas (WELCOME_CHANNEL_ID={WELCOME_CHANNEL_ID}).")
             return
 
         await ch.send(
@@ -1826,9 +1876,9 @@ async def on_member_join(member: discord.Member):
         except Exception:
             pass
 
-    except Exception:
+    except Exception as e:
         try:
-            await log_admin_guild(member.guild, f"⚠️ Falha ao enviar onboarding no canal. Usuário: {member.mention}")
+            await log_admin_guild(member.guild, f"⚠️ Falha on_member_join: {type(e).__name__} — {e} | user={member} ({member.id})")
         except Exception:
             pass
 
@@ -1864,6 +1914,8 @@ async def ping(interaction: discord.Interaction):
 # =========================================================
 # [BLOCO 5/8 termina aqui]
 # =========================================================
+
+
 # =========================================================
 # [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (1x POR CICLO) + VERIFICAÇÃO
 # (REVISADO v2)
