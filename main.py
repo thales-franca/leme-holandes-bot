@@ -684,6 +684,13 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # =========================================================
 # [BLOCO 2/8 termina aqui]
 
+# No BLOCO 3/8 eu trago:
+# - Match helpers (IDs, auto-confirm, anti-repetição)
+# - Prazo do ciclo (dias por maior POD) e compute start/deadline
+# - Autocomplete functions (DEVEM ficar acima dos decorators que usam)
+# =========================================================
+
+
 # =========================================================
 # [BLOCO 3/8] — MATCH HELPERS + ANTI-REPETIÇÃO + PRAZO DO CICLO + AUTOCOMPLETE
 # =========================================================
@@ -875,8 +882,9 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =========================
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
-    Sugere ciclos OPEN da season ativa.
-    Retorna Choices de string (Discord autocomplete).
+    Lista SOMENTE ciclos existentes na aba Cycles (season ativa),
+    com label mostrando status: aberto/fechado/encerrado.
+    NÃO sugere ciclo max+1.
     """
     try:
         sh = open_sheet()
@@ -887,15 +895,29 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
-        candidates = suggest_open_cycles(ws_cycles, season_id, limit=25)
         q = str(current or "").strip()
+        items = list_cycles(ws_cycles, season_id)  # [(cycle, status)] somente existentes
+        if not items:
+            return []
 
-        out = []
-        for c in candidates:
-            s = str(c)
-            if q and q not in s:
+        def label_status(st: str) -> str:
+            st = (st or "").strip().lower()
+            if st == "open":
+                return "aberto"
+            if st in ("locked", "closed"):
+                return "fechado"
+            if st == "completed":
+                return "encerrado"
+            return st or "indefinido"
+
+        out: list[app_commands.Choice[str]] = []
+        for c, st in items:
+            c_str = str(c)
+            if q and q not in c_str:
                 continue
-            out.append(app_commands.Choice(name=s, value=s))
+            lab = f"Ciclo {c} / {label_status(st)}"
+            out.append(app_commands.Choice(name=lab, value=c_str))
+
         return out[:25]
     except Exception:
         return []
@@ -942,10 +964,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
             status = status or "open"
             reported_by = str(r.get("reported_by_id", "")).strip()
 
-            # 1) em aberto para reportar
             is_open_for_report = (status in ("open", "") and not reported_by)
-
-            # 2) pending para rejeitar (somente o oponente)
             is_pending_for_reject = (status == "pending" and reported_by and reported_by != uid)
 
             if not (is_open_for_report or is_pending_for_reject):
@@ -956,7 +975,6 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
 
             found.append(mid)
 
-        # dedup preservando ordem
         seen = set()
         uniq = []
         for m in found:
@@ -965,13 +983,42 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
                 seen.add(m)
 
         return [app_commands.Choice(name=m, value=m) for m in uniq[:25]]
+    except Exception:
+        return []
 
+
+async def ac_score_vde(interaction: discord.Interaction, current: str):
+    """
+    Autocomplete de placar V-D-E (padrão estilo Melee).
+    Mantém liberdade do usuário digitar manualmente.
+    """
+    try:
+        q = str(current or "").strip().replace(" ", "")
+
+        # Padrões comuns (best-of-3) + ID
+        options = [
+            "2-0-0",
+            "2-1-0",
+            "1-0-0",
+            "1-0-1",
+            "1-1-0",
+            "1-1-1",
+            "0-0-3",  # ID (empate intencional / não reportado no final)
+        ]
+
+        out = []
+        for s in options:
+            if q and q not in s:
+                continue
+            out.append(app_commands.Choice(name=s, value=s))
+        return out[:25]
     except Exception:
         return []
 
 
 # =========================================================
 # [BLOCO 3/8 termina aqui]
+# =========================================================
 
 # =========================================================
 # [BLOCO 4/8] — RECÁLCULO OFICIAL (MWP/OMW/GWP/OGW) + STANDINGS (ZERADO)
@@ -2260,20 +2307,14 @@ async def decklist_ver(interaction: discord.Interaction, cycle: int, jogador: di
 # [BLOCO 6/8 termina aqui]
 # =========================================================
 # =========================================================
+# =========================================================
 # [BLOCO 7/8] — PODS + MATCHES + RESULTADOS (REVISADO v2)
 # AJUSTES FEITOS NESTA REVISÃO:
-# - IMPLEMENTA /pods_gerar e /pods_publicar (estavam faltando no seu bloco atual, mas existem no catálogo).
-# - /resultado agora:
-#   - valida V-D-E (usa parse_score_3parts + validate_3parts_rules do BLOCO 1)
-#   - só permite reportar se o usuário estiver no match
-#   - grava auto_confirm_at (agora+48h)
-#   - escreve o placar no sentido CORRETO (se reportou como player_b, inverte a/b)
-#   - não deixa sobrescrever pending já reportado (exceto ADM/Org via /resultado_admin no BLOCO 8)
-# - /rejeitar agora:
-#   - só o oponente pode rejeitar
-#   - só dentro da janela de 48h (auto_confirm_at)
-#   - limpa campos e volta match para "em aberto" (confirmed_status vazio)
-# - /meus_matches mostra prazo/expiração quando estiver pending
+# - IMPLEMENTA /pods_gerar e /pods_publicar
+# - /resultado valida V-D-E, grava pending + 48h, inverte a/b se necessário
+# - /rejeitar só oponente e só dentro das 48h, limpa e reabre match
+# - /meus_matches mostra expiração quando pending
+# - (NOVO) placar com autocomplete padrão Melee (ac_score_vde do BLOCO 3)
 # =========================================================
 
 
@@ -2310,9 +2351,8 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
         ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
         ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
-        colm = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        # ciclo precisa existir e estar OPEN
         cf = get_cycle_fields(ws_cycles, season_id, cycle)
         st = (cf.get("status") or "").strip().lower()
         if cf.get("status") is None:
@@ -2324,7 +2364,6 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app
         if st != "open":
             return await interaction.followup.send(f"❌ Ciclo não está OPEN (status: {st}).", ephemeral=True)
 
-        # não gerar se já existe PodsHistory nesse ciclo (blindagem contra duplicação)
         pods_rows = ws_pods.get_all_records()
         if any(safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle for r in pods_rows):
             return await interaction.followup.send(
@@ -2332,7 +2371,6 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app
                 ephemeral=True
             )
 
-        # lista inscritos ativos
         enr_rows = ws_enr.get_all_records()
         players = []
         for r in enr_rows:
@@ -2353,11 +2391,9 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app
         ps = int(pod_size.value) if pod_size else 4
         ps = max(3, min(ps, 6))
 
-        # anti-repetição: usa matches confirmados do histórico inteiro
         past_pairs = get_past_confirmed_pairs(ws_matches)
         pods, score = best_shuffle_min_repeats(players, ps, past_pairs, tries=350)
 
-        # grava PodsHistory
         nowb = now_br_str()
         pod_letter = "A"
         for pod in pods:
@@ -2365,41 +2401,37 @@ async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app
                 ws_pods.append_row([str(season_id), str(cycle), pod_letter, str(pid), nowb], value_input_option="USER_ENTERED")
             pod_letter = chr(ord(pod_letter) + 1)
 
-        # cria matches (round-robin) para cada pod
         created_matches = 0
         pod_letter = "A"
         for pod in pods:
             pairs = round_robin_pairs(pod)
             for a, b in pairs:
                 mid = new_match_id(season_id, cycle, pod_letter)
-                # Match row no MESMO formato de MATCHES_REQUIRED_COLS
                 row = [
-                    mid,                               # match_id
-                    str(season_id),                     # season_id
-                    str(cycle),                         # cycle
-                    str(pod_letter),                    # pod
-                    str(a),                             # player_a_id
-                    str(b),                             # player_b_id
-                    "",                                 # a_games_won
-                    "",                                 # b_games_won
-                    "",                                 # draw_games
-                    "normal",                           # result_type
-                    "",                                 # confirmed_status (vazio = "não reportado ainda")
-                    "",                                 # reported_by_id
-                    "",                                 # confirmed_by_id
-                    "",                                 # message_id
-                    "TRUE",                             # active
-                    nowb,                               # created_at
-                    nowb,                               # updated_at
-                    "",                                 # auto_confirm_at
+                    mid,
+                    str(season_id),
+                    str(cycle),
+                    str(pod_letter),
+                    str(a),
+                    str(b),
+                    "",
+                    "",
+                    "",
+                    "normal",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "TRUE",
+                    nowb,
+                    nowb,
+                    "",
                 ]
                 ws_matches.append_row(row, value_input_option="USER_ENTERED")
                 created_matches += 1
             pod_letter = chr(ord(pod_letter) + 1)
 
-        # trava ciclo e grava start/deadline
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
-        # calcula e grava prazo baseado no maior POD
         start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
         if start_br and end_br:
             set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
@@ -2593,7 +2625,7 @@ async def meus_matches(interaction: discord.Interaction, cycle: int):
 # - salva placar invertendo se reportou como player_b
 # =========================================================
 @client.tree.command(name="resultado", description="Reporta resultado do match (V-D-E em games).")
-@app_commands.autocomplete(match_id=ac_match_id_user_pending)
+@app_commands.autocomplete(match_id=ac_match_id_user_pending, placar=ac_score_vde)
 @app_commands.describe(match_id="Match ID", placar="Formato V-D-E (ex: 2-1-0)")
 async def resultado(interaction: discord.Interaction, match_id: str, placar: str):
     await interaction.response.defer(ephemeral=True)
@@ -2631,7 +2663,6 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
         if current_status == "confirmed":
             return await interaction.followup.send("❌ Match já está CONFIRMED.", ephemeral=True)
 
-        # não sobrescreve pending já reportado
         if current_status == "pending" and str(getc("reported_by_id") or "").strip():
             return await interaction.followup.send(
                 "❌ Já existe um resultado PENDENTE aguardando confirmação.\n"
@@ -2655,11 +2686,9 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
         if not ok:
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
 
-        # converte para o formato do match (player_a)
         if uid == a:
             a_gw, b_gw, d_g = v, d, e
         else:
-            # reportou como player_b => inverte para salvar do ponto de vista do player_a
             a_gw, b_gw, d_g = d, v, e
 
         rt = "normal"
@@ -2752,7 +2781,6 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
         if ac and utc_now_dt() > ac:
             return await interaction.followup.send("❌ Prazo de rejeição expirou (48h). Peça para um ADM ajustar.", ephemeral=True)
 
-        # limpa e volta para "open"
         ws.update([[""]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
         ws.update([[""]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
         ws.update([[""]], range_name=f"{col_letter(col['draw_games'])}{rown}")
@@ -2778,7 +2806,6 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
 # =========================================================
 # [BLOCO 7/8 termina aqui]
 # =========================================================
-
 # =========================================================
 # [BLOCO 8/8] — ADMIN FINAL + PRAZO + RANKINGS + EXPORT + START
 # (REVISADO v3 — CONSOLIDADO E ALINHADO AOS BLOCOS 2,6,7)
