@@ -1508,7 +1508,7 @@ async def meuid(interaction: discord.Interaction):
 # =========================================================
 class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     nome = discord.ui.TextInput(
-        label="Insira seu Nome e Sobrenome sem Abreviações",
+        label="Insira seu Nome e Sobrenome sem abreviações",
         required=True,
         max_length=32,
     )
@@ -1520,9 +1520,10 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.nome.value).strip()
 
+        # ✅ mantém sua revisão (validação rápida usando response.send_message)
         if len(raw.split()) < 2:
             return await interaction.response.send_message(
-                "⚠️ Informe Nome e Sobrenome.\nExemplo: Diego Reis",
+                "⚠️ Informe Nome e Sobrenome.\nExemplo: João Silva",
                 ephemeral=True
             )
 
@@ -1534,29 +1535,46 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
 
         guild = interaction.guild
 
+        # ✅ BLINDAGEM: ACK rápido para evitar "Algo deu errado..." no modal
+        # (depois disso, sempre responder com followup)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
         # buscar Member com segurança
+        member = None
         try:
             member = guild.get_member(interaction.user.id)
             if member is None:
                 member = await guild.fetch_member(interaction.user.id)
-        except Exception:
+        except Exception as e:
+            try:
+                await log_admin_guild(guild, f"⚠️ Modal fetch_member falhou: {type(e).__name__} — {e}")
+            except Exception:
+                pass
             member = None
 
         # Membership Screening
         if member and getattr(member, "pending", False):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Finalize a entrada no servidor (aceite as regras) e tente novamente.",
                 ephemeral=True
             )
 
         # salvar no Sheets
+        sheets_ok = True
         try:
             sh = open_sheet()
             ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
             ensure_sheet_columns(ws_players, PLAYERS_HEADER)
             upsert_player(ws_players, str(interaction.user.id), raw)
-        except Exception:
-            pass
+        except Exception as e:
+            sheets_ok = False
+            try:
+                await log_admin_guild(guild, f"⚠️ Modal Sheets falhou: {type(e).__name__} — {e}")
+            except Exception:
+                pass
 
         # tentar alterar nickname
         nick_ok = False
@@ -1564,8 +1582,12 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             try:
                 await member.edit(nick=raw, reason="Cadastro - Nome informado pelo jogador")
                 nick_ok = True
-            except Exception:
+            except Exception as e:
                 nick_ok = False
+                try:
+                    await log_admin_guild(guild, f"⚠️ Modal member.edit falhou: {type(e).__name__} — {e}")
+                except Exception:
+                    pass
 
         # Mensagem final + (opcional) escolha Participar/Assistir
         if self.show_choice_after:
@@ -1575,7 +1597,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 f"Nome: **{raw}**\n\n"
                 "Agora escolha como você quer entrar:"
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 base,
                 ephemeral=True,
                 view=OnboardingChoiceView()
@@ -1583,21 +1605,26 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
         else:
             # comportamento antigo do /cadastro: só orienta /inscrever
             if nick_ok:
-                await interaction.response.send_message(
-                    f"✅ Cadastro concluído!\nSeu nome foi definido como **{raw}**.\n\nAgora use `/inscrever`.",
-                    ephemeral=True
+                msg = (
+                    f"✅ Cadastro concluído!\n"
+                    f"Seu nome foi definido como **{raw}**.\n\n"
+                    "Agora use `/inscrever`."
                 )
             else:
-                await interaction.response.send_message(
+                msg = (
                     f"✅ Nome salvo: **{raw}**.\n\n"
                     "⚠️ Não consegui alterar seu apelido automaticamente.\n"
                     "Verifique: permissão **Gerenciar Apelidos** e se o cargo do bot está acima do cargo Jogador.\n\n"
-                    "Agora use `/inscrever`.",
-                    ephemeral=True
+                    "Agora use `/inscrever`."
                 )
 
+            if not sheets_ok:
+                msg += "\n\n⚠️ Observação: tive instabilidade ao salvar no Sheets. Um ADM pode confirmar no log."
+
+            await interaction.followup.send(msg, ephemeral=True)
+
         try:
-            await log_admin_guild(guild, f"📝 Cadastro: <@{interaction.user.id}> -> {raw} (nick_ok={nick_ok})")
+            await log_admin_guild(guild, f"📝 Cadastro: <@{interaction.user.id}> -> {raw} (nick_ok={nick_ok}, sheets_ok={sheets_ok})")
         except Exception:
             pass
 
