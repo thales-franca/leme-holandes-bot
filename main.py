@@ -1118,8 +1118,10 @@ def recalculate_cycle(season_id: int, cycle: int):
 # =========================================================
 # [BLOCO 4/8 termina aqui]
 # =========================================================
+# =========================================================
 # [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING
-# (FIX DEFINITIVO — onboarding usa SEMPRE interaction.user.id + trava clique por terceiros)
+# (VERSÃO FINAL — Modal Nome/Sobrenome + Cache Autocomplete + Onboarding via CANAL + /cadastro backup
+#  + FIX DEFINITIVO: onboarding em JOIN e também quando sair do PENDING (screening) + anti-duplicação)
 # =========================================================
 
 import asyncio
@@ -1132,7 +1134,7 @@ from time import time as _time
 class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True  # necessário para fetch_member
+        intents.members = True  # necessário para on_member_join + fetch_member
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -1156,15 +1158,14 @@ client = LemeBot()
 # =========================
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 
-# fallback hard (evita erro se env estiver 0 por engano)
-EFFECTIVE_GUILD_ID = GUILD_ID if GUILD_ID else 1475306333744922637
-
 
 # =========================
 # Logs (admin)
 # =========================
 async def log_admin_guild(guild: discord.Guild | None, text: str):
-    if not guild or not LOG_ADMIN_CHANNEL_ID:
+    if not guild:
+        return
+    if not LOG_ADMIN_CHANNEL_ID:
         return
     ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
     if not ch:
@@ -1231,26 +1232,48 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 
 
 # =========================================================
-# Localizar guild e membro (robusto)
+# Localizar membro: funciona em clique no servidor OU em DM
 # =========================================================
-async def get_guild_safely() -> discord.Guild | None:
-    try:
-        g = client.get_guild(EFFECTIVE_GUILD_ID)
-        if g is None:
-            g = await client.fetch_guild(EFFECTIVE_GUILD_ID)
-        return g
-    except Exception:
-        return None
+async def find_member_anywhere(
+    interaction: discord.Interaction, member_id: int
+) -> tuple[discord.Guild | None, discord.Member | None]:
+    # 1) Se clique veio do servidor, melhor caso
+    if interaction.guild:
+        try:
+            m = interaction.guild.get_member(member_id)
+            if m is None:
+                m = await interaction.guild.fetch_member(member_id)
+            return interaction.guild, m
+        except Exception:
+            return interaction.guild, None
 
+    # 2) DM: tenta pelo GUILD_ID fixo
+    if GUILD_ID:
+        try:
+            g = client.get_guild(GUILD_ID)
+            if g is None:
+                g = await client.fetch_guild(GUILD_ID)
+            try:
+                m = g.get_member(member_id)
+                if m is None:
+                    m = await g.fetch_member(member_id)
+                return g, m
+            except Exception:
+                pass
+        except Exception:
+            pass
 
-async def fetch_member_safely(guild: discord.Guild, member_id: int) -> discord.Member | None:
-    try:
-        m = guild.get_member(member_id)
-        if m is None:
-            m = await guild.fetch_member(member_id)
-        return m
-    except Exception:
-        return None
+    # 3) varre todos os guilds do bot
+    for g in list(client.guilds):
+        try:
+            m = g.get_member(member_id)
+            if m is None:
+                m = await g.fetch_member(member_id)
+            return g, m
+        except Exception:
+            continue
+
+    return None, None
 
 
 # =========================================================
@@ -1305,6 +1328,7 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 # Autocomplete Cache (Ciclos OPEN)
 # =========================================================
 _OPEN_CYCLES_CACHE = {"ts": 0.0, "season_id": 0, "cycles": []}
+
 
 def _load_open_cycles_from_sheets(sh):
     season_id = get_current_season_id(sh)
@@ -1371,6 +1395,7 @@ COMMANDS_CATALOG = [
     ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
 ]
 
+
 def level_allows(user_level: str, cmd_level: str) -> bool:
     order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
     return order.get(user_level, 1) >= order.get(cmd_level, 1)
@@ -1407,7 +1432,7 @@ async def forcesync(interaction: discord.Interaction):
     if not await is_admin_or_organizer(interaction):
         return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
-    if not EFFECTIVE_GUILD_ID:
+    if not GUILD_ID:
         return await interaction.response.send_message("⚠️ DISCORD_GUILD_ID não configurado.", ephemeral=True)
 
     try:
@@ -1416,7 +1441,7 @@ async def forcesync(interaction: discord.Interaction):
         pass
 
     try:
-        guild = discord.Object(id=EFFECTIVE_GUILD_ID)
+        guild = discord.Object(id=GUILD_ID)
         await asyncio.wait_for(client.tree.sync(guild=guild), timeout=15)
         await interaction.followup.send("🔄 Comandos sincronizados com sucesso.", ephemeral=True)
     except asyncio.TimeoutError:
@@ -1426,7 +1451,7 @@ async def forcesync(interaction: discord.Interaction):
 
 
 # =========================================================
-# MODAL — Nome e Sobrenome (usa SEMPRE quem clicou)
+# MODAL — Nome e Sobrenome
 # =========================================================
 class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     nome = discord.ui.TextInput(
@@ -1435,9 +1460,9 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
         max_length=32,
     )
 
-    def __init__(self, user_id: int):
+    def __init__(self, member_id: int):
         super().__init__()
-        self.user_id = user_id
+        self.member_id = member_id
 
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.nome.value).strip()
@@ -1448,15 +1473,14 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 ephemeral=True
             )
 
-        guild = await get_guild_safely()
-        member = await fetch_member_safely(guild, self.user_id) if guild else None
+        guild, member = await find_member_anywhere(interaction, self.member_id)
 
         # salvar no Sheets
         try:
             sh = open_sheet()
             ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
             ensure_sheet_columns(ws_players, PLAYERS_HEADER)
-            upsert_player(ws_players, str(self.user_id), raw)
+            upsert_player(ws_players, str(self.member_id), raw)
         except Exception:
             pass
 
@@ -1484,13 +1508,13 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             )
 
         try:
-            await log_admin_guild(guild, f"📝 Cadastro: <@{self.user_id}> -> {raw} (nick_ok={nick_ok})")
+            await log_admin_guild(guild, f"📝 Cadastro: <@{self.member_id}> -> {raw} (nick_ok={nick_ok})")
         except Exception:
             pass
 
 
 # =========================================================
-# /cadastro (backup) — dentro do servidor
+# /cadastro (backup) — funciona dentro do servidor
 # =========================================================
 @client.tree.command(name="cadastro", description="Cadastro do jogador (Nome e Sobrenome).")
 async def cadastro(interaction: discord.Interaction):
@@ -1510,28 +1534,15 @@ async def cadastro(interaction: discord.Interaction):
 
 # =========================================================
 # ONBOARDING (Participar / Assistir)
-# - trava clique por terceiros
-# - usa SEMPRE interaction.user.id
 # =========================================================
 class OnboardingView(discord.ui.View):
-    def __init__(self, target_user_id: int):
+    def __init__(self, member_id: int):
         super().__init__(timeout=3600)
-        self.target_user_id = target_user_id  # quem deve clicar (dono do onboarding)
-
-    def _is_owner_click(self, interaction: discord.Interaction) -> bool:
-        return interaction.user and (interaction.user.id == self.target_user_id)
+        self.member_id = member_id
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success)
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # trava clique por terceiros
-        if not self._is_owner_click(interaction):
-            return await interaction.response.send_message(
-                "⚠️ Esse botão não é para você.\nUse `/cadastro` para se registrar.",
-                ephemeral=True
-            )
-
-        guild = interaction.guild or await get_guild_safely()
-        member = await fetch_member_safely(guild, interaction.user.id) if guild else None
+        guild, member = await find_member_anywhere(interaction, self.member_id)
 
         if not member or not guild:
             return await interaction.response.send_message(
@@ -1556,9 +1567,9 @@ class OnboardingView(discord.ui.View):
                 ephemeral=True
             )
 
-        # abre modal (do próprio usuário)
+        # abre modal
         try:
-            await interaction.response.send_modal(NicknameModal(interaction.user.id))
+            await interaction.response.send_modal(NicknameModal(member.id))
         except Exception:
             try:
                 await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Use `/cadastro`.", ephemeral=True)
@@ -1569,13 +1580,6 @@ class OnboardingView(discord.ui.View):
 
     @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary)
     async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # trava clique por terceiros
-        if not self._is_owner_click(interaction):
-            return await interaction.response.send_message(
-                "⚠️ Esse botão não é para você.\nUse `/cadastro` para se registrar.",
-                ephemeral=True
-            )
-
         await interaction.response.send_message(
             "✅ Você entrou como **Assistir**.\nPara jogar depois, peça para um ADM aplicar o cargo **Jogador**.",
             ephemeral=True
@@ -1591,10 +1595,9 @@ async def send_onboarding(member: discord.Member):
         "👀 **Assistir** (somente acompanhar)\n\n"
         "Escolha abaixo:"
     )
-
     view = OnboardingView(member.id)
 
-    # 1) PRIORIDADE: enviar no canal
+    # 1) PRIORIDADE: enviar no canal do servidor (evita erro de DM)
     try:
         if WELCOME_CHANNEL_ID and member.guild:
             ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
@@ -1621,18 +1624,71 @@ async def send_onboarding(member: discord.Member):
     except Exception:
         pass
 
-    # 3) log
+    # 3) se falhar, loga
     try:
         await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (canal e DM). Usuário: {member.mention}")
     except Exception:
         pass
 
 
+# =========================================================
+# FIX DEFINITIVO: Anti-duplicação + Join + Membership Screening (pending)
+# =========================================================
+_ONBOARD_SENT: dict[int, float] = {}  # user_id -> ts
+
+def _mark_onboard_sent(user_id: int):
+    _ONBOARD_SENT[user_id] = _time()
+
+def _already_sent_recent(user_id: int, window_seconds: int = 6 * 3600) -> bool:
+    ts = _ONBOARD_SENT.get(user_id)
+    if not ts:
+        return False
+    return (_time() - ts) < window_seconds
+
+async def safe_send_onboarding(member: discord.Member, reason: str = ""):
+    if _already_sent_recent(member.id):
+        return
+    try:
+        await send_onboarding(member)
+        _mark_onboard_sent(member.id)
+        try:
+            await log_admin_guild(member.guild, f"✅ Onboarding disparado para {member.mention} (reason={reason}).")
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            await log_admin_guild(member.guild, f"⚠️ Falha onboarding {member.mention}: {type(e).__name__} — {e}")
+        except Exception:
+            pass
+
+
 @client.event
 async def on_member_join(member: discord.Member):
     if getattr(member, "bot", False):
         return
-    await send_onboarding(member)
+
+    # Se houver screening (membro pending), manda no on_member_update
+    try:
+        if getattr(member, "pending", False):
+            try:
+                await log_admin_guild(member.guild, f"🕒 {member.mention} entrou PENDING (aguardando regras/screening).")
+            except Exception:
+                pass
+            return
+    except Exception:
+        pass
+
+    await safe_send_onboarding(member, reason="join")
+
+
+@client.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # quando pending muda True -> False (aceitou as regras do servidor)
+    try:
+        if getattr(before, "pending", False) and (not getattr(after, "pending", False)):
+            await safe_send_onboarding(after, reason="screening_ok")
+    except Exception:
+        pass
 
 
 # =========================================================
