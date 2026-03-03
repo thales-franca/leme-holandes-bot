@@ -1119,14 +1119,23 @@ def recalculate_cycle(season_id: int, cycle: int):
 # [BLOCO 4/8 termina aqui]
 # =========================================================
 # =========================================================
-# [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING
-# (VERSÃO FINAL — Modal Nome/Sobrenome + Cache Autocomplete + Onboarding via CANAL + /cadastro backup
-#  + FIX DEFINITIVO: onboarding em JOIN e também quando sair do PENDING (screening) + anti-duplicação)
+# [BLOCO 5/8] — DISCORD CORE + AUTOCOMPLETE + /COMANDO + ONBOARDING (HANDSHAKE NO SERVIDOR)
+# (À prova de “robô dormir”: Views PERSISTENTES + respostas rápidas + cache autocomplete)
+#
+# NOVO FLUXO (ROBUSTO):
+# - on_member_join: envia no CANAL (WELCOME_CHANNEL_ID) uma msg com botão "Iniciar cadastro"
+# - usuário clica "Iniciar cadastro" (no servidor) -> aparece "Participar / Assistir"
+# - Participar -> aplica cargo Jogador + abre MODAL pedindo Nome/Sobrenome (WhatsApp) -> salva no Sheets + tenta nickname
+# - Assistir -> apenas confirma (sem cargo)
+# - /cadastro: backup para abrir modal manualmente dentro do servidor
+#
+# IMPORTANTE:
+# - Botões são PERSISTENTES (funcionam mesmo após restart), desde que o bot volte online.
+# - Se o Render “dormir” e o bot ficar offline, nada funciona enquanto estiver offline (limitação do hosting).
 # =========================================================
 
 import asyncio
 from time import time as _time
-
 
 # =========================
 # Discord Bot (Client)
@@ -1134,11 +1143,19 @@ from time import time as _time
 class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True  # necessário para on_member_join + fetch_member
+        intents.members = True  # necessário para on_member_join
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # Registra Views PERSISTENTES (botões continuam funcionando após restart)
+        try:
+            self.add_view(OnboardingStartView())
+            self.add_view(OnboardingChoiceView())
+        except Exception:
+            pass
+
+        # Sync commands
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1152,20 +1169,18 @@ class LemeBot(discord.Client):
 
 client = LemeBot()
 
-
 # =========================
 # Config extra (onboarding)
 # =========================
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
+WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))  # canal para onboarding (recomendado)
+# LOG_ADMIN_CHANNEL_ID já existe no BLOCO 1
 
 
 # =========================
-# Logs (admin)
+# Logs (admin) — canal do servidor
 # =========================
 async def log_admin_guild(guild: discord.Guild | None, text: str):
-    if not guild:
-        return
-    if not LOG_ADMIN_CHANNEL_ID:
+    if not guild or not LOG_ADMIN_CHANNEL_ID:
         return
     ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
     if not ch:
@@ -1187,7 +1202,6 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
     lines = str(text).split("\n")
     chunks: list[str] = []
     buf = ""
-
     for ln in lines:
         piece = ln + "\n"
         if len(buf) + len(piece) > limit:
@@ -1196,18 +1210,16 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
             buf = piece
         else:
             buf += piece
-
     if buf.strip():
         chunks.append(buf.rstrip("\n"))
-
+    # fallback: quebra dura se ainda exceder
     safe_chunks: list[str] = []
     for c in chunks:
         if len(c) <= limit:
             safe_chunks.append(c)
-            continue
-        for i in range(0, len(c), limit):
-            safe_chunks.append(c[i:i + limit])
-
+        else:
+            for i in range(0, len(c), limit):
+                safe_chunks.append(c[i:i + limit])
     return safe_chunks
 
 
@@ -1215,7 +1227,6 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
     chunks = split_text_lines(text, limit=1900)
     if not chunks:
         return
-
     try:
         if not interaction.response.is_done():
             await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
@@ -1223,7 +1234,6 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
             await interaction.followup.send(chunks[0], ephemeral=ephemeral)
     except Exception:
         return
-
     for c in chunks[1:]:
         try:
             await interaction.followup.send(c, ephemeral=ephemeral)
@@ -1232,52 +1242,7 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 
 
 # =========================================================
-# Localizar membro: funciona em clique no servidor OU em DM
-# =========================================================
-async def find_member_anywhere(
-    interaction: discord.Interaction, member_id: int
-) -> tuple[discord.Guild | None, discord.Member | None]:
-    # 1) Se clique veio do servidor, melhor caso
-    if interaction.guild:
-        try:
-            m = interaction.guild.get_member(member_id)
-            if m is None:
-                m = await interaction.guild.fetch_member(member_id)
-            return interaction.guild, m
-        except Exception:
-            return interaction.guild, None
-
-    # 2) DM: tenta pelo GUILD_ID fixo
-    if GUILD_ID:
-        try:
-            g = client.get_guild(GUILD_ID)
-            if g is None:
-                g = await client.fetch_guild(GUILD_ID)
-            try:
-                m = g.get_member(member_id)
-                if m is None:
-                    m = await g.fetch_member(member_id)
-                return g, m
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    # 3) varre todos os guilds do bot
-    for g in list(client.guilds):
-        try:
-            m = g.get_member(member_id)
-            if m is None:
-                m = await g.fetch_member(member_id)
-            return g, m
-        except Exception:
-            continue
-
-    return None, None
-
-
-# =========================================================
-# Players upsert (Sheets)
+# Players upsert (Sheets) — mínimo necessário
 # =========================================================
 def upsert_player(ws_players, discord_id: str, nickname: str):
     did = str(discord_id).strip()
@@ -1301,19 +1266,19 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 
     if found_row:
         try:
-            ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
+            if "nick" in col:
+                ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
+            if "updated_at" in col:
+                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
         except Exception:
             pass
-        if "updated_at" in col:
-            try:
-                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-            except Exception:
-                pass
         return
 
     row = [""] * len(PLAYERS_HEADER)
-    row[col.get("discord_id", 0)] = did
-    row[col.get("nick", 1)] = nick
+    if "discord_id" in col:
+        row[col["discord_id"]] = did
+    if "nick" in col:
+        row[col["nick"]] = nick
     if "status" in col:
         row[col["status"]] = "active"
     if "created_at" in col:
@@ -1321,14 +1286,16 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
     if "updated_at" in col:
         row[col["updated_at"]] = nowc
 
-    ws_players.append_row(row, value_input_option="USER_ENTERED")
+    try:
+        ws_players.append_row(row, value_input_option="USER_ENTERED")
+    except Exception:
+        pass
 
 
 # =========================================================
-# Autocomplete Cache (Ciclos OPEN)
+# Autocomplete Cache (Ciclos OPEN) — para evitar lentidão/timeouts
 # =========================================================
 _OPEN_CYCLES_CACHE = {"ts": 0.0, "season_id": 0, "cycles": []}
-
 
 def _load_open_cycles_from_sheets(sh):
     season_id = get_current_season_id(sh)
@@ -1351,7 +1318,6 @@ def _load_open_cycles_from_sheets(sh):
 
     return season_id, sorted(set(open_cycles))
 
-
 def get_open_cycles_cached(max_age_seconds: int = 60):
     now = _time()
     if (_OPEN_CYCLES_CACHE["season_id"] > 0) and ((now - _OPEN_CYCLES_CACHE["ts"]) < max_age_seconds):
@@ -1367,7 +1333,6 @@ def get_open_cycles_cached(max_age_seconds: int = 60):
     except Exception:
         return _OPEN_CYCLES_CACHE.get("season_id", 0), list(_OPEN_CYCLES_CACHE.get("cycles", []))
 
-
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     try:
         _, cycles = get_open_cycles_cached(max_age_seconds=60)
@@ -1380,7 +1345,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
 
 
 # =========================================================
-# /comando (catálogo)
+# /comando (catálogo) — mantenha simples aqui
 # =========================================================
 COMMANDS_CATALOG = [
     ("jogador", "/inscrever", "Se inscreve em um ciclo aberto (com escolha de ciclo)."),
@@ -1395,11 +1360,9 @@ COMMANDS_CATALOG = [
     ("adm", "/forcesync", "Sincroniza comandos no servidor (rápido)."),
 ]
 
-
 def level_allows(user_level: str, cmd_level: str) -> bool:
     order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
     return order.get(user_level, 1) >= order.get(cmd_level, 1)
-
 
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
@@ -1414,9 +1377,7 @@ async def comando(interaction: discord.Interaction):
         for lvl, cmd, desc in COMMANDS_CATALOG:
             if level_allows(user_level, lvl):
                 lines.append(f"• **{cmd}** — {desc}")
-
         await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
-
     except Exception as e:
         try:
             await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
@@ -1425,7 +1386,7 @@ async def comando(interaction: discord.Interaction):
 
 
 # =========================================================
-# /forcesync (ADM) — resposta garantida
+# /forcesync (ADM) — resposta garantida (anti “pensando...” eterno)
 # =========================================================
 @client.tree.command(name="forcesync", description="(ADM) Força sincronização dos comandos no servidor")
 async def forcesync(interaction: discord.Interaction):
@@ -1473,7 +1434,22 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 ephemeral=True
             )
 
-        guild, member = await find_member_anywhere(interaction, self.member_id)
+        if not interaction.guild:
+            # Modal só deve abrir no servidor, mas garantimos aqui também
+            return await interaction.response.send_message(
+                "⚠️ Para concluir o cadastro, use dentro do servidor.",
+                ephemeral=True
+            )
+
+        guild = interaction.guild
+
+        # buscar membro no servidor (agora é garantido pelo handshake)
+        try:
+            member = guild.get_member(self.member_id)
+            if member is None:
+                member = await guild.fetch_member(self.member_id)
+        except Exception:
+            member = None
 
         # salvar no Sheets
         try:
@@ -1488,7 +1464,13 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
         nick_ok = False
         if member:
             try:
-                await member.edit(nick=raw, reason="Onboarding - Nome informado pelo jogador")
+                # se servidor usa Membership Screening, pode existir "pending"
+                if getattr(member, "pending", False):
+                    return await interaction.response.send_message(
+                        "⚠️ Finalize a entrada no servidor (aceite as regras) e tente novamente.",
+                        ephemeral=True
+                    )
+                await member.edit(nick=raw, reason="Cadastro - Nome informado pelo jogador")
                 nick_ok = True
             except Exception:
                 nick_ok = False
@@ -1502,7 +1484,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             await interaction.response.send_message(
                 f"✅ Nome salvo: **{raw}**.\n\n"
                 "⚠️ Não consegui alterar seu apelido automaticamente.\n"
-                "Verifique permissão do bot: **Gerenciar Apelidos** e cargo do bot acima do Jogador.\n\n"
+                "Verifique permissão do bot: **Gerenciar Apelidos** e se o cargo do bot está acima do cargo Jogador.\n\n"
                 "Agora use `/inscrever`.",
                 ephemeral=True
             )
@@ -1514,7 +1496,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
 
 
 # =========================================================
-# /cadastro (backup) — funciona dentro do servidor
+# /cadastro (backup) — abre modal dentro do servidor
 # =========================================================
 @client.tree.command(name="cadastro", description="Cadastro do jogador (Nome e Sobrenome).")
 async def cadastro(interaction: discord.Interaction):
@@ -1533,133 +1515,184 @@ async def cadastro(interaction: discord.Interaction):
 
 
 # =========================================================
-# ONBOARDING (Participar / Assistir)
+# VIEWS PERSISTENTES (HANDSHAKE NO SERVIDOR)
 # =========================================================
-class OnboardingView(discord.ui.View):
-    def __init__(self, member_id: int):
-        super().__init__(timeout=3600)
-        self.member_id = member_id
+class OnboardingStartView(discord.ui.View):
+    """
+    View persistente com botão "Iniciar cadastro".
+    IMPORTANTE: timeout=None + custom_id fixo => persiste após restart
+    """
+    def __init__(self):
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Participar", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="Iniciar cadastro",
+        style=discord.ButtonStyle.primary,
+        custom_id="leme:onboarding_start"
+    )
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Responde rápido para não expirar
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+        if not interaction.guild:
+            # Se alguém clicar em DM, orienta
+            try:
+                return await interaction.followup.send(
+                    "⚠️ Abra o servidor e clique em **Iniciar cadastro** por lá.",
+                    ephemeral=True
+                )
+            except Exception:
+                return
+
+        # Mostra escolhas (Participar/Assistir) dentro do servidor
+        try:
+            await interaction.followup.send(
+                "⚓ **Bem-vindo ao Leme Holandês!**\n\n"
+                "Você pretende:\n"
+                "✅ **Participar** (jogar a liga)\n"
+                "👀 **Assistir** (somente acompanhar)\n\n"
+                "Escolha abaixo:",
+                ephemeral=True,
+                view=OnboardingChoiceView()
+            )
+        except Exception:
+            pass
+
+
+class OnboardingChoiceView(discord.ui.View):
+    """
+    View persistente com botões Participar/Assistir.
+    Usa interaction.user (não depende de cache de member_id).
+    """
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Participar",
+        style=discord.ButtonStyle.success,
+        custom_id="leme:onboarding_participar"
+    )
     async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild, member = await find_member_anywhere(interaction, self.member_id)
+        # Responde rápido
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
 
-        if not member or not guild:
-            return await interaction.response.send_message(
+        if not interaction.guild:
+            try:
+                return await interaction.followup.send(
+                    "⚠️ Para participar, use no servidor (não por DM).",
+                    ephemeral=True
+                )
+            except Exception:
+                return
+
+        guild = interaction.guild
+        user = interaction.user
+
+        # buscar Member
+        try:
+            member = guild.get_member(user.id)
+            if member is None:
+                member = await guild.fetch_member(user.id)
+        except Exception:
+            member = None
+
+        if not member:
+            return await interaction.followup.send(
                 "⚠️ Não consegui localizar seu usuário no servidor.\n"
-                "Entre no servidor e use `/cadastro` no canal de comandos.",
+                "Se você acabou de entrar, finalize a entrada (aceite regras) e tente novamente.",
                 ephemeral=True
             )
 
+        # aplicar cargo
         role_jog = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
         if not role_jog:
-            return await interaction.response.send_message(
-                "⚠️ Cargo **Jogador** não encontrado. Crie o cargo com esse nome exato ou ajuste ROLE_JOGADOR no Render.",
+            return await interaction.followup.send(
+                "⚠️ Cargo **Jogador** não encontrado.\n"
+                "Crie o cargo com esse nome exato ou ajuste ROLE_JOGADOR no Render.",
                 ephemeral=True
             )
 
         try:
             await member.add_roles(role_jog, reason="Onboarding - Participar")
         except Exception:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Não consegui aplicar o cargo.\n"
-                "Verifique permissão do bot: **Gerenciar Cargos** e cargo do bot acima do cargo Jogador.",
+                "Verifique permissão do bot: **Gerenciar Cargos** e se o cargo do bot está acima do cargo Jogador.",
                 ephemeral=True
             )
 
-        # abre modal
+        # abrir modal nome/sobrenome
         try:
-            await interaction.response.send_modal(NicknameModal(member.id))
+            await interaction.followup.send(
+                "✅ Cargo **Jogador** aplicado.\nAgora complete seu cadastro:",
+                ephemeral=True
+            )
+            await interaction.followup.send_modal(NicknameModal(member.id))  # alguns clients não aceitam send_modal em followup
         except Exception:
+            # fallback: tenta direto no response se possível
             try:
-                await interaction.followup.send("⚠️ Não consegui abrir o formulário agora. Use `/cadastro`.", ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_modal(NicknameModal(member.id))
+                else:
+                    await interaction.followup.send(
+                        "⚠️ Não consegui abrir o formulário agora.\nUse `/cadastro` no canal de comandos.",
+                        ephemeral=True
+                    )
             except Exception:
                 pass
 
-        self.stop()
+        try:
+            await log_admin_guild(guild, f"👤 Onboarding: {member.mention} clicou **Participar** (cargo Jogador aplicado).")
+        except Exception:
+            pass
 
-    @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary)
-    async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "✅ Você entrou como **Assistir**.\nPara jogar depois, peça para um ADM aplicar o cargo **Jogador**.",
-            ephemeral=True
-        )
-        self.stop()
-
-
-async def send_onboarding(member: discord.Member):
-    text = (
-        "⚓ **Bem-vindo ao Leme Holandês!**\n\n"
-        "Você pretende:\n"
-        "✅ **Participar** (jogar a liga)\n"
-        "👀 **Assistir** (somente acompanhar)\n\n"
-        "Escolha abaixo:"
+    @discord.ui.button(
+        label="Assistir",
+        style=discord.ButtonStyle.secondary,
+        custom_id="leme:onboarding_assistir"
     )
-    view = OnboardingView(member.id)
-
-    # 1) PRIORIDADE: enviar no canal do servidor (evita erro de DM)
-    try:
-        if WELCOME_CHANNEL_ID and member.guild:
-            ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
-            if not ch:
-                ch = await member.guild.fetch_channel(WELCOME_CHANNEL_ID)
-            if ch:
-                await ch.send(f"{member.mention}\n{text}", view=view)
-                try:
-                    await log_admin_guild(member.guild, f"💬 Onboarding enviado no canal {ch.mention} para {member.mention}.")
-                except Exception:
-                    pass
-                return
-    except Exception:
-        pass
-
-    # 2) fallback: DM
-    try:
-        await member.send(text, view=view)
+    async def assistir(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await log_admin_guild(member.guild, f"📩 Onboarding enviado por DM para {member.mention}.")
+            await interaction.response.send_message(
+                "✅ Você entrou como **Assistir**.\n"
+                "Para jogar depois, clique novamente em **Iniciar cadastro** e escolha **Participar** (ou peça a um ADM aplicar o cargo **Jogador**).",
+                ephemeral=True
+            )
         except Exception:
             pass
-        return
-    except Exception:
-        pass
-
-    # 3) se falhar, loga
-    try:
-        await log_admin_guild(member.guild, f"⚠️ Onboarding falhou (canal e DM). Usuário: {member.mention}")
-    except Exception:
-        pass
 
 
 # =========================================================
-# FIX DEFINITIVO: Anti-duplicação + Join + Membership Screening (pending)
+# Envio do onboarding no CANAL (join)
 # =========================================================
-_ONBOARD_SENT: dict[int, float] = {}  # user_id -> ts
-
-def _mark_onboard_sent(user_id: int):
-    _ONBOARD_SENT[user_id] = _time()
-
-def _already_sent_recent(user_id: int, window_seconds: int = 6 * 3600) -> bool:
-    ts = _ONBOARD_SENT.get(user_id)
-    if not ts:
-        return False
-    return (_time() - ts) < window_seconds
-
-async def safe_send_onboarding(member: discord.Member, reason: str = ""):
-    if _already_sent_recent(member.id):
-        return
+async def _get_welcome_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    ch = None
+    if WELCOME_CHANNEL_ID:
+        ch = guild.get_channel(WELCOME_CHANNEL_ID)
+        if not ch:
+            try:
+                ch = await guild.fetch_channel(WELCOME_CHANNEL_ID)
+            except Exception:
+                ch = None
+    if ch:
+        return ch
+    # fallback: system_channel
+    if guild.system_channel:
+        return guild.system_channel
+    # fallback: primeiro canal de texto onde o bot consiga falar
     try:
-        await send_onboarding(member)
-        _mark_onboard_sent(member.id)
-        try:
-            await log_admin_guild(member.guild, f"✅ Onboarding disparado para {member.mention} (reason={reason}).")
-        except Exception:
-            pass
-    except Exception as e:
-        try:
-            await log_admin_guild(member.guild, f"⚠️ Falha onboarding {member.mention}: {type(e).__name__} — {e}")
-        except Exception:
-            pass
+        for c in guild.text_channels:
+            if c.permissions_for(guild.me).send_messages:
+                return c
+    except Exception:
+        pass
+    return None
 
 
 @client.event
@@ -1667,26 +1700,49 @@ async def on_member_join(member: discord.Member):
     if getattr(member, "bot", False):
         return
 
-    # Se houver screening (membro pending), manda no on_member_update
+    # Se o bot “dormir” e perder o evento, o usuário ainda pode clicar no botão em uma msg fixa/manual (ver /onboarding abaixo)
     try:
-        if getattr(member, "pending", False):
-            try:
-                await log_admin_guild(member.guild, f"🕒 {member.mention} entrou PENDING (aguardando regras/screening).")
-            except Exception:
-                pass
+        ch = await _get_welcome_channel(member.guild)
+        if not ch:
             return
+
+        await ch.send(
+            f"{member.mention}\n"
+            "⚓ **Bem-vindo ao Leme Holandês!**\n\n"
+            "Para começar, clique no botão abaixo:\n"
+            "➡️ **Iniciar cadastro**",
+            view=OnboardingStartView()
+        )
+
+        try:
+            await log_admin_guild(member.guild, f"💬 Onboarding enviado no canal {ch.mention} para {member.mention}.")
+        except Exception:
+            pass
+
     except Exception:
-        pass
+        try:
+            await log_admin_guild(member.guild, f"⚠️ Falha ao enviar onboarding no canal. Usuário: {member.mention}")
+        except Exception:
+            pass
 
-    await safe_send_onboarding(member, reason="join")
 
+# =========================================================
+# /onboarding (ADM) — reenviar onboarding manualmente (backup anti-evento perdido)
+# =========================================================
+@client.tree.command(name="onboarding", description="(ADM) Reenvia o botão de onboarding no canal atual.")
+async def onboarding_cmd(interaction: discord.Interaction):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
-@client.event
-async def on_member_update(before: discord.Member, after: discord.Member):
-    # quando pending muda True -> False (aceitou as regras do servidor)
+    if not interaction.guild:
+        return await interaction.response.send_message("⚠️ Use dentro do servidor.", ephemeral=True)
+
     try:
-        if getattr(before, "pending", False) and (not getattr(after, "pending", False)):
-            await safe_send_onboarding(after, reason="screening_ok")
+        await interaction.response.send_message(
+            "✅ Onboarding pronto. Clique abaixo:",
+            ephemeral=False,
+            view=OnboardingStartView()
+        )
     except Exception:
         pass
 
