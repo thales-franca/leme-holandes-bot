@@ -2235,7 +2235,7 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
-# /deck
+# /deck (1x por ciclo; ADM/Org pode sobrescrever)
 # =========================================================
 @client.tree.command(name="deck", description="Define seu deck.")
 @app_commands.describe(cycle="Ciclo", nome="Nome do deck")
@@ -2255,7 +2255,7 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
 
-        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid):
+        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid) and not await is_admin_or_organizer(interaction):
             return await interaction.followup.send(
                 "❌ Você precisa estar inscrito.",
                 ephemeral=True
@@ -2264,6 +2264,17 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
         rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
 
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+        # ---- TRAVA 1x POR CICLO (restaurada) ----
+        fields = get_deck_fields(ws_decks, rown)
+        current = (fields.get("deck") or "").strip()
+        if current and not await is_admin_or_organizer(interaction):
+            return await interaction.followup.send(
+                f"❌ Você já definiu deck para o **Ciclo {cycle}** e não pode alterar.\n"
+                "Peça para um ADM/Organizador se precisar.",
+                ephemeral=True
+            )
+        # ----------------------------------------
 
         ws_decks.update([[nome]], range_name=f"{col_letter(col['deck'])}{rown}")
         ws_decks.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
@@ -2281,7 +2292,7 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
 
 
 # =========================================================
-# /decklist
+# /decklist (1x por ciclo; ADM/Org pode sobrescrever)
 # =========================================================
 @client.tree.command(name="decklist", description="Define sua decklist.")
 @app_commands.describe(cycle="Ciclo", url="Link da decklist")
@@ -2306,7 +2317,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
 
-        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid):
+        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid) and not await is_admin_or_organizer(interaction):
             return await interaction.followup.send(
                 "❌ Você precisa estar inscrito.",
                 ephemeral=True
@@ -2315,6 +2326,17 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
         rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
 
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+        # ---- TRAVA 1x POR CICLO (restaurada) ----
+        fields = get_deck_fields(ws_decks, rown)
+        current = (fields.get("decklist_url") or "").strip()
+        if current and not await is_admin_or_organizer(interaction):
+            return await interaction.followup.send(
+                f"❌ Você já definiu decklist para o **Ciclo {cycle}** e não pode alterar.\n"
+                "Peça para um ADM/Organizador se precisar.",
+                ephemeral=True
+            )
+        # ----------------------------------------
 
         ws_decks.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{rown}")
         ws_decks.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
