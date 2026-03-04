@@ -1915,31 +1915,30 @@ async def _get_welcome_channel(guild: discord.Guild) -> discord.TextChannel | No
         pass
 
     return None
-# =========================================================
-# AUTO LIMPEZA DO CANAL BOAS-VINDAS (30 minutos)
-# =========================================================
 
+
+# =========================================================
+# AUTO LIMPEZA DO CANAL BOAS-VINDAS (10 minutos)
+# - apaga absolutamente todas as mensagens desse canal
+#   (inclui você/owner, todos os cargos e mensagens do bot)
+# =========================================================
 BOAS_VINDAS_CHANNEL_ID = 1478460258576760832
+BOAS_VINDAS_DELETE_AFTER_SECONDS = 600  # 10 minutos
 
 @client.event
 async def on_message(message: discord.Message):
-
     try:
-        # ignora mensagens do próprio bot
-        if message.author.bot:
+        if not message.guild:
             return
 
-        # verifica se é o canal de boas-vindas
-        if message.channel.id == BOAS_VINDAS_CHANNEL_ID:
-            await message.delete(delay=600)  # 10 minutos
+        if message.channel.id != BOAS_VINDAS_CHANNEL_ID:
+            return
+
+        # agenda exclusão em 10 minutos
+        await message.delete(delay=BOAS_VINDAS_DELETE_AFTER_SECONDS)
 
     except Exception:
         pass
-
-
-# =========================================================
-# Envio do onboarding no CANAL (join)
-# =========================================================
 
 
 @client.event
