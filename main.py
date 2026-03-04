@@ -1981,54 +1981,24 @@ async def ping(interaction: discord.Interaction):
 # =========================================================
 
 # =========================================================
-# [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (1x POR CICLO) + VERIFICAÇÃO
-# REVISADO COM CACHE (Google Sheets quota protection)
+# [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST
+# REGRAS IMPLEMENTADAS:
+# - jogador só pode entrar em ciclo OPEN
+# - ciclo LOCKED não aceita inscrições
+# - jogador não pode estar ativo em dois ciclos da mesma season
 # =========================================================
 
 
 # =========================================================
-# Decks helpers
+# Helper: verifica se jogador já está ativo em algum ciclo
 # =========================================================
-def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
+def player_active_in_season(ws_enr, season_id: int, player_id: str):
 
-    nowb = now_br_str()
-    rown = get_deck_row(ws_decks, season_id, cycle, player_id)
-    col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
-
-    if rown is None:
-
-        ws_decks.append_row(
-            [str(season_id), str(cycle), str(player_id), "", "", nowb, nowb],
-            value_input_option="USER_ENTERED",
-        )
-
-        cache_invalidate(ws_decks)
-
-        # re-localiza a linha recém criada
-        return get_deck_row(ws_decks, season_id, cycle, player_id)
-
-    else:
-
-        ws_decks.update(
-            [[nowb]],
-            range_name=f"{col_letter(col['updated_at'])}{rown}"
-        )
-
-        cache_invalidate(ws_decks)
-
-        return rown
-
-
-def is_player_enrolled_active(ws_enr, season_id: int, cycle: int, player_id: str) -> bool:
-
-    rows = cached_get_all_records(ws_enr, ttl_seconds=10)
+    rows = ws_enr.get_all_records()
 
     for r in rows:
 
         if safe_int(r.get("season_id", 0), 0) != season_id:
-            continue
-
-        if safe_int(r.get("cycle", 0), 0) != cycle:
             continue
 
         if str(r.get("player_id", "")).strip() != str(player_id).strip():
@@ -2041,61 +2011,17 @@ def is_player_enrolled_active(ws_enr, season_id: int, cycle: int, player_id: str
 
 
 # =========================================================
-# Players upsert helper
-# =========================================================
-def upsert_player(ws_players, discord_id: str, nick: str):
-
-    nowb = now_br_str()
-    prow = find_player_row(ws_players, int(discord_id))
-
-    if prow is None:
-
-        ws_players.append_row(
-            [discord_id, nick, "", "", "active", "", nowb, nowb],
-            value_input_option="USER_ENTERED"
-        )
-
-        cache_invalidate(ws_players)
-
-        return
-
-    ws_players.update([[nick]], range_name=f"B{prow}")
-    ws_players.update([["active"]], range_name=f"E{prow}")
-    ws_players.update([[nowb]], range_name=f"H{prow}")
-
-    cache_invalidate(ws_players)
-
-
-# =========================================================
 # /inscrever
 # =========================================================
-@client.tree.command(name="inscrever", description="Se inscreve em um ciclo aberto.")
+@client.tree.command(name="inscrever", description="Se inscreve no ciclo aberto.")
 @app_commands.describe(cycle="Número do ciclo")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def inscrever(interaction: discord.Interaction, cycle: str):
+async def inscrever(interaction: discord.Interaction, cycle: int):
 
     await interaction.response.defer(ephemeral=True)
-
-    c = safe_int(cycle, 0)
-
-    if c <= 0:
-        return await interaction.followup.send("❌ Ciclo inválido.", ephemeral=True)
-
-    discord_id = str(interaction.user.id)
-    nick = interaction.user.display_name
-    nowb = now_br_str()
 
     try:
 
         sh = open_sheet()
-
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
-
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
         season_id = get_current_season_id(sh)
 
@@ -2105,71 +2031,72 @@ async def inscrever(interaction: discord.Interaction, cycle: str):
                 ephemeral=True
             )
 
-        fields = get_cycle_fields(ws_cycles, season_id, c)
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
 
-        st = (fields.get("status") or "").strip().lower()
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
-        if fields.get("status") is None:
+        pid = str(interaction.user.id)
+        nick = interaction.user.display_name
+
+        # garante jogador no banco
+        upsert_player(ws_players, pid, nick)
+
+        # verifica status do ciclo
+        cf = get_cycle_fields(ws_cycles, season_id, cycle)
+
+        if cf.get("status") is None:
             return await interaction.followup.send(
-                f"❌ O ciclo {c} não existe.",
+                f"❌ O ciclo {cycle} não existe.",
                 ephemeral=True
             )
 
-        if st != "open":
+        status = str(cf.get("status", "")).strip().lower()
+
+        if status != "open":
+
+            if status == "locked":
+                return await interaction.followup.send(
+                    "❌ Este ciclo já teve os pods gerados e está fechado para novas inscrições.",
+                    ephemeral=True
+                )
+
             return await interaction.followup.send(
-                f"❌ Este ciclo não está aberto (status: {st}).",
+                f"❌ O ciclo não está aberto para inscrições (status: {status}).",
                 ephemeral=True
             )
 
-        upsert_player(ws_players, discord_id, nick)
-
-        data = cached_get_all_values(ws_enr, ttl_seconds=10)
-
-        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-
-        found_row = None
-
-        for rown in range(2, len(data) + 1):
-
-            r = data[rown - 1]
-
-            sid = safe_int(r[col["season_id"]], 0)
-            cyc = safe_int(r[col["cycle"]], 0)
-            pid = str(r[col["player_id"]]).strip()
-
-            if sid == season_id and cyc == c and pid == discord_id:
-                found_row = rown
-                break
-
-        if found_row is None:
-
-            ws_enr.append_row(
-                [str(season_id), str(c), discord_id, "active", nowb, nowb],
-                value_input_option="USER_ENTERED"
-            )
-
-            cache_invalidate(ws_enr)
-
-            await interaction.followup.send(
-                f"✅ Inscrito no Ciclo {c}.",
+        # impede múltiplos ciclos ativos
+        if player_active_in_season(ws_enr, season_id, pid):
+            return await interaction.followup.send(
+                "❌ Você já está inscrito em um ciclo desta season.",
                 ephemeral=True
             )
 
-        else:
+        nowb = now_br_str()
 
-            ws_enr.update([["active"]], range_name=f"{col_letter(col['status'])}{found_row}")
-            ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
+        ws_enr.append_row(
+            [
+                str(season_id),
+                str(cycle),
+                pid,
+                "active",
+                nowb,
+                nowb
+            ],
+            value_input_option="USER_ENTERED"
+        )
 
-            cache_invalidate(ws_enr)
-
-            await interaction.followup.send(
-                f"✅ Inscrição reativada no Ciclo {c}.",
-                ephemeral=True
-            )
+        await interaction.followup.send(
+            f"✅ Inscrição confirmada no **Ciclo {cycle}**.",
+            ephemeral=True
+        )
 
         await log_admin(
             interaction,
-            f"Inscrição: {interaction.user.mention} S{season_id} C{c}"
+            f"inscrição: {interaction.user} S{season_id} C{cycle}"
         )
 
     except Exception as e:
@@ -2189,53 +2116,60 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
     await interaction.response.defer(ephemeral=True)
 
-    discord_id = str(interaction.user.id)
-    nowb = now_br_str()
-
     try:
 
         sh = open_sheet()
 
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER)
+        season_id = get_current_season_id(sh)
+
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
 
         col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
 
-        season_id = get_current_season_id(sh)
+        rows = ws_enr.get_all_values()
 
-        data = cached_get_all_values(ws_enr, ttl_seconds=10)
+        pid = str(interaction.user.id)
 
-        found_row = None
+        for i in range(1, len(rows)):
 
-        for rown in range(2, len(data) + 1):
+            r = rows[i]
 
-            r = data[rown - 1]
+            if (
+                safe_int(r[col["season_id"]], 0) == season_id
+                and safe_int(r[col["cycle"]], 0) == cycle
+                and str(r[col["player_id"]]).strip() == pid
+            ):
 
-            sid = safe_int(r[col["season_id"]], 0)
-            cyc = safe_int(r[col["cycle"]], 0)
-            pid = str(r[col["player_id"]]).strip()
+                ws_enr.update(
+                    [["dropped"]],
+                    range_name=f"{col_letter(col['status'])}{i+1}"
+                )
 
-            if sid == season_id and cyc == cycle and pid == discord_id:
-                found_row = rown
-                break
+                ws_enr.update(
+                    [[now_br_str()]],
+                    range_name=f"{col_letter(col['updated_at'])}{i+1}"
+                )
 
-        if found_row is None:
-            return await interaction.followup.send("❌ Você não está inscrito.", ephemeral=True)
+                return await interaction.followup.send(
+                    "✅ Você saiu do ciclo.",
+                    ephemeral=True
+                )
 
-        ws_enr.update([["dropped"]], range_name=f"{col_letter(col['status'])}{found_row}")
-        ws_enr.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-
-        cache_invalidate(ws_enr)
-
-        await interaction.followup.send("✅ Você saiu do ciclo.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ Você não está inscrito neste ciclo.",
+            ephemeral=True
+        )
 
     except Exception as e:
 
-        await interaction.followup.send(f"❌ Erro no /drop: {e}", ephemeral=True)
+        await interaction.followup.send(
+            f"❌ Erro no /drop: {e}",
+            ephemeral=True
+        )
 
 
 # =========================================================
-# /deck (1x por ciclo; ADM/Org pode sobrescrever)
+# /deck
 # =========================================================
 @client.tree.command(name="deck", description="Define seu deck.")
 @app_commands.describe(cycle="Ciclo", nome="Nome do deck")
@@ -2243,65 +2177,57 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
 
     await interaction.response.defer(ephemeral=True)
 
-    pid = str(interaction.user.id)
-    nowb = now_br_str()
-
     try:
 
         sh = open_sheet()
 
         season_id = get_current_season_id(sh)
 
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
 
-        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid) and not await is_admin_or_organizer(interaction):
-            return await interaction.followup.send(
-                "❌ Você precisa estar inscrito.",
-                ephemeral=True
-            )
-
-        rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
+        rown = ensure_deck_row(ws_decks, season_id, cycle, str(interaction.user.id))
 
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        # ---- TRAVA 1x POR CICLO (restaurada) ----
         fields = get_deck_fields(ws_decks, rown)
-        current = (fields.get("deck") or "").strip()
-        if current and not await is_admin_or_organizer(interaction):
+
+        if fields.get("deck"):
             return await interaction.followup.send(
-                f"❌ Você já definiu deck para o **Ciclo {cycle}** e não pode alterar.\n"
-                "Peça para um ADM/Organizador se precisar.",
+                "❌ Você já definiu seu deck neste ciclo.",
                 ephemeral=True
             )
-        # ----------------------------------------
 
-        ws_decks.update([[nome]], range_name=f"{col_letter(col['deck'])}{rown}")
-        ws_decks.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_decks.update(
+            [[nome]],
+            range_name=f"{col_letter(col['deck'])}{rown}"
+        )
 
-        cache_invalidate(ws_decks)
+        ws_decks.update(
+            [[now_br_str()]],
+            range_name=f"{col_letter(col['updated_at'])}{rown}"
+        )
 
         await interaction.followup.send(
-            f"✅ Deck salvo: {nome}",
+            f"✅ Deck salvo: **{nome}**",
             ephemeral=True
         )
 
     except Exception as e:
 
-        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+        await interaction.followup.send(
+            f"❌ Erro: {e}",
+            ephemeral=True
+        )
 
 
 # =========================================================
-# /decklist (1x por ciclo; ADM/Org pode sobrescrever)
+# /decklist
 # =========================================================
 @client.tree.command(name="decklist", description="Define sua decklist.")
 @app_commands.describe(cycle="Ciclo", url="Link da decklist")
 async def decklist(interaction: discord.Interaction, cycle: int, url: str):
 
     await interaction.response.defer(ephemeral=True)
-
-    pid = str(interaction.user.id)
-    nowb = now_br_str()
 
     ok, val = validate_decklist_url(url)
 
@@ -2314,34 +2240,29 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
 
         season_id = get_current_season_id(sh)
 
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
 
-        if not is_player_enrolled_active(ws_enr, season_id, cycle, pid) and not await is_admin_or_organizer(interaction):
-            return await interaction.followup.send(
-                "❌ Você precisa estar inscrito.",
-                ephemeral=True
-            )
-
-        rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
+        rown = ensure_deck_row(ws_decks, season_id, cycle, str(interaction.user.id))
 
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        # ---- TRAVA 1x POR CICLO (restaurada) ----
         fields = get_deck_fields(ws_decks, rown)
-        current = (fields.get("decklist_url") or "").strip()
-        if current and not await is_admin_or_organizer(interaction):
+
+        if fields.get("decklist_url"):
             return await interaction.followup.send(
-                f"❌ Você já definiu decklist para o **Ciclo {cycle}** e não pode alterar.\n"
-                "Peça para um ADM/Organizador se precisar.",
+                "❌ Você já definiu decklist neste ciclo.",
                 ephemeral=True
             )
-        # ----------------------------------------
 
-        ws_decks.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{rown}")
-        ws_decks.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_decks.update(
+            [[val]],
+            range_name=f"{col_letter(col['decklist_url'])}{rown}"
+        )
 
-        cache_invalidate(ws_decks)
+        ws_decks.update(
+            [[now_br_str()]],
+            range_name=f"{col_letter(col['updated_at'])}{rown}"
+        )
 
         await interaction.followup.send(
             "✅ Decklist salva.",
@@ -2355,21 +2276,250 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
             ephemeral=True
         )
 
-
 # =========================================================
-# [BLOCO 6/8 termina aqui]
-# =========================================================
-
-# =========================================================
-# [BLOCO 7/8] — PODS + MATCHES + RESULTADOS (REVISADO v2)
-# AJUSTES FEITOS NESTA REVISÃO:
-# - IMPLEMENTA /pods_gerar e /pods_publicar
-# - /resultado valida V-D-E, grava pending + 48h, inverte a/b se necessário
-# - /rejeitar só oponente e só dentro das 48h, limpa e reabre match
-# - /meus_matches mostra expiração quando pending
-# - (NOVO) placar com autocomplete padrão Melee (ac_score_vde do BLOCO 3)
+# [BLOCO 6/8] — Termina aqui
 # =========================================================
 
+# =========================================================
+# [BLOCO 7/8] — PODS + MATCHES + RESULTADOS (REVISADO v3)
+# AJUSTES DESTA REVISÃO:
+# - cálculo automático de deadline baseado no maior pod
+# - grava start_at_br e deadline_at_br automaticamente
+# =========================================================
+
+
+# =========================================================
+# /pods_gerar (ADM) — gera PodsHistory + Matches e trava ciclo (locked)
+# =========================================================
+@client.tree.command(name="pods_gerar", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
+@app_commands.describe(cycle="Ciclo (ex: 1)", pod_size="Tamanho alvo do pod (3..6)")
+@app_commands.choices(
+    pod_size=[
+        app_commands.Choice(name="3", value=3),
+        app_commands.Choice(name="4 (padrão)", value=4),
+        app_commands.Choice(name="5", value=5),
+        app_commands.Choice(name="6", value=6),
+    ]
+)
+async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: app_commands.Choice[int] = None):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = get_current_season_id(sh)
+
+        if season_id <= 0:
+            return await interaction.followup.send("❌ Não existe season ativa.", ephemeral=True)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
+        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+        cf = get_cycle_fields(ws_cycles, season_id, cycle)
+
+        st = (cf.get("status") or "").strip().lower()
+
+        if cf.get("status") is None:
+            return await interaction.followup.send(
+                f"❌ Ciclo {cycle} não existe na Season {season_id}.",
+                ephemeral=True
+            )
+
+        if st == "completed":
+            return await interaction.followup.send(
+                "❌ Ciclo COMPLETED. Não posso gerar pods.",
+                ephemeral=True
+            )
+
+        if st == "locked":
+            return await interaction.followup.send(
+                "⚠️ Ciclo já está LOCKED. Pods já deveriam existir.",
+                ephemeral=True
+            )
+
+        if st != "open":
+            return await interaction.followup.send(
+                f"❌ Ciclo não está OPEN (status: {st}).",
+                ephemeral=True
+            )
+
+        pods_rows = ws_pods.get_all_records()
+
+        if any(
+            safe_int(r.get("season_id", 0), 0) == season_id and
+            safe_int(r.get("cycle", 0), 0) == cycle
+            for r in pods_rows
+        ):
+            return await interaction.followup.send(
+                "❌ PodsHistory já existe para esse ciclo.",
+                ephemeral=True
+            )
+
+        enr_rows = ws_enr.get_all_records()
+
+        players = []
+
+        for r in enr_rows:
+
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+
+            if safe_int(r.get("cycle", 0), 0) != cycle:
+                continue
+
+            if str(r.get("status", "")).strip().lower() != "active":
+                continue
+
+            pid = str(r.get("player_id", "")).strip()
+
+            if pid:
+                players.append(pid)
+
+        players = sorted(set(players))
+
+        if len(players) < 3:
+            return await interaction.followup.send(
+                "❌ Poucos inscritos (mínimo 3).",
+                ephemeral=True
+            )
+
+        ps = int(pod_size.value) if pod_size else 4
+        ps = max(3, min(ps, 6))
+
+        past_pairs = get_past_confirmed_pairs(ws_matches)
+
+        pods, score = best_shuffle_min_repeats(players, ps, past_pairs, tries=350)
+
+        nowb = now_br_str()
+
+        pod_letter = "A"
+
+        max_pod_size = 0
+
+        for pod in pods:
+
+            max_pod_size = max(max_pod_size, len(pod))
+
+            for pid in pod:
+
+                ws_pods.append_row(
+                    [str(season_id), str(cycle), pod_letter, str(pid), nowb],
+                    value_input_option="USER_ENTERED"
+                )
+
+            pod_letter = chr(ord(pod_letter) + 1)
+
+        created_matches = 0
+
+        pod_letter = "A"
+
+        for pod in pods:
+
+            pairs = round_robin_pairs(pod)
+
+            for a, b in pairs:
+
+                mid = new_match_id(season_id, cycle, pod_letter)
+
+                row = [
+                    mid,
+                    str(season_id),
+                    str(cycle),
+                    str(pod_letter),
+                    str(a),
+                    str(b),
+                    "",
+                    "",
+                    "",
+                    "normal",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "TRUE",
+                    nowb,
+                    nowb,
+                    "",
+                ]
+
+                ws_matches.append_row(row, value_input_option="USER_ENTERED")
+
+                created_matches += 1
+
+            pod_letter = chr(ord(pod_letter) + 1)
+
+        # =====================================================
+        # cálculo automático do prazo baseado no maior pod
+        # =====================================================
+
+        if max_pod_size == 3:
+            days = 5
+        elif max_pod_size == 4:
+            days = 8
+        else:
+            days = 10
+
+        start_dt = parse_br_dt(cf.get("start_at_br") or "") or now_br_dt().replace(
+            hour=14,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        deadline_dt = start_dt + timedelta(days=days)
+
+        deadline_dt = deadline_dt.replace(
+            hour=13,
+            minute=59,
+            second=0,
+            microsecond=0
+        )
+
+        set_cycle_status(ws_cycles, season_id, cycle, "locked")
+
+        set_cycle_times(
+            ws_cycles,
+            season_id,
+            cycle,
+            fmt_br_dt(start_dt),
+            fmt_br_dt(deadline_dt)
+        )
+
+        await interaction.followup.send(
+            f"✅ Pods gerados e ciclo travado (LOCKED).\n"
+            f"Season {season_id} | Ciclo {cycle}\n"
+            f"Inscritos: **{len(players)}**\n"
+            f"Pod alvo: **{ps}** | Maior pod: **{max_pod_size}**\n"
+            f"Prazo definido automaticamente: **{days} dias**\n"
+            f"Matches criados: **{created_matches}**",
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"pods_gerar: S{season_id} C{cycle} | players {len(players)} | pod_size {ps} | matches {created_matches}"
+        )
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Erro no /pods_gerar: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# [BLOCO 7/8 termina aqui]
+# =========================================================
 
 # =========================================================
 # /pods_gerar (ADM) — gera PodsHistory + Matches e trava ciclo (locked)
