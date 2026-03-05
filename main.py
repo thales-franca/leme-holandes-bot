@@ -1354,483 +1354,221 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # [BLOCO 4/8 termina aqui]
 # =========================================================
 
-
 # =========================================================
-# [BLOCO 5/8] — DISCORD CORE + /COMANDO + ONBOARDING (HANDSHAKE)
-# (ROBUSTO: somente no servidor + Views persistentes + modal nome/sobrenome)
+# [BLOCO 5/8] — BOT + ONBOARDING + CATÁLOGO DE COMANDOS
 # =========================================================
 
-import asyncio
-
-# =========================
-# Discord Bot (Client)
-# =========================
 class LemeBot(discord.Client):
+
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True  # necessário para fetch_member / on_member_join
-
-        # IMPORTANTE:
-        # - Para rotinas que dependem de ler conteúdo de mensagem (ex.: auto-limpeza baseada em mensagens),
-        #   isso pode ser necessário. Se você não usa on_message, não atrapalha.
-        # - No Portal do Discord, MESSAGE CONTENT INTENT já estava ativado (histórico do projeto).
+        intents.members = True
         intents.message_content = True
 
         super().__init__(intents=intents)
+
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # Views persistentes (funcionam após restart quando o bot volta online)
-        try:
-            self.add_view(OnboardingStartView())
-            self.add_view(OnboardingConfirmIdView())
-            self.add_view(OnboardingChoiceView())
-        except Exception:
-            pass
 
-        # Sync commands (guild-scoped quando possível)
-        try:
-            if GUILD_ID:
-                guild = discord.Object(id=GUILD_ID)
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-            else:
-                await self.tree.sync()
-        except Exception:
-            pass
+        # views persistentes
+        self.add_view(OnboardingView())
+
+        # sincroniza comandos
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            await self.tree.sync(guild=guild)
+        else:
+            await self.tree.sync()
 
 
 client = LemeBot()
 
 
-# =========================
-# Config extra (onboarding)
-# =========================
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
+# =========================================================
+# VIEW DE ONBOARDING
+# =========================================================
 
+class OnboardingView(discord.ui.View):
 
-# =========================
-# Logs (admin) — canal do servidor
-# =========================
-async def log_admin_guild(guild: discord.Guild | None, text: str):
-    if not guild or not LOG_ADMIN_CHANNEL_ID:
-        return
-    ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
-    if not ch:
-        try:
-            ch = await guild.fetch_channel(LOG_ADMIN_CHANNEL_ID)
-        except Exception:
-            ch = None
-    if ch:
-        try:
-            await ch.send(text)
-        except Exception:
-            pass
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Cadastrar Jogador",
+        style=discord.ButtonStyle.green,
+        custom_id="leme_onboarding"
+    )
+    async def onboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+        modal = NicknameModal()
+        await interaction.response.send_modal(modal)
 
 
 # =========================================================
-# Helper: split de mensagens (limite Discord 2000 chars)
+# MODAL DE CADASTRO
 # =========================================================
-def split_text_lines(text: str, limit: int = 1900) -> list[str]:
-    lines = str(text).split("\n")
-    chunks: list[str] = []
-    buf = ""
 
-    for ln in lines:
-        piece = ln + "\n"
-        if len(buf) + len(piece) > limit:
-            if buf.strip():
-                chunks.append(buf.rstrip("\n"))
-            buf = piece
-        else:
-            buf += piece
-
-    if buf.strip():
-        chunks.append(buf.rstrip("\n"))
-
-    # fallback: quebra dura se ainda exceder
-    safe_chunks: list[str] = []
-    for c in chunks:
-        if len(c) <= limit:
-            safe_chunks.append(c)
-        else:
-            for i in range(0, len(c), limit):
-                safe_chunks.append(c[i:i + limit])
-
-    return safe_chunks
-
-
-async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
-    """
-    Regra do projeto: quando resposta for grande, enviar em múltiplas mensagens
-    para não estourar o limite do Discord.
-    """
-    chunks = split_text_lines(text, limit=1900)
-    if not chunks:
-        return
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
-        else:
-            await interaction.followup.send(chunks[0], ephemeral=ephemeral)
-    except Exception:
-        return
-
-    for c in chunks[1:]:
-        try:
-            await interaction.followup.send(c, ephemeral=ephemeral)
-        except Exception:
-            break
-
-
-# =========================================================
-# Players upsert (Sheets) — mínimo necessário
-# + BLINDAGEM 429: invalida cache após escrita
-# =========================================================
-def upsert_player(ws_players, discord_id: str, nickname: str):
-    did = str(discord_id).strip()
-    nick = str(nickname).strip()
-    if not did or not nick:
-        return
-
-    col = ensure_sheet_columns(ws_players, PLAYERS_HEADER)
-    rows = cached_get_all_values(ws_players, ttl_seconds=10)  # usa cache para reduzir 429
-
-    did_col = col.get("discord_id", 0)
-    found_row = None
-    for i in range(2, len(rows) + 1):
-        r = rows[i - 1]
-        v = r[did_col] if did_col < len(r) else ""
-        if str(v).strip() == did:
-            found_row = i
-            break
-
-    nowc = now_br_str()
-
-    if found_row:
-        try:
-            if "nick" in col:
-                ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
-            if "updated_at" in col:
-                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-            cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
-        except Exception:
-            pass
-        return
-
-    row = [""] * len(PLAYERS_HEADER)
-    if "discord_id" in col:
-        row[col["discord_id"]] = did
-    if "nick" in col:
-        row[col["nick"]] = nick
-    if "status" in col:
-        row[col["status"]] = "active"
-    if "created_at" in col:
-        row[col["created_at"]] = nowc
-    if "updated_at" in col:
-        row[col["updated_at"]] = nowc
-
-    try:
-        ws_players.append_row(row, value_input_option="USER_ENTERED")
-        cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
-    except Exception:
-        pass
-
-
-# =========================================================
-# /comando (catálogo) — REFORÇADO (não “sumir” comandos)
-# =========================================================
-# OBS: aqui é catálogo (listagem). A implementação real dos comandos fica nos BLOCOS 6/7/8.
-# A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
-COMMANDS_CATALOG = [
-    # Jogador
-    ("jogador", "/cadastro", "Concluir cadastro (Nome e Sobrenome)."),
-    ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
-    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
-    ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
-    ("jogador", "/deck", "Define seu deck (1 vez por ciclo)."),
-    ("jogador", "/decklist", "Define decklist (1 vez por ciclo)."),
-    ("jogador", "/pods_ver", "Mostra seu POD no ciclo atual."),
-    ("jogador", "/meus_matches", "Lista seus matches do ciclo."),
-    ("jogador", "/resultado", "Reporta resultado V-D-E (games) para um match."),
-    ("jogador", "/rejeitar", "Rejeita um resultado pendente (janela 48h)."),
-    ("jogador", "/ranking", "Mostra ranking do ciclo."),
-    ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
-    ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
-    ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
-
-    # Administrativo (ADM/Organizador)
-    ("adm", "/forcesync", "Sincroniza comandos no servidor."),
-    ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
-    ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
-    ("adm", "/ciclo_fechar", "Fecha inscrições do ciclo."),
-    ("adm", "/ciclo_encerrar", "Encerra ciclo (completed)."),
-    ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo."),
-    ("adm", "/deadline", "Lista pendências próximas do vencimento (48h)."),
-    ("adm", "/recalcular", "Auto-confirma pendentes e recalcula ranking do ciclo."),
-    ("adm", "/standings_publicar", "Publica standings (canal configurado)."),
-    ("adm", "/final", "Finaliza ciclo: aplica 0-0-3 (ID) nos matches sem report após prazo."),
-    ("adm", "/admin_resultado_editar", "Edita resultado de um match (admin)."),
-    ("adm", "/admin_resultado_cancelar", "Cancela um resultado (admin)."),
-    ("adm", "/status_ciclo", "Mostra status do ciclo atual."),
-    ("adm", "/exportar_ciclo", "Exporta dados do ciclo (admin)."),
-    ("adm", "/fechar_resultados_atrasados", "Força fechamento de pendências antigas (admin)."),
-    ("adm", "/substituir_jogador", "Substitui jogador (admin)."),
-    ("adm", "/historico_confronto", "Mostra histórico de confrontos (admin)."),
-    ("adm", "/estatisticas", "Estatísticas da liga (admin)."),
-]
-
-def level_allows(user_level: str, cmd_level: str) -> bool:
-    order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
-    return order.get(user_level, 1) >= order.get(cmd_level, 1)
-
-def level_allows(user_level: str, cmd_level: str) -> bool:
-    order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
-    return order.get(user_level, 1) >= order.get(cmd_level, 1)
-
-@client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
-async def comando(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True)
-    except Exception:
-        pass
-
-    try:
-        user_level = await get_access_level(interaction)
-
-        # Lista real de slash commands registrados (evita "comandos fantasma")
-        try:
-            real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
-        except Exception:
-            real_cmds = set()
-
-        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
-        missing = []
-
-        for lvl, cmd, desc in COMMANDS_CATALOG:
-            if not level_allows(user_level, lvl):
-                continue
-
-            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
-            if real_cmds and cmd not in real_cmds:
-                missing.append((cmd, desc))
-                continue
-
-            lines.append(f"• **{cmd}** — {desc}")
-
-        if missing:
-            lines.append("\n🚧 **Em desenvolvimento**")
-            for cmd, desc in missing:
-                lines.append(f"• {cmd} — {desc}")
-
-        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
-
-        lines.append(f"• **{cmd}** — {desc}")
-
-        if missing:
-            lines.append("
-🚧 **Em desenvolvimento (ainda não ativo no bot)**")
-            for cmd, desc in missing:
-                lines.append(f"• {cmd} — {desc}")
-
-        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
-    except Exception:
-        try:
-            await interaction.followup.send("Não foi possível listar comandos agora.", ephemeral=True)
-        except Exception:
-            pass
-
-
-# =========================================================
-# Comandos básicos do onboarding (BLOCO 5)
-# =========================================================
-@client.tree.command(name="meuid", description="Mostra seu ID do Discord.")
-async def meuid(interaction: discord.Interaction):
-    try:
-        await interaction.response.send_message(f"Seu ID é: `{interaction.user.id}`", ephemeral=True)
-    except Exception:
-        pass
-
-
-# =========================================================
-# ONBOARDING — Views persistentes + Modal
-# =========================================================
 class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
+
     nome = discord.ui.TextInput(
-        label="Insira seu Nome e Sobrenome sem abreviações",
+        label="Informe Nome e Sobrenome",
         required=True,
-        max_length=32,
+        max_length=32
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw = str(self.nome.value or "").strip()
 
-        # Regra: mínimo 2 palavras
+        raw = str(self.nome.value).strip()
+
         if len(raw.split()) < 2:
-            try:
-                await interaction.response.send_message(
-                    "⚠️ Informe Nome e Sobrenome.\nExemplo: **Thales França**",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
-            return
+            return await interaction.response.send_message(
+                "⚠️ Informe Nome e Sobrenome.\nExemplo: João Silva",
+                ephemeral=True
+            )
 
-        # Salva no Sheets (Players)
         try:
+
             sh = open_sheet()
-            ensure_all_sheets(sh)
-            ws_players = sh.worksheet("Players")
-            upsert_player(ws_players, str(interaction.user.id), raw)
-        except Exception:
-            try:
-                await interaction.response.send_message(
-                    "⚠️ Não consegui salvar seu cadastro agora. Tente novamente em instantes.",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
-            return
 
-        try:
-            await interaction.response.send_message(
-                "✅ Cadastro salvo. Agora escolha uma opção abaixo:",
-                ephemeral=True,
-                view=OnboardingChoiceView()
+            ws_players = ensure_worksheet(
+                sh,
+                "Players",
+                PLAYERS_HEADER,
+                rows=5000,
+                cols=25
             )
-        except Exception:
-            pass
 
+            pid = str(interaction.user.id)
 
-class OnboardingStartView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+            upsert_player(ws_players, pid, raw)
 
-    @discord.ui.button(label="Iniciar cadastro", style=discord.ButtonStyle.success, custom_id="lhb_onb_start")
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
             await interaction.response.send_message(
-                "Confirme abaixo para prosseguir com seu cadastro.",
-                ephemeral=True,
-                view=OnboardingConfirmIdView()
+                f"✅ Cadastro realizado: **{raw}**",
+                ephemeral=True
             )
-        except Exception:
-            pass
 
-
-class OnboardingConfirmIdView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Confirmar ID", style=discord.ButtonStyle.primary, custom_id="lhb_onb_confirm")
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_modal(NicknameModal())
-        except Exception:
             try:
-                await interaction.response.send_message(
-                    "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
-                    ephemeral=True
-                )
-            except Exception:
+                await log_admin(interaction, f"novo player: {raw}")
+            except:
                 pass
 
+        except Exception as e:
 
-class OnboardingChoiceView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # aplica cargo Jogador (se existir)
-        try:
-            guild = interaction.guild
-            if guild:
-                role = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
-                if role:
-                    member = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
-                    try:
-                        await member.add_roles(role, reason="Onboarding Leme Holandês")
-                    except Exception:
-                        pass
-            await interaction.response.send_message("✅ Perfeito. Você está marcado como **Jogador**.", ephemeral=True)
-        except Exception:
-            try:
-                await interaction.response.send_message("✅ Cadastro finalizado.", ephemeral=True)
-            except Exception:
-                pass
-
-    @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary, custom_id="lhb_onb_watch")
-    async def watch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_message("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
-        except Exception:
-            pass
+            await interaction.response.send_message(
+                f"❌ Erro no cadastro: {e}",
+                ephemeral=True
+            )
 
 
 # =========================================================
-# Posting do onboarding no canal (evento + comando admin)
+# CATÁLOGO DE COMANDOS
 # =========================================================
-async def post_onboarding_message(channel: discord.abc.Messageable, member_mention: str | None = None):
-    base = "Bem-vindo ao **Leme Holandês**! Para começar, clique no botão abaixo:"
-    if member_mention:
-        base = f"{member_mention}\n" + base
+
+@client.tree.command(
+    name="comando",
+    description="Mostra a lista de comandos disponíveis."
+)
+async def comando(interaction: discord.Interaction):
+
+    await interaction.response.defer(ephemeral=True)
+
     try:
-        await channel.send(base, view=OnboardingStartView())
-    except Exception:
-        pass
 
+        cmds = client.tree.get_commands()
+
+        lines = []
+
+        for c in sorted(cmds, key=lambda x: x.name):
+
+            desc = c.description or "sem descrição"
+            lines.append(f"• **/{c.name}** — {desc}")
+
+        if not lines:
+            return await interaction.followup.send(
+                "Nenhum comando disponível.",
+                ephemeral=True
+            )
+
+        msg = "📜 **Comandos disponíveis**\n\n"
+        msg += "\n".join(lines)
+
+        await send_followup_chunks(
+            interaction,
+            msg,
+            ephemeral=True
+        )
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Erro ao listar comandos: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# /forcesync (OWNER)
+# =========================================================
+
+@client.tree.command(
+    name="forcesync",
+    description="(OWNER) Força sincronização dos comandos."
+)
+async def forcesync(interaction: discord.Interaction):
+
+    if not await is_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ Apenas o owner pode usar este comando.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            synced = await client.tree.sync(guild=guild)
+        else:
+            synced = await client.tree.sync()
+
+        await interaction.followup.send(
+            f"✅ {len(synced)} comandos sincronizados.",
+            ephemeral=True
+        )
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Erro no forcesync: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# EVENT: BOT ONLINE
+# =========================================================
 
 @client.event
-async def on_member_join(member: discord.Member):
-    # Ao entrar, postar onboarding no canal configurado (ou ignora se não tiver)
-    try:
-        guild = member.guild
-        ch = None
-        if WELCOME_CHANNEL_ID:
-            ch = guild.get_channel(WELCOME_CHANNEL_ID)
-            if not ch:
-                try:
-                    ch = await guild.fetch_channel(WELCOME_CHANNEL_ID)
-                except Exception:
-                    ch = None
-        if ch:
-            await post_onboarding_message(ch, member_mention=member.mention)
-            await log_admin_guild(guild, f"🟢 Onboarding postado para {member} ({member.id}) em {ch.mention}")
-    except Exception:
-        pass
+async def on_ready():
 
-
-@client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (ADM).")
-async def onboarding(interaction: discord.Interaction):
-    try:
-        if not await is_admin_or_organizer(interaction):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
-            return
-    except Exception:
-        try:
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
-        except Exception:
-            pass
-        return
+    print(f"Bot conectado como {client.user}")
 
     try:
-        await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
-    except Exception:
-        pass
 
-    try:
-        await post_onboarding_message(interaction.channel, member_mention=None)
-    except Exception:
-        pass
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            await client.tree.sync(guild=guild)
+        else:
+            await client.tree.sync()
 
+        print("Comandos sincronizados")
 
-# =========================================================
-# [BLOCO 5/8 termina aqui]
-# =========================================================
+    except Exception as e:
+
+        print("Erro ao sincronizar comandos:", e)
+
 
 # =========================================================
 # [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (REVISADO)
