@@ -1353,222 +1353,464 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # =========================================================
 # [BLOCO 4/8 termina aqui]
 # =========================================================
-
 # =========================================================
-# [BLOCO 5/8] — BOT + ONBOARDING + CATÁLOGO DE COMANDOS
+# [BLOCO 5/8] — DISCORD CORE + /COMANDO + ONBOARDING (HANDSHAKE)
+# (ROBUSTO: somente no servidor + Views persistentes + modal nome/sobrenome)
 # =========================================================
 
+import asyncio
+
+# =========================
+# Discord Bot (Client)
+# =========================
 class LemeBot(discord.Client):
-
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True
+        intents.members = True  # necessário para fetch_member / on_member_join
+
+        # MESSAGE CONTENT INTENT já estava ativado no portal (histórico do projeto).
         intents.message_content = True
 
         super().__init__(intents=intents)
-
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # Views persistentes (funcionam após restart quando o bot volta online)
+        try:
+            self.add_view(OnboardingStartView())
+            self.add_view(OnboardingConfirmIdView())
+            self.add_view(OnboardingChoiceView())
+        except Exception:
+            pass
 
-        # views persistentes
-        self.add_view(OnboardingView())
-
-        # sincroniza comandos
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            await self.tree.sync(guild=guild)
-        else:
-            await self.tree.sync()
+        # Sync commands (guild-scoped quando possível)
+        try:
+            if GUILD_ID:
+                guild = discord.Object(id=GUILD_ID)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            else:
+                await self.tree.sync()
+        except Exception:
+            pass
 
 
 client = LemeBot()
 
 
+# =========================
+# Config extra (onboarding)
+# =========================
+WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
+
+
+# =========================
+# Logs (admin) — canal do servidor
+# =========================
+async def log_admin_guild(guild: discord.Guild | None, text: str):
+    if not guild or not LOG_ADMIN_CHANNEL_ID:
+        return
+    ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
+    if not ch:
+        try:
+            ch = await guild.fetch_channel(LOG_ADMIN_CHANNEL_ID)
+        except Exception:
+            ch = None
+    if ch:
+        try:
+            await ch.send(text)
+        except Exception:
+            pass
+
+
 # =========================================================
-# VIEW DE ONBOARDING
+# Helper: split de mensagens (limite Discord 2000 chars)
 # =========================================================
+def split_text_lines(text: str, limit: int = 1900) -> list[str]:
+    lines = str(text).split("\n")
+    chunks: list[str] = []
+    buf = ""
 
-class OnboardingView(discord.ui.View):
+    for ln in lines:
+        piece = ln + "\n"
+        if len(buf) + len(piece) > limit:
+            if buf.strip():
+                chunks.append(buf.rstrip("\n"))
+            buf = piece
+        else:
+            buf += piece
 
-    def __init__(self):
-        super().__init__(timeout=None)
+    if buf.strip():
+        chunks.append(buf.rstrip("\n"))
 
-    @discord.ui.button(
-        label="Cadastrar Jogador",
-        style=discord.ButtonStyle.green,
-        custom_id="leme_onboarding"
-    )
-    async def onboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # fallback: quebra dura se ainda exceder
+    safe_chunks: list[str] = []
+    for c in chunks:
+        if len(c) <= limit:
+            safe_chunks.append(c)
+        else:
+            for i in range(0, len(c), limit):
+                safe_chunks.append(c[i:i + limit])
 
-        modal = NicknameModal()
-        await interaction.response.send_modal(modal)
+    return safe_chunks
+
+
+async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
+    """
+    Regra do projeto: quando resposta for grande, enviar em múltiplas mensagens
+    para não estourar o limite do Discord.
+    """
+    chunks = split_text_lines(text, limit=1900)
+    if not chunks:
+        return
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
+        else:
+            await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+    except Exception:
+        return
+
+    for c in chunks[1:]:
+        try:
+            await interaction.followup.send(c, ephemeral=ephemeral)
+        except Exception:
+            break
 
 
 # =========================================================
-# MODAL DE CADASTRO
+# Players upsert (Sheets) — mínimo necessário
+# + BLINDAGEM 429: invalida cache após escrita
 # =========================================================
+def upsert_player(ws_players, discord_id: str, nickname: str):
+    did = str(discord_id).strip()
+    nick = str(nickname).strip()
+    if not did or not nick:
+        return
 
+    col = ensure_sheet_columns(ws_players, PLAYERS_HEADER)
+    rows = cached_get_all_values(ws_players, ttl_seconds=10)  # usa cache para reduzir 429
+
+    did_col = col.get("discord_id", 0)
+    found_row = None
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+        v = r[did_col] if did_col < len(r) else ""
+        if str(v).strip() == did:
+            found_row = i
+            break
+
+    nowc = now_br_str()
+
+    if found_row:
+        try:
+            if "nick" in col:
+                ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
+            if "updated_at" in col:
+                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
+            cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
+        except Exception:
+            pass
+        return
+
+    row = [""] * len(PLAYERS_HEADER)
+    if "discord_id" in col:
+        row[col["discord_id"]] = did
+    if "nick" in col:
+        row[col["nick"]] = nick
+    if "status" in col:
+        row[col["status"]] = "active"
+    if "created_at" in col:
+        row[col["created_at"]] = nowc
+    if "updated_at" in col:
+        row[col["updated_at"]] = nowc
+
+    try:
+        ws_players.append_row(row, value_input_option="USER_ENTERED")
+        cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
+    except Exception:
+        pass
+
+
+# =========================================================
+# /comando (catálogo) — CORRIGIDO (sem SyntaxError)
+# =========================================================
+# OBS: aqui é catálogo (listagem). A implementação real dos comandos fica nos BLOCOS 6/7/8.
+# A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
+COMMANDS_CATALOG = [
+    # Jogador
+    ("jogador", "/cadastro", "Concluir cadastro (Nome e Sobrenome)."),
+    ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
+    ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
+    ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
+    ("jogador", "/deck", "Define seu deck (1 vez por ciclo)."),
+    ("jogador", "/decklist", "Define decklist (1 vez por ciclo)."),
+    ("jogador", "/pods_ver", "Mostra seu POD no ciclo atual."),
+    ("jogador", "/meus_matches", "Lista seus matches do ciclo."),
+    ("jogador", "/resultado", "Reporta resultado V-D-E (games) para um match."),
+    ("jogador", "/rejeitar", "Rejeita um resultado pendente (janela 48h)."),
+    ("jogador", "/ranking", "Mostra ranking do ciclo."),
+    ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
+    ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
+    ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
+
+    # Administrativo (ADM/Organizador)
+    ("adm", "/forcesync", "Sincroniza comandos no servidor."),
+    ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
+    ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
+    ("adm", "/ciclo_fechar", "Fecha inscrições do ciclo."),
+    ("adm", "/ciclo_encerrar", "Encerra ciclo (completed)."),
+    ("adm", "/pods_gerar", "Gera pods + matches e trava ciclo."),
+    ("adm", "/start_cycle", "Gera pods + matches e trava ciclo (locked)."),
+    ("adm", "/deadline", "Lista pendências próximas do vencimento (48h)."),
+    ("adm", "/recalcular", "Auto-confirma pendentes e recalcula ranking do ciclo."),
+    ("adm", "/standings_publicar", "Publica standings (canal configurado)."),
+    ("adm", "/final", "Finaliza ciclo: aplica 0-0-3 (ID) nos matches sem report após prazo."),
+    ("adm", "/admin_resultado_editar", "Edita resultado de um match (admin)."),
+    ("adm", "/admin_resultado_cancelar", "Cancela um resultado (admin)."),
+    ("adm", "/status_ciclo", "Mostra status do ciclo atual."),
+    ("adm", "/exportar_ciclo", "Exporta dados do ciclo (admin)."),
+    ("adm", "/fechar_resultados_atrasados", "Força fechamento de pendências antigas (admin)."),
+    ("adm", "/substituir_jogador", "Substitui jogador (admin)."),
+    ("adm", "/historico_confronto", "Mostra histórico de confrontos (admin)."),
+    ("adm", "/estatisticas", "Estatísticas da liga (admin)."),
+]
+
+def level_allows(user_level: str, cmd_level: str) -> bool:
+    order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
+    return order.get(user_level, 1) >= order.get(cmd_level, 1)
+
+@client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
+async def comando(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
+    try:
+        user_level = await get_access_level(interaction)
+
+        # Lista real de slash commands registrados (evita "comandos fantasma")
+        try:
+            real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
+        except Exception:
+            real_cmds = set()
+
+        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+        missing: list[tuple[str, str]] = []
+
+        for lvl, cmd, desc in COMMANDS_CATALOG:
+            if not level_allows(user_level, lvl):
+                continue
+
+            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
+            if real_cmds and cmd not in real_cmds:
+                missing.append((cmd, desc))
+                continue
+
+            lines.append(f"• **{cmd}** — {desc}")
+
+        if missing:
+            lines.append("\n🚧 **Em desenvolvimento (ainda não ativo no bot)**")
+            for cmd, desc in missing:
+                lines.append(f"• {cmd} — {desc}")
+
+        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        try:
+            await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+        except Exception:
+            pass
+
+
+# =========================================================
+# Comandos básicos do onboarding (BLOCO 5)
+# =========================================================
+@client.tree.command(name="meuid", description="Mostra seu ID do Discord.")
+async def meuid(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_message(f"Seu ID é: `{interaction.user.id}`", ephemeral=True)
+    except Exception:
+        pass
+
+
+# =========================================================
+# ONBOARDING — Views persistentes + Modal
+# =========================================================
 class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
-
     nome = discord.ui.TextInput(
-        label="Informe Nome e Sobrenome",
+        label="Insira seu Nome e Sobrenome sem abreviações",
         required=True,
-        max_length=32
+        max_length=32,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.nome.value or "").strip()
 
-        raw = str(self.nome.value).strip()
-
+        # Regra: mínimo 2 palavras
         if len(raw.split()) < 2:
-            return await interaction.response.send_message(
-                "⚠️ Informe Nome e Sobrenome.\nExemplo: João Silva",
-                ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    "⚠️ Informe Nome e Sobrenome.\nExemplo: **Thales França**",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+            return
+
+        # Salva no Sheets (Players)
+        try:
+            sh = open_sheet()
+            ensure_all_sheets(sh)
+            ws_players = sh.worksheet("Players")
+            upsert_player(ws_players, str(interaction.user.id), raw)
+        except Exception:
+            try:
+                await interaction.response.send_message(
+                    "⚠️ Não consegui salvar seu cadastro agora. Tente novamente em instantes.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+            return
 
         try:
-
-            sh = open_sheet()
-
-            ws_players = ensure_worksheet(
-                sh,
-                "Players",
-                PLAYERS_HEADER,
-                rows=5000,
-                cols=25
-            )
-
-            pid = str(interaction.user.id)
-
-            upsert_player(ws_players, pid, raw)
-
             await interaction.response.send_message(
-                f"✅ Cadastro realizado: **{raw}**",
-                ephemeral=True
+                "✅ Cadastro salvo. Agora escolha uma opção abaixo:",
+                ephemeral=True,
+                view=OnboardingChoiceView()
             )
+        except Exception:
+            pass
 
+
+class OnboardingStartView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Iniciar cadastro", style=discord.ButtonStyle.success, custom_id="lhb_onb_start")
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.send_message(
+                "Confirme abaixo para prosseguir com seu cadastro.",
+                ephemeral=True,
+                view=OnboardingConfirmIdView()
+            )
+        except Exception:
+            pass
+
+
+class OnboardingConfirmIdView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Confirmar ID", style=discord.ButtonStyle.primary, custom_id="lhb_onb_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(NicknameModal())
+        except Exception:
             try:
-                await log_admin(interaction, f"novo player: {raw}")
-            except:
+                await interaction.response.send_message(
+                    "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
+                    ephemeral=True
+                )
+            except Exception:
                 pass
 
-        except Exception as e:
 
-            await interaction.response.send_message(
-                f"❌ Erro no cadastro: {e}",
-                ephemeral=True
-            )
+class OnboardingChoiceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # aplica cargo Jogador (se existir)
+        try:
+            guild = interaction.guild
+            if guild:
+                role = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
+                if role:
+                    member = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
+                    try:
+                        await member.add_roles(role, reason="Onboarding Leme Holandês")
+                    except Exception:
+                        pass
+            await interaction.response.send_message("✅ Perfeito. Você está marcado como **Jogador**.", ephemeral=True)
+        except Exception:
+            try:
+                await interaction.response.send_message("✅ Cadastro finalizado.", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary, custom_id="lhb_onb_watch")
+    async def watch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.send_message("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
+        except Exception:
+            pass
 
 
 # =========================================================
-# CATÁLOGO DE COMANDOS
+# Posting do onboarding no canal (evento + comando admin)
 # =========================================================
-
-@client.tree.command(
-    name="comando",
-    description="Mostra a lista de comandos disponíveis."
-)
-async def comando(interaction: discord.Interaction):
-
-    await interaction.response.defer(ephemeral=True)
-
+async def post_onboarding_message(channel: discord.abc.Messageable, member_mention: str | None = None):
+    base = "Bem-vindo ao **Leme Holandês**! Para começar, clique no botão abaixo:"
+    if member_mention:
+        base = f"{member_mention}\n" + base
     try:
+        await channel.send(base, view=OnboardingStartView())
+    except Exception:
+        pass
 
-        cmds = client.tree.get_commands()
-
-        lines = []
-
-        for c in sorted(cmds, key=lambda x: x.name):
-
-            desc = c.description or "sem descrição"
-            lines.append(f"• **/{c.name}** — {desc}")
-
-        if not lines:
-            return await interaction.followup.send(
-                "Nenhum comando disponível.",
-                ephemeral=True
-            )
-
-        msg = "📜 **Comandos disponíveis**\n\n"
-        msg += "\n".join(lines)
-
-        await send_followup_chunks(
-            interaction,
-            msg,
-            ephemeral=True
-        )
-
-    except Exception as e:
-
-        await interaction.followup.send(
-            f"❌ Erro ao listar comandos: {e}",
-            ephemeral=True
-        )
-
-
-# =========================================================
-# /forcesync (OWNER)
-# =========================================================
-
-@client.tree.command(
-    name="forcesync",
-    description="(OWNER) Força sincronização dos comandos."
-)
-async def forcesync(interaction: discord.Interaction):
-
-    if not await is_owner(interaction):
-        return await interaction.response.send_message(
-            "❌ Apenas o owner pode usar este comando.",
-            ephemeral=True
-        )
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            synced = await client.tree.sync(guild=guild)
-        else:
-            synced = await client.tree.sync()
-
-        await interaction.followup.send(
-            f"✅ {len(synced)} comandos sincronizados.",
-            ephemeral=True
-        )
-
-    except Exception as e:
-
-        await interaction.followup.send(
-            f"❌ Erro no forcesync: {e}",
-            ephemeral=True
-        )
-
-
-# =========================================================
-# EVENT: BOT ONLINE
-# =========================================================
 
 @client.event
-async def on_ready():
+async def on_member_join(member: discord.Member):
+    # Ao entrar, postar onboarding no canal configurado (ou ignora se não tiver)
+    try:
+        guild = member.guild
+        ch = None
+        if WELCOME_CHANNEL_ID:
+            ch = guild.get_channel(WELCOME_CHANNEL_ID)
+            if not ch:
+                try:
+                    ch = await guild.fetch_channel(WELCOME_CHANNEL_ID)
+                except Exception:
+                    ch = None
+        if ch:
+            await post_onboarding_message(ch, member_mention=member.mention)
+            await log_admin_guild(guild, f"🟢 Onboarding postado para {member} ({member.id}) em {ch.mention}")
+    except Exception:
+        pass
 
-    print(f"Bot conectado como {client.user}")
+
+@client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (ADM).")
+async def onboarding(interaction: discord.Interaction):
+    try:
+        if not await is_admin_or_organizer(interaction):
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            return
+    except Exception:
+        try:
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+        except Exception:
+            pass
+        return
 
     try:
+        await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
+    except Exception:
+        pass
 
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            await client.tree.sync(guild=guild)
-        else:
-            await client.tree.sync()
+    try:
+        await post_onboarding_message(interaction.channel, member_mention=None)
+    except Exception:
+        pass
 
-        print("Comandos sincronizados")
 
-    except Exception as e:
-
-        print("Erro ao sincronizar comandos:", e)
-
+# =========================================================
+# [BLOCO 5/8 termina aqui]
+# =========================================================
 
 # =========================================================
 # [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (REVISADO)
@@ -2507,7 +2749,284 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=False)
 
+# =========================================================
+# OWNER — START/CLOSE SEASON + CADASTRAR PLAYER + START_CYCLE
+# (Cole antes do START)
+# =========================================================
 
+def _next_season_id(sh) -> int:
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
+    rows = ws.get_all_records()
+    mx = 0
+    for r in rows:
+        mx = max(mx, safe_int(r.get("season_id", 0), 0))
+    return mx + 1 if mx > 0 else 1
+
+
+@client.tree.command(name="startseason", description="(OWNER) Abre uma nova season e define como ativa.")
+@app_commands.describe(nome="Nome opcional da season (ex: Season 3)")
+async def startseason(interaction: discord.Interaction, nome: str = ""):
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        ensure_all_sheets(sh)
+
+        new_id = _next_season_id(sh)
+        season_name = (nome or f"Temporada {new_id}").strip()
+
+        # fecha outras e abre a nova
+        set_season_status(sh, new_id, "open", name=season_name)
+        close_all_other_seasons(sh, keep_open_id=new_id)
+        set_current_season_id(sh, new_id)
+
+        await interaction.followup.send(
+            f"✅ Season aberta e ativa: **{season_name}** (ID {new_id}).",
+            ephemeral=True
+        )
+        await log_admin(interaction, f"OWNER startseason: opened S{new_id} name='{season_name}'")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /startseason: {e}", ephemeral=True)
+
+
+@client.tree.command(name="closeseason", description="(OWNER) Fecha a season atual (desativa).")
+async def closeseason(interaction: discord.Interaction):
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        sid = get_current_season_id(sh)
+        if sid <= 0:
+            return await interaction.followup.send("⚠️ Não existe season ativa.", ephemeral=True)
+
+        set_season_status(sh, sid, "closed")
+        set_current_season_id(sh, 0)
+
+        await interaction.followup.send(f"✅ Season **{sid}** fechada.", ephemeral=True)
+        await log_admin(interaction, f"OWNER closeseason: closed S{sid}")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /closeseason: {e}", ephemeral=True)
+
+
+@client.tree.command(name="cadastrar_player", description="(OWNER) Cadastra player manualmente (e opcionalmente deck/decklist no ciclo).")
+@app_commands.describe(
+    membro="Selecione o usuário no Discord",
+    nome="Nome e Sobrenome (sem abreviações)",
+    ciclo="Opcional: ciclo para cadastrar deck/decklist",
+    deck="Opcional: nome do deck (1 vez por ciclo)",
+    decklist="Opcional: link (moxfield/ligamagic)"
+)
+async def cadastrar_player(
+    interaction: discord.Interaction,
+    membro: discord.Member,
+    nome: str,
+    ciclo: int = 0,
+    deck: str = "",
+    decklist: str = ""
+):
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        raw = str(nome or "").strip()
+        if len(raw.split()) < 2:
+            return await interaction.followup.send("❌ Informe Nome e Sobrenome (ex: João Silva).", ephemeral=True)
+
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+        ensure_all_sheets(sh)
+
+        ws_players = sh.worksheet("Players")
+        upsert_player(ws_players, str(membro.id), raw)
+
+        msg_parts = [f"✅ Player cadastrado/atualizado: **{raw}** ({membro.id})"]
+
+        # Opcional: deck/decklist para um ciclo
+        if ciclo and (deck.strip() or decklist.strip()):
+            ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+            cf = get_cycle_fields(ws_cycles, season_id, int(ciclo))
+            if cf.get("status") is None:
+                return await interaction.followup.send(f"❌ O ciclo {ciclo} não existe.", ephemeral=True)
+
+            ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
+            rown = ensure_deck_row(ws_decks, season_id, int(ciclo), str(membro.id))
+            col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+            if deck.strip():
+                nm = deck.strip()
+                if len(nm) > 80:
+                    return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
+                ws_decks.update([[nm]], range_name=f"{col_letter(col['deck'])}{rown}")
+                ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+                msg_parts.append(f"- Deck setado no Ciclo {ciclo}: **{nm}**")
+
+            if decklist.strip():
+                ok, val = validate_decklist_url(decklist)
+                if not ok:
+                    return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
+                ws_decks.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{rown}")
+                ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+                msg_parts.append(f"- Decklist setada no Ciclo {ciclo}.")
+
+            cache_invalidate(ws_decks)
+
+        await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
+        await log_admin(interaction, f"OWNER cadastrar_player: {raw} ({membro.id}) ciclo={ciclo or 'n/a'}")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /cadastrar_player: {e}", ephemeral=True)
+
+
+# =========================================================
+# /start_cycle (ADM/Organizador) — Gera Pods + Matches e trava o ciclo
+# - cria PodsHistory e Matches
+# - seta cycle status=locked
+# - grava start/deadline no Cycles
+# =========================================================
+def _choose_pod_size(n: int) -> int:
+    # Heurística simples e segura:
+    # tenta 4, depois 3, depois 5, senão 6
+    for s in (4, 3, 5, 6):
+        if n % s == 0:
+            return s
+    if n <= 3:
+        return 3
+    if n == 5:
+        return 5
+    return 4  # fallback
+
+
+@client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
+@app_commands.describe(cycle="Número do ciclo", pod_size="Opcional: tamanho do pod (3..6). 0 = automático", tries="Tentativas anti-repetição (50..500)")
+async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
+    if not await is_admin_or_organizer(interaction):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+        ensure_all_sheets(sh)
+
+        ws_cycles = sh.worksheet("Cycles")
+        ws_enr = sh.worksheet("Enrollments")
+        ws_pods = sh.worksheet("PodsHistory")
+        ws_matches = sh.worksheet("Matches")
+
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+        cf = get_cycle_fields(ws_cycles, season_id, cycle)
+        if cf.get("status") is None:
+            return await interaction.followup.send(f"❌ O ciclo {cycle} não existe.", ephemeral=True)
+
+        st = (cf.get("status") or "").strip().lower()
+        if st != "open":
+            return await interaction.followup.send(f"❌ O ciclo {cycle} não está OPEN (status: {st}).", ephemeral=True)
+
+        # coleta inscritos ativos
+        enr_rows = cached_get_all_records(ws_enr, ttl_seconds=5)
+        players = []
+        for r in enr_rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            if safe_int(r.get("cycle", 0), 0) != cycle:
+                continue
+            if str(r.get("status", "")).strip().lower() != "active":
+                continue
+            pid = str(r.get("player_id", "")).strip()
+            if pid:
+                players.append(pid)
+
+        players = sorted(set(players))
+        if len(players) < 3:
+            return await interaction.followup.send("❌ Precisa de pelo menos 3 jogadores ativos para gerar pods.", ephemeral=True)
+
+        # tamanho do pod
+        if pod_size and pod_size not in (3, 4, 5, 6):
+            return await interaction.followup.send("❌ pod_size inválido (use 3,4,5,6 ou 0).", ephemeral=True)
+
+        ps = pod_size if pod_size else _choose_pod_size(len(players))
+
+        # anti-repetição baseado em histórico confirmado
+        past_pairs = get_past_confirmed_pairs(ws_matches)
+        pods, score = best_shuffle_min_repeats(players, ps, past_pairs, tries=max(50, min(tries, 500)))
+
+        # grava PodsHistory
+        nowb = now_br_str()
+        pod_labels = []
+        pod_num = 1
+        for pod in pods:
+            label = f"{pod_num}"
+            pod_labels.append((label, pod))
+            for pid in pod:
+                ws_pods.append_row([str(season_id), str(cycle), label, str(pid), nowb], value_input_option="USER_ENTERED")
+            pod_num += 1
+
+        cache_invalidate(ws_pods)
+
+        # cria Matches round-robin dentro de cada pod
+        created = 0
+        nowu = utc_now_dt()
+        for label, pod in pod_labels:
+            for a, b in round_robin_pairs(pod):
+                mid = new_match_id(season_id, cycle, label)
+                ws_matches.append_row([
+                    mid, str(season_id), str(cycle), str(label),
+                    str(a), str(b),
+                    "0", "0", "0",
+                    "normal", "open",
+                    "", "", "", "",
+                    "TRUE",
+                    now_iso_utc(), now_iso_utc(),
+                    auto_confirm_deadline_iso(nowu)  # placeholder; será setado quando reportar
+                ], value_input_option="USER_ENTERED")
+                created += 1
+
+        cache_invalidate(ws_matches)
+
+        # trava ciclo + grava prazo
+        set_cycle_status(ws_cycles, season_id, cycle, "locked")
+        cache_invalidate(ws_cycles)
+
+        start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
+        if start_br and end_br:
+            set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
+            cache_invalidate(ws_cycles)
+
+        await interaction.followup.send(
+            "✅ Ciclo travado e pods gerados.\n"
+            f"- Jogadores: **{len(players)}**\n"
+            f"- Pod size: **{ps}**\n"
+            f"- Penalidade anti-repetição: **{score}**\n"
+            f"- Matches criados: **{created}**\n"
+            f"- Prazo: **{start_br}** → **{end_br}** (BR)",
+            ephemeral=True
+        )
+        await log_admin(interaction, f"start_cycle S{season_id} C{cycle} pods={len(pod_labels)} matches={created} score={score}")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /start_cycle: {e}", ephemeral=True)
+
+
+# (Opcional) Alias para bater com seu catálogo antigo
+@client.tree.command(name="pods_gerar", description="(ADM) Alias de /start_cycle.")
+@app_commands.describe(cycle="Número do ciclo", pod_size="Opcional: tamanho do pod (3..6). 0 = automático", tries="Tentativas anti-repetição (50..500)")
+async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
+    return await start_cycle(interaction, cycle, pod_size, tries)
 # =========================================================
 # START
 # =========================================================
