@@ -1124,7 +1124,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # [BLOCO 4/8] — RECÁLCULO OFICIAL (MWP/OMW/GWP/OGW) + STANDINGS (ZERADO)
 # =========================================================
 
-def recalculate_cycle(season_id: int, cycle: int):
+def recalculate_cycle(sh, season_id: int, cycle: int):
     """
     Recalcula o ranking do ciclo (SEMPRE do zero):
     - Piso 33,3% primeiro (MWP/GWP)
@@ -1136,7 +1136,6 @@ def recalculate_cycle(season_id: int, cycle: int):
     - Considera apenas matches:
       active=TRUE e confirmed_status=confirmed e result_type != bye
     """
-    sh = open_sheet()
     ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
     ws_matches = sh.worksheet("Matches")
     ws_standings = sh.worksheet("Standings")
@@ -1594,10 +1593,28 @@ async def comando(interaction: discord.Interaction):
 
     try:
         user_level = await get_access_level(interaction)
+        # Lista real de slash commands registrados (evita "comandos fantasma")
+        try:
+            real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
+        except Exception:
+            real_cmds = set()
+
         lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+                missing = []
         for lvl, cmd, desc in COMMANDS_CATALOG:
-            if level_allows(user_level, lvl):
-                lines.append(f"• **{cmd}** — {desc}")
+            if not level_allows(user_level, lvl):
+                continue
+            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
+            if real_cmds and cmd not in real_cmds:
+                missing.append((cmd, desc))
+                continue
+            lines.append(f"• **{cmd}** — {desc}")
+
+        if missing:
+            lines.append("
+🚧 **Em desenvolvimento (ainda não ativo no bot)**")
+            for cmd, desc in missing:
+                lines.append(f"• {cmd} — {desc}")
 
         await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
     except Exception:
