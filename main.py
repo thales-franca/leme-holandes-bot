@@ -1591,24 +1591,27 @@ async def comando(interaction: discord.Interaction):
     except Exception:
         pass
 
+   try:
+    user_level = await get_access_level(interaction)
+    # Lista real de slash commands registrados (evita "comandos fantasma")
     try:
-        user_level = await get_access_level(interaction)
-        # Lista real de slash commands registrados (evita "comandos fantasma")
-        try:
-            real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
-        except Exception:
-            real_cmds = set()
+        real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
+    except Exception:
+        real_cmds = set()
 
-        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
-                missing = []
-        for lvl, cmd, desc in COMMANDS_CATALOG:
-            if not level_allows(user_level, lvl):
-                continue
-            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
-            if real_cmds and cmd not in real_cmds:
-                missing.append((cmd, desc))
-                continue
-            lines.append(f"• **{cmd}** — {desc}")
+    lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+    missing = []
+
+    for lvl, cmd, desc in COMMANDS_CATALOG:
+        if not level_allows(user_level, lvl):
+            continue
+
+        # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
+        if real_cmds and cmd not in real_cmds:
+            missing.append((cmd, desc))
+            continue
+
+        lines.append(f"• **{cmd}** — {desc}")
 
         if missing:
             lines.append("
