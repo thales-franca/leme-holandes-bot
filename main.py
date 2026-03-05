@@ -1584,6 +1584,10 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
     order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
     return order.get(user_level, 1) >= order.get(cmd_level, 1)
 
+def level_allows(user_level: str, cmd_level: str) -> bool:
+    order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
+    return order.get(user_level, 1) >= order.get(cmd_level, 1)
+
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
     try:
@@ -1591,25 +1595,38 @@ async def comando(interaction: discord.Interaction):
     except Exception:
         pass
 
-   try:
-    user_level = await get_access_level(interaction)
-    # Lista real de slash commands registrados (evita "comandos fantasma")
     try:
-        real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
-    except Exception:
-        real_cmds = set()
+        user_level = await get_access_level(interaction)
 
-    lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
-    missing = []
+        # Lista real de slash commands registrados (evita "comandos fantasma")
+        try:
+            real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
+        except Exception:
+            real_cmds = set()
 
-    for lvl, cmd, desc in COMMANDS_CATALOG:
-        if not level_allows(user_level, lvl):
-            continue
+        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+        missing = []
 
-        # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
-        if real_cmds and cmd not in real_cmds:
-            missing.append((cmd, desc))
-            continue
+        for lvl, cmd, desc in COMMANDS_CATALOG:
+            if not level_allows(user_level, lvl):
+                continue
+
+            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
+            if real_cmds and cmd not in real_cmds:
+                missing.append((cmd, desc))
+                continue
+
+            lines.append(f"• **{cmd}** — {desc}")
+
+        if missing:
+            lines.append("\n🚧 **Em desenvolvimento**")
+            for cmd, desc in missing:
+                lines.append(f"• {cmd} — {desc}")
+
+        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
 
         lines.append(f"• **{cmd}** — {desc}")
 
