@@ -2459,7 +2459,51 @@ async def prazo(interaction: discord.Interaction, cycle: int):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /prazo: {e}", ephemeral=False)
 
+# =========================================================
+# /prazo (público)
+# =========================================================
+@client.tree.command(name="prazo", description="Mostra o prazo oficial do ciclo.")
+@app_commands.describe(cycle="Número do ciclo")
+async def prazo(interaction: discord.Interaction, cycle: int):
+    await interaction.response.defer(ephemeral=False)
 
+    try:
+        sh = open_sheet()
+        season_id = require_current_season(sh)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
+
+        # RETORNO CORRETO:
+        # (start_at_br_str, deadline_at_br_str, max_pod_size, days)
+        start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(
+            season_id, cycle, ws_pods, ws_cycles
+        )
+
+        if not start_br or not end_br:
+            return await interaction.followup.send(
+                "⚠️ Não consegui determinar o prazo deste ciclo ainda.\n"
+                "Isso costuma acontecer quando o ciclo não tem PodsHistory ou quando o ciclo ainda não foi travado.",
+                ephemeral=False
+            )
+
+        # (Opcional) Regrava no Cycles se estiver vazio (consistência)
+        cf = get_cycle_fields(ws_cycles, season_id, cycle)
+        if (not (cf.get("start_at_br") or "").strip()) or (not (cf.get("deadline_at_br") or "").strip()):
+            set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
+            cache_invalidate(ws_cycles)
+
+        msg = (
+            f"⏳ **Prazo do Ciclo {cycle}** (Season {season_id})\n"
+            f"- Início: **{start_br} (BR)**\n"
+            f"- Fim: **{end_br} (BR)**\n"
+            f"- Regra aplicada: **{days} dias** (maior pod = **{max_pod}** jogador(es))\n"
+            f"- Lembrete: resultados até **13:59 (BR)** do último dia."
+        )
+        await interaction.followup.send(msg, ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /prazo: {e}", ephemeral=False)
 # =========================================================
 # /deadline (ADM)
 # =========================================================
