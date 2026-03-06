@@ -396,6 +396,7 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 # [BLOCO 1/8 termina aqui]
 # =========================================================
 
+
 # [BLOCO 2/8] — SCHEMA (ABAS) + SEASON STATE + FUNÇÕES DE SEASON/CICLO (REVISADO v2)
 # AJUSTES FEITOS NESTA REVISÃO:
 # - Reintroduz ABA "Decks" (DECKS_HEADER/DECKS_REQUIRED) pois BLOCO 6 usa.
@@ -778,18 +779,12 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # [BLOCO 2/8 termina aqui]
 # =========================================================
 
-# No BLOCO 3/8 eu trago:
-# - Match helpers (IDs, auto-confirm, anti-repetição)
-# - Prazo do ciclo (dias por maior POD) e compute start/deadline
-# - Autocomplete functions (DEVEM ficar acima dos decorators que usam)
-# =========================================================
 
 # No BLOCO 3/8 eu trago:
 # - Match helpers (IDs, auto-confirm, anti-repetição)
 # - Prazo do ciclo (dias por maior POD) e compute start/deadline
 # - Autocomplete functions (DEVEM ficar acima dos decorators que usam)
 # =========================================================
-
 
 # =========================================================
 # [BLOCO 3/8] — MATCH HELPERS + ANTI-REPETIÇÃO + PRAZO DO CICLO + AUTOCOMPLETE
@@ -969,10 +964,10 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
                 created_candidates.append(c)
 
         base_date = (min(created_candidates).astimezone(BR_TZ).date() if created_candidates else now_br_dt().date())
-        start_dt = datetime.combine(base_date, time(14, 0), tzinfo=BR_TZ)
+        start_dt = datetime.combine(base_date, dtime(14, 0), tzinfo=BR_TZ)
 
     deadline_date = (start_dt.date() + timedelta(days=days))
-    deadline_dt = datetime.combine(deadline_date, time(13, 59), tzinfo=BR_TZ)
+    deadline_dt = datetime.combine(deadline_date, dtime(13, 59), tzinfo=BR_TZ)
 
     return (fmt_br_dt(start_dt), fmt_br_dt(deadline_dt), max_pod_size, days)
 
@@ -1120,6 +1115,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # [BLOCO 3/8 termina aqui]
 # =========================================================
 
+
 # =========================================================
 # [BLOCO 4/8] — RECÁLCULO OFICIAL (MWP/OMW/GWP/OGW) + STANDINGS (ZERADO)
 # =========================================================
@@ -1173,7 +1169,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         ensure(pid)
 
     # Filtra matches válidos (season+cycle)
-    col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
     matches_rows = ws_matches.get_all_records()
 
     valid = []
@@ -1293,16 +1289,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         r["rank_position"] = i
         r["last_recalc_at"] = ts
 
-    # Grava no Standings:
-    # - Não limpar planilha inteira (pois pode ter outras seasons/ciclos)
-    # - Estratégia: reescrever TUDO filtrando: remove linhas da season+cycle e reinsere
-    # Obs: gspread não tem "delete by filter" eficiente em massa sem API avançada,
-    # então aqui usamos a estratégia robusta:
-    #   1) lê tudo
-    #   2) mantém header
-    #   3) filtra fora season_id+cycle
-    #   4) escreve novamente (clear + append)
-    # É mais pesado, mas BLINDADO e simples.
     header = [
         "season_id","cycle","player_id","matches_played","match_points","mwp_percent",
         "game_wins","game_losses","game_draws","games_played","gw_percent",
@@ -1312,14 +1298,11 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     existing = ws_standings.get_all_values()
     kept = []
     if existing and len(existing) > 1:
-        # detecta header atual; se diferente, força header padrão
         existing_header = existing[0]
         if existing_header != header:
-            # se header não bate, descartamos e reescrevemos
             kept = []
         else:
             for r in existing[1:]:
-                # garante tamanho mínimo
                 while len(r) < len(header):
                     r.append("")
                 r_season = safe_int(r[0], 0)
@@ -1328,7 +1311,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
                     continue
                 kept.append(r)
 
-    # Agora reescreve tudo
     ws_standings.clear()
     ws_standings.append_row(header)
 
@@ -1353,6 +1335,8 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # =========================================================
 # [BLOCO 4/8 termina aqui]
 # =========================================================
+
+
 # =========================================================
 # [BLOCO 5/8] — DISCORD CORE + /COMANDO + ONBOARDING (HANDSHAKE)
 # (ROBUSTO: somente no servidor + Views persistentes + modal nome/sobrenome)
@@ -1812,6 +1796,7 @@ async def onboarding(interaction: discord.Interaction):
 # [BLOCO 5/8 termina aqui]
 # =========================================================
 
+
 # =========================================================
 # [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (REVISADO)
 # REGRAS IMPLEMENTADAS:
@@ -1863,7 +1848,7 @@ def player_active_in_cycle(ws_enr, season_id: int, cycle: int, player_id: str) -
 
 # =========================================================
 # Helper: garante linha na aba Decks (1 vez por ciclo por jogador)
-# (BUG FIX: esta função era usada no bloco e NÃO existia)
+# (mantido aqui como estava no seu BLOCO 6; funciona mesmo havendo versão no BLOCO 2)
 # =========================================================
 def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
     """
@@ -1987,7 +1972,7 @@ async def drop(interaction: discord.Interaction, cycle: int):
         # começa na linha 2 (índice 1) por causa do header
         for idx in range(1, len(rows)):
             r = rows[idx]
-            # proteção para linhas curtas
+
             def getc(name: str) -> str:
                 ci = col[name]
                 return r[ci] if ci < len(r) else ""
@@ -2108,6 +2093,8 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
 # =========================================================
 # [BLOCO 6/8] — Termina aqui
 # =========================================================
+
+
 # =========================================================
 # [BLOCO 7/8] — RESULTADOS (REPORT / REJEITAR)
 # =========================================================
@@ -2139,7 +2126,7 @@ def parse_vde(score: str):
 
         return v, d, e
 
-    except:
+    except Exception:
         return None
 
 
@@ -2169,10 +2156,9 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
     v, d, e = parsed
 
     try:
-
         sh = open_sheet()
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
-        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED)
+        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)  # <<< CORRIGIDO
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
@@ -2302,11 +2288,10 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
     await interaction.response.defer(ephemeral=True)
 
     try:
-
         sh = open_sheet()
 
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
-        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED)
+        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)  # <<< CORRIGIDO
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
@@ -2387,6 +2372,8 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
 # =========================================================
 # [BLOCO 7/8 termina aqui]
 # =========================================================
+
+
 # =========================================================
 # [BLOCO 8/8] — ADMIN FINAL + PRAZO + RANKINGS + EXPORT + START
 # (REVISADO v3 — CONSOLIDADO E ALINHADO AOS BLOCOS 2,6,7)
@@ -2416,51 +2403,7 @@ def require_current_season(sh) -> int:
 
 
 # =========================================================
-# /prazo (público)
-# =========================================================
-@client.tree.command(name="prazo", description="Mostra o prazo oficial do ciclo.")
-@app_commands.describe(cycle="Número do ciclo")
-async def prazo(interaction: discord.Interaction, cycle: int):
-    await interaction.response.defer(ephemeral=False)
-
-    try:
-        sh = open_sheet()
-        season_id = require_current_season(sh)
-
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
-
-        start_br, end_br, days, max_pod = compute_cycle_start_deadline_br(
-            season_id, cycle, ws_pods, ws_cycles
-        )
-
-        if not start_br or not end_br:
-            return await interaction.followup.send(
-                "⚠️ Não consegui determinar o prazo deste ciclo ainda.\n"
-                "Isso costuma acontecer quando o ciclo não tem PodsHistory ou quando o ciclo ainda não foi travado.",
-                ephemeral=False
-            )
-
-        # (Opcional) Regrava no Cycles se estiver vazio (consistência)
-        cf = get_cycle_fields(ws_cycles, season_id, cycle)
-        if (not (cf.get("start_at_br") or "").strip()) or (not (cf.get("deadline_at_br") or "").strip()):
-            set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
-            cache_invalidate(ws_cycles)
-
-        msg = (
-            f"⏳ **Prazo do Ciclo {cycle}** (Season {season_id})\n"
-            f"- Início: **{start_br} (BR)**\n"
-            f"- Fim: **{end_br} (BR)**\n"
-            f"- Regra aplicada: **{days} dias** (maior pod = **{max_pod}** jogador(es))\n"
-            f"- Lembrete: resultados até **13:59 (BR)** do último dia."
-        )
-        await interaction.followup.send(msg, ephemeral=False)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /prazo: {e}", ephemeral=False)
-
-# =========================================================
-# /prazo (público)
+# /prazo (público) — (MANTIDA APENAS 1 VEZ)
 # =========================================================
 @client.tree.command(name="prazo", description="Mostra o prazo oficial do ciclo.")
 @app_commands.describe(cycle="Número do ciclo")
@@ -2504,6 +2447,8 @@ async def prazo(interaction: discord.Interaction, cycle: int):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /prazo: {e}", ephemeral=False)
+
+
 # =========================================================
 # /deadline (ADM)
 # =========================================================
@@ -2739,7 +2684,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             if m <= 0:
                 mwp[pid] = 1/3
             else:
-                # matches: pts/3m, mas draw conta 1
                 mwp_raw = s["pts"] / (3 * m)
                 mwp[pid] = floor_333(mwp_raw)
 
@@ -2747,7 +2691,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             if games <= 0:
                 gwp[pid] = 1/3
             else:
-                # draw game conta 0.5
                 gwp_raw = (s["gw"] + 0.5 * s["gd"]) / games
                 gwp[pid] = floor_333(gwp_raw)
 
@@ -2759,8 +2702,8 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 omw[pid] = 1/3
                 ogw[pid] = 1/3
             else:
-                omw[pid] = sum(mwp[o] for o in opps) / len(opps)
-                ogw[pid] = sum(gwp[o] for o in opps) / len(opps)
+                omw[pid] = sum(mwp.get(o, 1/3) for o in opps) / len(opps)
+                ogw[pid] = sum(gwp.get(o, 1/3) for o in opps) / len(opps)
 
         table = []
         for pid, s in stats.items():
@@ -2793,11 +2736,10 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=False)
 
+
 # =========================================================
 # OWNER — START/CLOSE SEASON + CADASTRAR PLAYER + START_CYCLE
-# (Cole antes do START)
 # =========================================================
-
 def _next_season_id(sh) -> int:
     ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
     rows = ws.get_all_records()
@@ -2822,7 +2764,6 @@ async def startseason(interaction: discord.Interaction, nome: str = ""):
         new_id = _next_season_id(sh)
         season_name = (nome or f"Temporada {new_id}").strip()
 
-        # fecha outras e abre a nova
         set_season_status(sh, new_id, "open", name=season_name)
         close_all_other_seasons(sh, keep_open_id=new_id)
         set_current_season_id(sh, new_id)
@@ -2895,7 +2836,6 @@ async def cadastrar_player(
 
         msg_parts = [f"✅ Player cadastrado/atualizado: **{raw}** ({membro.id})"]
 
-        # Opcional: deck/decklist para um ciclo
         if ciclo and (deck.strip() or decklist.strip()):
             ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
             cf = get_cycle_fields(ws_cycles, season_id, int(ciclo))
@@ -2932,14 +2872,9 @@ async def cadastrar_player(
 
 
 # =========================================================
-# /start_cycle (ADM/Organizador) — Gera Pods + Matches e trava o ciclo
-# - cria PodsHistory e Matches
-# - seta cycle status=locked
-# - grava start/deadline no Cycles
+# /start_cycle (ADM/Organizador)
 # =========================================================
 def _choose_pod_size(n: int) -> int:
-    # Heurística simples e segura:
-    # tenta 4, depois 3, depois 5, senão 6
     for s in (4, 3, 5, 6):
         if n % s == 0:
             return s
@@ -2947,7 +2882,7 @@ def _choose_pod_size(n: int) -> int:
         return 3
     if n == 5:
         return 5
-    return 4  # fallback
+    return 4
 
 
 @client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
@@ -2981,7 +2916,6 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         if st != "open":
             return await interaction.followup.send(f"❌ O ciclo {cycle} não está OPEN (status: {st}).", ephemeral=True)
 
-        # coleta inscritos ativos
         enr_rows = cached_get_all_records(ws_enr, ttl_seconds=5)
         players = []
         for r in enr_rows:
@@ -2999,17 +2933,14 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         if len(players) < 3:
             return await interaction.followup.send("❌ Precisa de pelo menos 3 jogadores ativos para gerar pods.", ephemeral=True)
 
-        # tamanho do pod
         if pod_size and pod_size not in (3, 4, 5, 6):
             return await interaction.followup.send("❌ pod_size inválido (use 3,4,5,6 ou 0).", ephemeral=True)
 
         ps = pod_size if pod_size else _choose_pod_size(len(players))
 
-        # anti-repetição baseado em histórico confirmado
         past_pairs = get_past_confirmed_pairs(ws_matches)
         pods, score = best_shuffle_min_repeats(players, ps, past_pairs, tries=max(50, min(tries, 500)))
 
-        # grava PodsHistory
         nowb = now_br_str()
         pod_labels = []
         pod_num = 1
@@ -3028,21 +2959,22 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         for label, pod in pod_labels:
             for a, b in round_robin_pairs(pod):
                 mid = new_match_id(season_id, cycle, label)
+
+                # <<< CORRIGIDO: lista alinhada EXATAMENTE ao MATCHES_HEADER (18 colunas)
                 ws_matches.append_row([
                     mid, str(season_id), str(cycle), str(label),
                     str(a), str(b),
                     "0", "0", "0",
                     "normal", "open",
-                    "", "", "", "",
-                    "TRUE",
+                    "", "", "",             # reported_by_id, confirmed_by_id, message_id
+                    "TRUE",                 # active
                     now_iso_utc(), now_iso_utc(),
-                    auto_confirm_deadline_iso(nowu)  # placeholder; será setado quando reportar
+                    auto_confirm_deadline_iso(nowu)  # placeholder; será atualizado quando reportar
                 ], value_input_option="USER_ENTERED")
                 created += 1
 
         cache_invalidate(ws_matches)
 
-        # trava ciclo + grava prazo
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
         cache_invalidate(ws_cycles)
 
@@ -3066,11 +2998,12 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         await interaction.followup.send(f"❌ Erro no /start_cycle: {e}", ephemeral=True)
 
 
-# (Opcional) Alias para bater com seu catálogo antigo
 @client.tree.command(name="pods_gerar", description="(ADM) Alias de /start_cycle.")
 @app_commands.describe(cycle="Número do ciclo", pod_size="Opcional: tamanho do pod (3..6). 0 = automático", tries="Tentativas anti-repetição (50..500)")
 async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
     return await start_cycle(interaction, cycle, pod_size, tries)
+
+
 # =========================================================
 # START
 # =========================================================
