@@ -1383,6 +1383,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # =========================================================
 
 import asyncio
+from discord.ext import tasks
 
 # =========================
 # Discord Bot (Client)
@@ -1390,13 +1391,16 @@ import asyncio
 class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True
+        intents.members = True  # necessário para fetch_member / on_member_join
+
+        # MESSAGE CONTENT INTENT já estava ativado no portal (histórico do projeto).
         intents.message_content = True
 
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # Views persistentes (funcionam após restart quando o bot volta online)
         try:
             self.add_view(OnboardingStartView())
             self.add_view(OnboardingConfirmIdView())
@@ -1404,6 +1408,14 @@ class LemeBot(discord.Client):
         except Exception:
             pass
 
+        # inicia limpeza automática do canal de boas-vindas
+        try:
+            if not cleanup_welcome_channel.is_running():
+                cleanup_welcome_channel.start()
+        except Exception:
+            pass
+
+        # Sync commands (guild-scoped quando possível)
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1444,6 +1456,86 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
 
 
 # =========================================================
+# Limpeza automática do canal de boas-vindas
+# - apaga TODAS as mensagens do canal a cada 10 minutos
+# - inclui mensagens do bot, owner e qualquer interação
+# - usa purge/bulk delete para mensagens recentes
+# - mensagens com mais de 14 dias são apagadas individualmente
+# =========================================================
+@tasks.loop(minutes=10)
+async def cleanup_welcome_channel():
+    try:
+        await client.wait_until_ready()
+
+        if not WELCOME_CHANNEL_ID:
+            return
+
+        channel = client.get_channel(WELCOME_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(WELCOME_CHANNEL_ID)
+            except Exception:
+                channel = None
+
+        if channel is None:
+            return
+
+        # coleta mensagens
+        msgs = []
+        async for m in channel.history(limit=500):
+            msgs.append(m)
+
+        if not msgs:
+            return
+
+        nowu = utc_now_dt()
+        recent = []
+        old = []
+
+        for m in msgs:
+            try:
+                age = nowu - m.created_at
+                if age <= timedelta(days=14):
+                    recent.append(m)
+                else:
+                    old.append(m)
+            except Exception:
+                old.append(m)
+
+        # apaga recentes em lote
+        try:
+            if recent:
+                await channel.delete_messages(recent)
+        except Exception:
+            # fallback: apaga uma a uma
+            for m in recent:
+                try:
+                    await m.delete()
+                    await asyncio.sleep(0.35)
+                except Exception:
+                    pass
+
+        # apaga antigas uma a uma
+        for m in old:
+            try:
+                await m.delete()
+                await asyncio.sleep(0.35)
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+
+@cleanup_welcome_channel.before_loop
+async def before_cleanup_welcome_channel():
+    try:
+        await client.wait_until_ready()
+    except Exception:
+        pass
+
+
+# =========================================================
 # Helper: split de mensagens (limite Discord 2000 chars)
 # =========================================================
 def split_text_lines(text: str, limit: int = 1900) -> list[str]:
@@ -1463,6 +1555,7 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
     if buf.strip():
         chunks.append(buf.rstrip("\n"))
 
+    # fallback: quebra dura se ainda exceder
     safe_chunks: list[str] = []
     for c in chunks:
         if len(c) <= limit:
@@ -1475,6 +1568,10 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True):
+    """
+    Regra do projeto: quando resposta for grande, enviar em múltiplas mensagens
+    para não estourar o limite do Discord.
+    """
     chunks = split_text_lines(text, limit=1900)
     if not chunks:
         return
@@ -1504,7 +1601,7 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
         return
 
     col = ensure_sheet_columns(ws_players, PLAYERS_HEADER)
-    rows = cached_get_all_values(ws_players, ttl_seconds=10)
+    rows = cached_get_all_values(ws_players, ttl_seconds=10)  # usa cache para reduzir 429
 
     did_col = col.get("discord_id", 0)
     found_row = None
@@ -1521,11 +1618,9 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
         try:
             if "nick" in col:
                 ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
-            if "name" in col and not (rows[found_row - 1][col["name"]] if col["name"] < len(rows[found_row - 1]) else "").strip():
-                ws_players.update([[nick]], range_name=f"{col_letter(col['name'])}{found_row}")
             if "updated_at" in col:
                 ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-            cache_invalidate(ws_players)
+            cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
         except Exception:
             pass
         return
@@ -1535,8 +1630,6 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
         row[col["discord_id"]] = did
     if "nick" in col:
         row[col["nick"]] = nick
-    if "name" in col:
-        row[col["name"]] = nick
     if "status" in col:
         row[col["status"]] = "active"
     if "created_at" in col:
@@ -1546,15 +1639,18 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 
     try:
         ws_players.append_row(row, value_input_option="USER_ENTERED")
-        cache_invalidate(ws_players)
+        cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
     except Exception:
         pass
 
 
 # =========================================================
-# /comando (catálogo)
+# /comando (catálogo) — CORRIGIDO (sem SyntaxError)
 # =========================================================
+# OBS: aqui é catálogo (listagem). A implementação real dos comandos fica nos BLOCOS 6/7/8.
+# A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
 COMMANDS_CATALOG = [
+    # Jogador
     ("jogador", "/cadastro", "Concluir cadastro (Nome e Sobrenome)."),
     ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
     ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
@@ -1570,6 +1666,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
 
+    # Administrativo (ADM/Organizador)
     ("adm", "/forcesync", "Sincroniza comandos no servidor."),
     ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
     ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
@@ -1605,6 +1702,7 @@ async def comando(interaction: discord.Interaction):
     try:
         user_level = await get_access_level(interaction)
 
+        # Lista real de slash commands registrados (evita "comandos fantasma")
         try:
             real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
         except Exception:
@@ -1617,6 +1715,7 @@ async def comando(interaction: discord.Interaction):
             if not level_allows(user_level, lvl):
                 continue
 
+            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
             if real_cmds and cmd not in real_cmds:
                 missing.append((cmd, desc))
                 continue
@@ -1661,6 +1760,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.nome.value or "").strip()
 
+        # Regra: mínimo 2 palavras
         if len(raw.split()) < 2:
             try:
                 await interaction.response.send_message(
@@ -1671,41 +1771,12 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 pass
             return
 
+        # Salva no Sheets (Players)
         try:
             sh = open_sheet()
             ensure_all_sheets(sh)
             ws_players = sh.worksheet("Players")
-            col = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-            rows = cached_get_all_values(ws_players, ttl_seconds=10)
-
-            did = str(interaction.user.id)
-            found_row = None
-            for i in range(2, len(rows) + 1):
-                r = rows[i - 1]
-                val = r[col["discord_id"]] if col["discord_id"] < len(r) else ""
-                if str(val).strip() == did:
-                    found_row = i
-                    break
-
-            nowc = now_br_str()
-
-            if found_row:
-                ws_players.update([[interaction.user.display_name]], range_name=f"{col_letter(col['nick'])}{found_row}")
-                ws_players.update([[raw]], range_name=f"{col_letter(col['name'])}{found_row}")
-                ws_players.update([["active"]], range_name=f"{col_letter(col['status'])}{found_row}")
-                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-            else:
-                row = [""] * len(PLAYERS_HEADER)
-                row[col["discord_id"]] = did
-                row[col["nick"]] = interaction.user.display_name
-                row[col["name"]] = raw
-                row[col["status"]] = "active"
-                row[col["created_at"]] = nowc
-                row[col["updated_at"]] = nowc
-                ws_players.append_row(row, value_input_option="USER_ENTERED")
-
-            cache_invalidate(ws_players)
-
+            upsert_player(ws_players, str(interaction.user.id), raw)
         except Exception:
             try:
                 await interaction.response.send_message(
@@ -1766,6 +1837,7 @@ class OnboardingChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # aplica cargo Jogador (se existir)
         try:
             guild = interaction.guild
             if guild:
@@ -1806,6 +1878,7 @@ async def post_onboarding_message(channel: discord.abc.Messageable, member_menti
 
 @client.event
 async def on_member_join(member: discord.Member):
+    # Ao entrar, postar onboarding no canal configurado (ou ignora se não tiver)
     try:
         guild = member.guild
         ch = None
@@ -1845,20 +1918,6 @@ async def onboarding(interaction: discord.Interaction):
         await post_onboarding_message(interaction.channel, member_mention=None)
     except Exception:
         pass
-
-
-# =========================================================
-# /cadastro
-# =========================================================
-@client.tree.command(name="cadastro", description="Concluir cadastro com Nome e Sobrenome.")
-async def cadastro(interaction: discord.Interaction):
-    try:
-        await interaction.response.send_modal(NicknameModal())
-    except Exception as e:
-        try:
-            await interaction.response.send_message(f"❌ Não consegui abrir o cadastro: {e}", ephemeral=True)
-        except Exception:
-            pass
 
 
 # =========================================================
