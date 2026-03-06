@@ -3418,20 +3418,107 @@ async def cadastrar_player(
 
 # =========================================================
 # /start_cycle
+# - mínimo 4 e máximo 6 por pod
+# - exceção apenas quando matematicamente impossível
+# - mantém somente este comando (sem alias /pods_gerar)
 # =========================================================
-def _choose_pod_size(n: int) -> int:
-    for s in (4, 3, 5, 6):
-        if n % s == 0:
-            return s
-    if n <= 3:
-        return 3
-    if n == 5:
-        return 5
-    return 4
+def _find_valid_pod_layouts(total_players: int) -> list[list[int]]:
+    """
+    Retorna combinações exatas usando somente pods 4..6.
+    Ex:
+    14 -> [5,5,4] e [6,4,4]
+    """
+    results: list[list[int]] = []
+
+    def dfs(remaining: int, current: list[int]):
+        if remaining == 0:
+            results.append(sorted(current, reverse=True))
+            return
+        for s in (4, 5, 6):
+            if remaining - s < 0:
+                continue
+            dfs(remaining - s, current + [s])
+
+    dfs(total_players, [])
+
+    uniq = []
+    seen = set()
+    for layout in results:
+        key = tuple(layout)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(layout)
+    return uniq
+
+def _choose_pod_layout(total_players: int, preferred_size: int = 0) -> list[int]:
+    """
+    Regra:
+    - Preferir layouts exatos com pods entre 4 e 6.
+    - Se for matematicamente impossível, abrir exceção.
+    Casos impossíveis clássicos:
+    - 3 jogadores -> [3]
+    - 7 jogadores -> [4,3]
+    """
+    candidates = _find_valid_pod_layouts(total_players)
+
+    if candidates:
+        pref = preferred_size if preferred_size in (4, 5, 6) else 0
+
+        def score(layout: list[int]):
+            spread = max(layout) - min(layout)
+            pref_count = sum(1 for x in layout if x == pref) if pref else 0
+            return (
+                spread,          # mais balanceado primeiro
+                -pref_count,     # se houver preferência, tenta respeitar
+                len(layout),     # menos pods, se possível
+                -max(layout),    # desempate
+            )
+
+        candidates.sort(key=score)
+        return candidates[0]
+
+    # exceções somente quando impossível
+    if total_players == 3:
+        return [3]
+    if total_players == 7:
+        return [4, 3]
+
+    # fallback extremo de segurança
+    return [total_players]
+
+def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[str]]:
+    pods = []
+    idx = 0
+    for size in layout:
+        pods.append(players[idx:idx + size])
+        idx += size
+    return pods
+
+def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
+    best = None
+    best_score = None
+
+    for _ in range(max(1, tries)):
+        cand = players[:]
+        random.shuffle(cand)
+        pods = _build_pods_from_layout(cand, layout)
+        s = score_pods_repeats(pods, past_pairs)
+
+        if best is None or s < best_score:
+            best = pods
+            best_score = s
+            if best_score == 0:
+                break
+
+    return best, best_score
 
 
 @client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
-@app_commands.describe(cycle="Número do ciclo", pod_size="Opcional: tamanho do pod (3..6). 0 = automático", tries="Tentativas anti-repetição (50..500)")
+@app_commands.describe(
+    cycle="Número do ciclo",
+    pod_size="Opcional: preferência de tamanho (4..6). 0 = automático",
+    tries="Tentativas anti-repetição (50..500)"
+)
 async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
     if not await is_admin_or_organizer(interaction):
         return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
@@ -3484,13 +3571,17 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         if len(players) < 3:
             return await interaction.followup.send("❌ Precisa de pelo menos 3 jogadores ativos para gerar pods.", ephemeral=True)
 
-        if pod_size and pod_size not in (3, 4, 5, 6):
-            return await interaction.followup.send("❌ pod_size inválido (use 3,4,5,6 ou 0).", ephemeral=True)
+        if pod_size and pod_size not in (4, 5, 6):
+            return await interaction.followup.send("❌ pod_size inválido (use 4, 5, 6 ou 0).", ephemeral=True)
 
-        ps = pod_size if pod_size else _choose_pod_size(len(players))
-
+        layout = _choose_pod_layout(len(players), preferred_size=pod_size)
         past_pairs = get_past_confirmed_pairs(ws_matches)
-        pods, score = best_shuffle_min_repeats(players, ps, past_pairs, tries=max(50, min(tries, 500)))
+        pods, score = _best_layout_shuffle_min_repeats(
+            players,
+            layout,
+            past_pairs,
+            tries=max(50, min(tries, 500))
+        )
 
         nowb = now_br_str()
         pod_labels = []
@@ -3531,25 +3622,21 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
             set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
             cache_invalidate(ws_cycles)
 
+        layout_txt = " + ".join(str(x) for x in layout)
+
         await interaction.followup.send(
             "✅ Ciclo travado e pods gerados.\n"
             f"- Jogadores: **{len(players)}**\n"
-            f"- Pod size: **{ps}**\n"
+            f"- Layout dos pods: **{layout_txt}**\n"
             f"- Penalidade anti-repetição: **{score}**\n"
             f"- Matches criados: **{created}**\n"
             f"- Prazo: **{start_br}** → **{end_br}** (BR)",
             ephemeral=True
         )
-        await log_admin(interaction, f"start_cycle S{season_id} C{cycle} pods={len(pod_labels)} matches={created} score={score}")
+        await log_admin(interaction, f"start_cycle S{season_id} C{cycle} layout={layout_txt} matches={created} score={score}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /start_cycle: {e}", ephemeral=True)
-
-
-@client.tree.command(name="pods_gerar", description="(ADM) Alias de /start_cycle.")
-@app_commands.describe(cycle="Número do ciclo", pod_size="Opcional: tamanho do pod (3..6). 0 = automático", tries="Tentativas anti-repetição (50..500)")
-async def pods_gerar(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
-    return await start_cycle(interaction, cycle, pod_size, tries)
 
 
 # =========================================================
@@ -3653,7 +3740,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
         changed = 0
 
-        # Enrollments
         col_enr = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
         vals_enr = cached_get_all_values(ws_enr, ttl_seconds=5)
         for rown in range(2, len(vals_enr) + 1):
@@ -3666,7 +3752,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
                 ws_enr.update([[now_br_str()]], range_name=f"{col_letter(col_enr['updated_at'])}{rown}")
                 changed += 1
 
-        # PodsHistory
         col_pods = ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
         vals_pods = cached_get_all_values(ws_pods, ttl_seconds=5)
         for rown in range(2, len(vals_pods) + 1):
@@ -3678,7 +3763,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
                 ws_pods.update([[new_id]], range_name=f"{col_letter(col_pods['player_id'])}{rown}")
                 changed += 1
 
-        # Matches
         col_m = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         vals_m = cached_get_all_values(ws_matches, ttl_seconds=5)
         for rown in range(2, len(vals_m) + 1):
@@ -3698,7 +3782,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
                 ws_matches.update([[new_id]], range_name=f"{col_letter(col_m['player_b_id'])}{rown}")
                 changed += 1
 
-        # Decks
         col_d = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
         vals_d = cached_get_all_values(ws_decks, ttl_seconds=5)
         for rown in range(2, len(vals_d) + 1):
