@@ -786,6 +786,12 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # - Autocomplete functions (DEVEM ficar acima dos decorators que usam)
 # =========================================================
 
+# No BLOCO 3/8 eu trago:
+# - Match helpers (IDs, auto-confirm, anti-repetição)
+# - Prazo do ciclo (dias por maior POD) e compute start/deadline
+# - Autocomplete functions (DEVEM ficar acima dos decorators que usam)
+# =========================================================
+
 # =========================================================
 # [BLOCO 3/8] — MATCH HELPERS + ANTI-REPETIÇÃO + PRAZO DO CICLO + AUTOCOMPLETE
 # =========================================================
@@ -977,9 +983,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =========================
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
-    Lista SOMENTE ciclos existentes na aba Cycles (season ativa),
-    com label mostrando status: aberto/fechado/encerrado.
-    NÃO sugere ciclo max+1.
+    Lista ciclos existentes na aba Cycles (season ativa),
+    com label mostrando status.
     """
     try:
         sh = open_sheet()
@@ -991,7 +996,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         q = str(current or "").strip()
-        items = list_cycles(ws_cycles, season_id)  # [(cycle, status)] somente existentes
+        items = list_cycles(ws_cycles, season_id)
         if not items:
             return []
 
@@ -1002,7 +1007,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
             if st in ("locked", "closed"):
                 return "fechado"
             if st == "completed":
-                return "encerrado"
+                return "concluído"
             return st or "indefinido"
 
         out: list[app_commands.Choice[str]] = []
@@ -1012,6 +1017,42 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
                 continue
             lab = f"Ciclo {c} / {label_status(st)}"
             out.append(app_commands.Choice(name=lab, value=c_str))
+
+        return out[:25]
+    except Exception:
+        return []
+
+
+async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
+    """
+    Lista SOMENTE ciclos com status OPEN.
+    Uso principal: /inscrever
+    """
+    try:
+        sh = open_sheet()
+        season_id = get_current_season_id(sh)
+        if season_id <= 0:
+            return []
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        q = str(current or "").strip()
+        items = list_cycles(ws_cycles, season_id)
+        if not items:
+            return []
+
+        out: list[app_commands.Choice[str]] = []
+        for c, st in items:
+            st_norm = str(st or "").strip().lower()
+            if st_norm != "open":
+                continue
+
+            c_str = str(c)
+            if q and q not in c_str:
+                continue
+
+            out.append(app_commands.Choice(name=f"Ciclo {c} / aberto", value=c_str))
 
         return out[:25]
     except Exception:
@@ -1090,7 +1131,6 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
     try:
         q = str(current or "").strip().replace(" ", "")
 
-        # Padrões comuns (best-of-3) + ID
         options = [
             "2-0-0",
             "2-1-0",
@@ -1098,7 +1138,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
             "1-0-1",
             "1-1-0",
             "1-1-1",
-            "0-0-3",  # ID (empate intencional / não reportado no final)
+            "0-0-3",
         ]
 
         out = []
@@ -1877,7 +1917,7 @@ def player_active_in_cycle(ws_enr, season_id: int, cycle: int, player_id: str) -
 
 # =========================================================
 # Helper: garante linha na aba Decks (1 vez por ciclo por jogador)
-# (mantido aqui como estava no seu BLOCO 6; funciona mesmo havendo versão no BLOCO 2)
+# (BUG FIX: esta função era usada no bloco e NÃO existia)
 # =========================================================
 def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
     """
@@ -1886,13 +1926,11 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
     """
     pid = str(player_id).strip()
 
-    # tenta achar existente
     existing = get_deck_row(ws_decks, season_id, cycle, pid)
     if existing is not None:
         return existing
 
     nowb = now_br_str()
-    # garante header/colunas
     ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
     ws_decks.append_row(
@@ -1900,18 +1938,17 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
             str(season_id),
             str(cycle),
             pid,
-            "",          # deck
-            "",          # decklist_url
-            nowb,        # created_at
-            nowb,        # updated_at
+            "",
+            "",
+            nowb,
+            nowb,
         ],
         value_input_option="USER_ENTERED"
     )
-    cache_invalidate(ws_decks)  # blindagem 429: invalidar após escrita
+    cache_invalidate(ws_decks)
 
-    # linha nova é a última
     vals = cached_get_all_values(ws_decks, ttl_seconds=5)
-    return len(vals)  # inclui header na contagem
+    return len(vals)
 
 
 # =========================================================
@@ -1919,6 +1956,7 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
 # =========================================================
 @client.tree.command(name="inscrever", description="Se inscreve no ciclo aberto.")
 @app_commands.describe(cycle="Número do ciclo")
+@app_commands.autocomplete(cycle=ac_cycle_only_open)
 async def inscrever(interaction: discord.Interaction, cycle: int):
     await interaction.response.defer(ephemeral=True)
 
@@ -1939,10 +1977,8 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
         pid = str(interaction.user.id)
         nick = interaction.user.display_name
 
-        # garante jogador no banco
         upsert_player(ws_players, pid, nick)
 
-        # verifica status do ciclo
         cf = get_cycle_fields(ws_cycles, season_id, cycle)
         if cf.get("status") is None:
             return await interaction.followup.send(f"❌ O ciclo {cycle} não existe.", ephemeral=True)
@@ -1959,7 +1995,6 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
                 ephemeral=True
             )
 
-        # impede múltiplos ciclos ativos (na season)
         if player_active_in_season(ws_enr, season_id, pid):
             return await interaction.followup.send(
                 "❌ Você já está inscrito (ativo) em um ciclo desta season.",
@@ -1971,7 +2006,7 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
             [str(season_id), str(cycle), pid, "active", nowb, nowb],
             value_input_option="USER_ENTERED"
         )
-        cache_invalidate(ws_enr)  # blindagem 429: invalidar após escrita
+        cache_invalidate(ws_enr)
 
         await interaction.followup.send(f"✅ Inscrição confirmada no **Ciclo {cycle}**.", ephemeral=True)
         await log_admin(interaction, f"inscrição: {interaction.user} S{season_id} C{cycle}")
@@ -1985,6 +2020,7 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
 # =========================================================
 @client.tree.command(name="drop", description="Sai do ciclo.")
 @app_commands.describe(cycle="Número do ciclo")
+@app_commands.autocomplete(cycle=ac_cycle_open)
 async def drop(interaction: discord.Interaction, cycle: int):
     await interaction.response.defer(ephemeral=True)
 
@@ -1998,7 +2034,6 @@ async def drop(interaction: discord.Interaction, cycle: int):
         rows = cached_get_all_values(ws_enr, ttl_seconds=10)
         pid = str(interaction.user.id).strip()
 
-        # começa na linha 2 (índice 1) por causa do header
         for idx in range(1, len(rows)):
             r = rows[idx]
 
@@ -2011,11 +2046,11 @@ async def drop(interaction: discord.Interaction, cycle: int):
                 and safe_int(getc("cycle"), 0) == cycle
                 and str(getc("player_id")).strip() == pid
             ):
-                rown = idx + 1  # 1-based
+                rown = idx + 1
 
                 ws_enr.update([["dropped"]], range_name=f"{col_letter(col['status'])}{rown}")
                 ws_enr.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
-                cache_invalidate(ws_enr)  # blindagem 429: invalidar após escrita
+                cache_invalidate(ws_enr)
 
                 return await interaction.followup.send("✅ Você saiu do ciclo.", ephemeral=True)
 
@@ -2030,6 +2065,7 @@ async def drop(interaction: discord.Interaction, cycle: int):
 # =========================================================
 @client.tree.command(name="deck", description="Define seu deck (1 vez por ciclo).")
 @app_commands.describe(cycle="Ciclo", nome="Nome do deck")
+@app_commands.autocomplete(cycle=ac_cycle_open)
 async def deck(interaction: discord.Interaction, cycle: int, nome: str):
     await interaction.response.defer(ephemeral=True)
 
@@ -2042,7 +2078,6 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
 
         pid = str(interaction.user.id)
 
-        # segurança: só quem está ativo no ciclo pode registrar deck
         if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você precisa estar inscrito (ativo) neste ciclo para cadastrar deck.",
@@ -2064,7 +2099,7 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
 
         ws_decks.update([[nome]], range_name=f"{col_letter(col['deck'])}{rown}")
         ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
-        cache_invalidate(ws_decks)  # blindagem 429
+        cache_invalidate(ws_decks)
 
         await interaction.followup.send(f"✅ Deck salvo: **{nome}**", ephemeral=True)
 
@@ -2077,6 +2112,7 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str):
 # =========================================================
 @client.tree.command(name="decklist", description="Define sua decklist (1 vez por ciclo).")
 @app_commands.describe(cycle="Ciclo", url="Link da decklist")
+@app_commands.autocomplete(cycle=ac_cycle_open)
 async def decklist(interaction: discord.Interaction, cycle: int, url: str):
     await interaction.response.defer(ephemeral=True)
 
@@ -2093,7 +2129,6 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
 
         pid = str(interaction.user.id)
 
-        # segurança: só quem está ativo no ciclo pode registrar decklist
         if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você precisa estar inscrito (ativo) neste ciclo para cadastrar decklist.",
@@ -2111,7 +2146,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str):
 
         ws_decks.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{rown}")
         ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
-        cache_invalidate(ws_decks)  # blindagem 429
+        cache_invalidate(ws_decks)
 
         await interaction.followup.send("✅ Decklist salva.", ephemeral=True)
 
