@@ -1671,7 +1671,7 @@ COMMANDS_CATALOG = [
     ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
     ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
     ("adm", "/ciclo_fechar", "Fecha inscrições do ciclo."),
-    ("adm", "/ciclo_encerrar", "Encerra ciclo (completed).")
+    ("adm", "/ciclo_encerrar", "Encerra ciclo (completed)."),
     ("adm", "/start_cycle", "Gera pods + matches e trava ciclo (locked)."),
     ("adm", "/deadline", "Lista pendências próximas do vencimento (48h)."),
     ("adm", "/recalcular", "Auto-confirma pendentes e recalcula ranking do ciclo."),
