@@ -1651,7 +1651,6 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 # A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
 COMMANDS_CATALOG = [
     # Jogador
-    ("jogador", "/cadastro", "Concluir cadastro (Nome e Sobrenome)."),
     ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
     ("jogador", "/inscrever", "Se inscreve em um ciclo aberto."),
     ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
@@ -1687,9 +1686,9 @@ COMMANDS_CATALOG = [
     ("adm", "/estatisticas", "Estatísticas da liga (admin)."),
 
      # Owner (Owner)
-    ("owner", "/startseason", "abre uma nova season e define como ativa (owner)."),
-    ("owner", "/closeseason", "fecha a season atual (owner)."),
-    ("owner", "/cadastrar_player", "cadastra player manualmente e, opcionalmente, deck/decklist no ciclo (owner)."),
+    ("owner", "/startseason", "Abre uma nova season e define como ativa (owner)."),
+    ("owner", "/closeseason", "Fecha a season atual (owner)."),
+    ("owner", "/cadastrar_player", "Cadastra player manualmente e, opcionalmente, deck/decklist no ciclo (owner)."),
 ]
 
 def level_allows(user_level: str, cmd_level: str) -> bool:
