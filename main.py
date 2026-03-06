@@ -104,7 +104,22 @@ def utc_now_dt() -> datetime:
 
 def parse_iso_dt(s: str):
     try:
-        return datetime.fromisoformat(str(s).strip())
+        raw = str(s).strip()
+        if not raw:
+            return None
+
+        # Trata timestamps ISO com 'Z' final
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(raw)
+
+        # Se vier naive, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        # Normaliza para UTC aware
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
