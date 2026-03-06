@@ -1477,7 +1477,7 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
 # - usa purge/bulk delete para mensagens recentes
 # - mensagens com mais de 14 dias são apagadas individualmente
 # =========================================================
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=60)
 async def cleanup_welcome_channel():
     try:
         await client.wait_until_ready()
