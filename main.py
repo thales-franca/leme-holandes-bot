@@ -1776,13 +1776,19 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw = str(self.nome.value or "").strip()
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
 
-        # Regra: mínimo 2 palavras
-        if len(raw.split()) < 2:
+        raw = " ".join(str(self.nome.value or "").strip().split())
+        parts = raw.split()
+
+        # Regra: exatamente 2 palavras
+        if len(parts) != 2:
             try:
-                await interaction.response.send_message(
-                    "⚠️ Informe Nome e Sobrenome.\nExemplo: **Thales França**",
+                await interaction.followup.send(
+                    "⚠️ Informe apenas **Nome e Sobrenome**.\nExemplo: **Thales França**",
                     ephemeral=True
                 )
             except Exception:
@@ -1797,7 +1803,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             upsert_player(ws_players, str(interaction.user.id), raw)
         except Exception:
             try:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "⚠️ Não consegui salvar seu cadastro agora. Tente novamente em instantes.",
                     ephemeral=True
                 )
@@ -1806,7 +1812,7 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             return
 
         try:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ Cadastro salvo. Agora escolha uma opção abaixo:",
                 ephemeral=True,
                 view=OnboardingChoiceView()
