@@ -2078,7 +2078,7 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
                 ephemeral=True
             )
 
-        if player_active_in_season(ws_enr, season_id, pid):
+         player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você já está inscrito (ativo) em um ciclo desta season.",
                 ephemeral=True
