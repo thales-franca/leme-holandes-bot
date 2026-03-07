@@ -2078,7 +2078,7 @@ async def inscrever(interaction: discord.Interaction, cycle: int):
                 ephemeral=True
             )
 
-         player_active_in_cycle(ws_enr, season_id, cycle, pid):
+        if player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você já está inscrito (ativo) em um ciclo desta season.",
                 ephemeral=True
@@ -3342,19 +3342,93 @@ async def closeseason(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Erro no /closeseason: {e}", ephemeral=True)
 
 
-@client.tree.command(name="cadastrar_player", description="(OWNER) Cadastra player manualmente (e opcionalmente deck/decklist no ciclo).")
+# =========================================================
+# HELPERS AUTOCOMPLETE — OWNER /cadastrar_player
+# =========================================================
+async def ac_owner_season(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
+        ensure_sheet_columns(ws, SEASONS_REQUIRED)
+
+        q = str(current or "").strip().lower()
+        rows = cached_get_all_records(ws, ttl_seconds=10)
+
+        out: list[app_commands.Choice[int]] = []
+        for r in rows:
+            sid = safe_int(r.get("season_id", 0), 0)
+            if sid <= 0:
+                continue
+            st = str(r.get("status", "")).strip().lower()
+            name = str(r.get("name", "")).strip()
+            label = f"Season {sid} / {st or 'indefinido'}"
+            if name:
+                label += f" / {name}"
+            if q and q not in label.lower() and q not in str(sid):
+                continue
+            out.append(app_commands.Choice(name=label[:100], value=sid))
+
+        out.sort(key=lambda c: c.value, reverse=True)
+        return out[:25]
+    except Exception:
+        return []
+
+async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
+        q = str(current or "").strip().lower()
+
+        if season_selected <= 0:
+            return []
+
+        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
+        out: list[app_commands.Choice[int]] = []
+        seen = set()
+
+        for r in rows:
+            sid = safe_int(r.get("season_id", 0), 0)
+            if sid != season_selected:
+                continue
+
+            cyc = safe_int(r.get("cycle", 0), 0)
+            if cyc <= 0 or cyc in seen:
+                continue
+
+            st = str(r.get("status", "")).strip().lower() or "indefinido"
+            label = f"Ciclo {cyc} / {st}"
+            if q and q not in label.lower() and q not in str(cyc):
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=cyc))
+            seen.add(cyc)
+
+        out.sort(key=lambda c: c.value)
+        return out[:25]
+    except Exception:
+        return []
+
+
+@client.tree.command(name="cadastrar_player", description="(OWNER) Cadastra player manualmente com season, ciclo, inscrição, deck e decklist.")
 @app_commands.describe(
     membro="Selecione o usuário no Discord",
-    nome="Nome e Sobrenome (sem abreviações)",
-    ciclo="Opcional: ciclo para cadastrar deck/decklist",
-    deck="Opcional: nome do deck (1 vez por ciclo)",
+    nick="Nome e Sobrenome (sem abreviações)",
+    season="Season para cadastrar",
+    ciclo="Ciclo para cadastrar",
+    deck="Opcional: nome do deck",
     decklist="Opcional: link (moxfield/ligamagic)"
 )
+@app_commands.autocomplete(season=ac_owner_season, ciclo=ac_owner_cycle_for_season)
 async def cadastrar_player(
     interaction: discord.Interaction,
     membro: discord.Member,
-    nome: str,
-    ciclo: int = 0,
+    nick: str,
+    season: int,
+    ciclo: int,
     deck: str = "",
     decklist: str = ""
 ):
@@ -3364,77 +3438,116 @@ async def cadastrar_player(
     await interaction.response.defer(ephemeral=True)
 
     try:
-        raw = str(nome or "").strip()
+        raw = " ".join(str(nick or "").strip().split())
         if len(raw.split()) < 2:
             return await interaction.followup.send("❌ Informe Nome e Sobrenome (ex: João Silva).", ephemeral=True)
 
         sh = open_sheet()
-        season_id = require_current_season(sh)
         ensure_all_sheets(sh)
 
-        ws_players = sh.worksheet("Players")
-        col = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-        rows = cached_get_all_values(ws_players, ttl_seconds=10)
-        did = str(membro.id)
-        found_row = None
+        if not season_exists(sh, season):
+            return await interaction.followup.send(f"❌ A season {season} não existe.", ephemeral=True)
 
-        for i in range(2, len(rows) + 1):
-            r = rows[i - 1]
-            val = r[col["discord_id"]] if col["discord_id"] < len(r) else ""
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        cf = get_cycle_fields(ws_cycles, season, ciclo)
+        if cf.get("status") is None:
+            return await interaction.followup.send(f"❌ O ciclo {ciclo} não existe na season {season}.", ephemeral=True)
+
+        did = str(membro.id)
+        nowc = now_br_str()
+
+        # =========================
+        # PLAYERS
+        # =========================
+        ws_players = sh.worksheet("Players")
+        col_players = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+        rows_players = cached_get_all_values(ws_players, ttl_seconds=10)
+
+        found_row = None
+        for i in range(2, len(rows_players) + 1):
+            r = rows_players[i - 1]
+            val = r[col_players["discord_id"]] if col_players["discord_id"] < len(r) else ""
             if str(val).strip() == did:
                 found_row = i
                 break
 
-        nowc = now_br_str()
         if found_row:
-            ws_players.update([[membro.display_name]], range_name=f"{col_letter(col['nick'])}{found_row}")
-            ws_players.update([[raw]], range_name=f"{col_letter(col['name'])}{found_row}")
-            ws_players.update([["active"]], range_name=f"{col_letter(col['status'])}{found_row}")
-            ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
+            ws_players.update([[raw]], range_name=f"{col_letter(col_players['nick'])}{found_row}")
+            ws_players.update([[raw]], range_name=f"{col_letter(col_players['name'])}{found_row}")
+            ws_players.update([["active"]], range_name=f"{col_letter(col_players['status'])}{found_row}")
+            ws_players.update([[nowc]], range_name=f"{col_letter(col_players['updated_at'])}{found_row}")
         else:
             row = [""] * len(PLAYERS_HEADER)
-            row[col["discord_id"]] = did
-            row[col["nick"]] = membro.display_name
-            row[col["name"]] = raw
-            row[col["status"]] = "active"
-            row[col["created_at"]] = nowc
-            row[col["updated_at"]] = nowc
+            row[col_players["discord_id"]] = did
+            row[col_players["nick"]] = raw
+            row[col_players["name"]] = raw
+            row[col_players["status"]] = "active"
+            row[col_players["created_at"]] = nowc
+            row[col_players["updated_at"]] = nowc
             ws_players.append_row(row, value_input_option="USER_ENTERED")
 
         cache_invalidate(ws_players)
 
         msg_parts = [f"✅ Player cadastrado/atualizado: **{raw}** ({membro.id})"]
 
-        if ciclo and (deck.strip() or decklist.strip()):
-            ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-            cf = get_cycle_fields(ws_cycles, season_id, int(ciclo))
-            if cf.get("status") is None:
-                return await interaction.followup.send(f"❌ O ciclo {ciclo} não existe.", ephemeral=True)
+        # =========================
+        # ENROLLMENTS
+        # =========================
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
+        col_enr = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        rows_enr = cached_get_all_values(ws_enr, ttl_seconds=10)
 
-            ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
-            rown = ensure_deck_row(ws_decks, season_id, int(ciclo), str(membro.id))
-            col_deck = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+        enr_row = None
+        for i in range(2, len(rows_enr) + 1):
+            r = rows_enr[i - 1]
+            s = safe_int(r[col_enr["season_id"]] if col_enr["season_id"] < len(r) else 0, 0)
+            c = safe_int(r[col_enr["cycle"]] if col_enr["cycle"] < len(r) else 0, 0)
+            p = str(r[col_enr["player_id"]] if col_enr["player_id"] < len(r) else "").strip()
+            if s == season and c == ciclo and p == did:
+                enr_row = i
+                break
 
-            if deck.strip():
-                nm = deck.strip()
-                if len(nm) > 80:
-                    return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
-                ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
-                ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
-                msg_parts.append(f"- Deck setado no Ciclo {ciclo}: **{nm}**")
+        if enr_row is None:
+            ws_enr.append_row(
+                [str(season), str(ciclo), did, "active", nowc, nowc],
+                value_input_option="USER_ENTERED"
+            )
+            msg_parts.append(f"- Inscrição criada na **Season {season} / Ciclo {ciclo}**.")
+        else:
+            ws_enr.update([["active"]], range_name=f"{col_letter(col_enr['status'])}{enr_row}")
+            ws_enr.update([[nowc]], range_name=f"{col_letter(col_enr['updated_at'])}{enr_row}")
+            msg_parts.append(f"- Inscrição reativada/confirmada na **Season {season} / Ciclo {ciclo}**.")
 
-            if decklist.strip():
-                ok, val = validate_decklist_url(decklist)
-                if not ok:
-                    return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
-                ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
-                ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
-                msg_parts.append(f"- Decklist setada no Ciclo {ciclo}.")
+        cache_invalidate(ws_enr)
 
-            cache_invalidate(ws_decks)
+        # =========================
+        # DECKS
+        # =========================
+        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
+        rown = ensure_deck_row(ws_decks, season, ciclo, did)
+        col_deck = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+        if deck.strip():
+            nm = deck.strip()
+            if len(nm) > 80:
+                return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
+            ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
+            msg_parts.append(f"- Deck setado: **{nm}**")
+
+        if decklist.strip():
+            ok, val = validate_decklist_url(decklist)
+            if not ok:
+                return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
+            ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
+            msg_parts.append("- Decklist setada.")
+
+        ws_decks.update([[nowc]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
+        cache_invalidate(ws_decks)
+
+        msg_parts.append(f"- Referência final: **Season {season} / Ciclo {ciclo}**")
 
         await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
-        await log_admin(interaction, f"OWNER cadastrar_player: {raw} ({membro.id}) ciclo={ciclo or 'n/a'}")
+        await log_admin(interaction, f"OWNER cadastrar_player: {raw} ({membro.id}) season={season} ciclo={ciclo}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /cadastrar_player: {e}", ephemeral=True)
