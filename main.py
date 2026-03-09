@@ -2699,20 +2699,47 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
         def pod_sort_key(x: str):
             return safe_int(x, 999999)
 
-        lines = [f"📦 **PODs da Season {season} / Ciclo {cycle}**"]
+        chunks = []
+        current_chunk = f"📦 **PODs da Season {season} / Ciclo {cycle}**"
+        limit = 1900
+
         for pod in sorted(pods.keys(), key=pod_sort_key):
-            lines.append(f"\n**POD {pod}**")
             players = list(dict.fromkeys(pods[pod]))
+
+            pod_block_lines = [f"\n**POD {pod}**"]
             for i, pid in enumerate(players, start=1):
                 deck_info = deck_map.get((season, cycle, pid), {})
                 deck_name = deck_info.get("deck", "") or "PENDENTE"
                 decklist_url = deck_info.get("decklist_url", "") or "PENDENTE"
 
-                lines.append(f"{i}. **{_player_display_name(nick_map, pid)}**")
-                lines.append(f"   Deck: {deck_name}")
-                lines.append(f"   Decklist: {decklist_url}")
+                player_block = [
+                    f"{i}. **{_player_display_name(nick_map, pid)}**",
+                    f"   Deck: {deck_name}",
+                    f"   Decklist: {decklist_url}",
+                ]
+                pod_block_lines.extend(player_block)
 
-        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
+            pod_block = "\n".join(pod_block_lines)
+
+            if len(current_chunk) + len(pod_block) + 2 > limit:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = f"📦 **PODs da Season {season} / Ciclo {cycle}**\n{pod_block}".strip()
+            else:
+                current_chunk = f"{current_chunk}\n{pod_block}".strip()
+
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        if not chunks:
+            return await interaction.followup.send(
+                f"❌ Não consegui montar a visualização dos PODs da **Season {season} / Ciclo {cycle}**.",
+                ephemeral=True
+            )
+
+        await interaction.followup.send(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /pods_ver: {e}", ephemeral=True)
