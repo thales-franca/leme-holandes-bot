@@ -4136,9 +4136,10 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: F/7
-# LINHAS: 4136 à 4290
-# RESUMO: Algoritmo anti-repetição de pods, comando principal /start_cycle
-# que gera pods, cria matches round-robin, trava o ciclo e define prazo.
+# LINHAS: 4136 à 4321
+# RESUMO: Algoritmo anti-repetição de pods, gravação em lote para reduzir 429,
+# normalização automática de ciclo parcialmente gerado e comando /start_cycle
+# com match_id curto por pod no formato Sx-Cy-Pz-01.
 # =================================================
 
 def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
@@ -4158,6 +4159,13 @@ def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past
                 break
 
     return best, best_score
+
+
+def _chunked_append_rows(ws, rows: list[list], chunk_size: int = 200):
+    if not rows:
+        return
+    for i in range(0, len(rows), chunk_size):
+        ws.append_rows(rows[i:i + chunk_size], value_input_option="USER_ENTERED")
 
 
 @client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
@@ -4196,8 +4204,21 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
             return await interaction.followup.send(f"❌ O ciclo {cycle} não pode iniciar (status: {st}).", ephemeral=True)
 
         if _cycle_has_generated_data(ws_pods, ws_matches, season_id, cycle):
+            start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
+
+            set_cycle_status(ws_cycles, season_id, cycle, "locked")
+
+            if start_br and end_br:
+                set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
+
+            cache_invalidate(ws_cycles)
+
             return await interaction.followup.send(
-                "❌ Este ciclo já possui PODs ou matches gerados. Não vou gerar novamente.",
+                "⚠️ Este ciclo já possui PODs ou matches gerados.\n"
+                "Não vou gerar novamente.\n"
+                f"- Status normalizado para: **locked**\n"
+                f"- Prazo: **{start_br or '-'}** → **{end_br or '-'}** (BR)\n"
+                f"- Regra aplicada: **{days} dias** (maior pod = **{max_pod}** jogador(es))",
                 ephemeral=True
             )
 
@@ -4231,23 +4252,32 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         )
 
         nowb = now_br_str()
+        nowu = utc_now_dt()
+
         pod_labels = []
+        pods_rows = []
+
         pod_num = 1
         for pod in pods:
             label = f"{pod_num}"
             pod_labels.append((label, pod))
             for pid in pod:
-                ws_pods.append_row([str(season_id), str(cycle), label, str(pid), nowb], value_input_option="USER_ENTERED")
+                pods_rows.append([str(season_id), str(cycle), label, str(pid), nowb])
             pod_num += 1
 
+        _chunked_append_rows(ws_pods, pods_rows, chunk_size=200)
         cache_invalidate(ws_pods)
 
+        matches_rows = []
         created = 0
-        nowu = utc_now_dt()
+
         for label, pod in pod_labels:
-            for a, b in round_robin_pairs(pod):
-                mid = new_match_id(season_id, cycle, label)
-                ws_matches.append_row([
+            pairs = round_robin_pairs(pod)
+            width = max(2, len(str(len(pairs))))
+
+            for seq, (a, b) in enumerate(pairs, start=1):
+                mid = f"S{season_id}-C{cycle}-P{label}-{str(seq).zfill(width)}"
+                matches_rows.append([
                     mid, str(season_id), str(cycle), str(label),
                     str(a), str(b),
                     "0", "0", "0",
@@ -4256,9 +4286,10 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                     "TRUE",
                     now_iso_utc(), now_iso_utc(),
                     auto_confirm_deadline_iso(nowu)
-                ], value_input_option="USER_ENTERED")
+                ])
                 created += 1
 
+        _chunked_append_rows(ws_matches, matches_rows, chunk_size=200)
         cache_invalidate(ws_matches)
 
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
@@ -4293,7 +4324,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: G/7
-# LINHAS: 4293 à 4792
+# LINHAS: 4324 à 4823
 # RESUMO: Comandos administrativos finais do sistema incluindo exportação,
 # fechamento automático de resultados, substituição de jogadores, histórico
 # de confrontos, estatísticas da liga e novo comando /inscritos para consulta
