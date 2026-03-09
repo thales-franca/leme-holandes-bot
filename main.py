@@ -2294,32 +2294,104 @@ def parse_vde(score: str):
 
 
 # =========================================================
+# AUTOCOMPLETE — /pods_ver
+# =========================================================
+async def ac_pods_ver_season(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
+        ensure_sheet_columns(ws, SEASONS_REQUIRED)
+
+        q = str(current or "").strip().lower()
+        rows = cached_get_all_records(ws, ttl_seconds=10)
+
+        out: list[app_commands.Choice[int]] = []
+        for r in rows:
+            sid = safe_int(r.get("season_id", 0), 0)
+            if sid <= 0:
+                continue
+
+            st = str(r.get("status", "")).strip().lower()
+            nm = str(r.get("name", "")).strip()
+            label = f"Season {sid} / {st or 'indefinido'}"
+            if nm:
+                label += f" / {nm}"
+
+            if q and q not in label.lower() and q not in str(sid):
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=sid))
+
+        out.sort(key=lambda c: c.value, reverse=True)
+        return out[:25]
+    except Exception:
+        return []
+
+
+async def ac_pods_ver_cycle(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
+        q = str(current or "").strip().lower()
+
+        if season_selected <= 0:
+            return []
+
+        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
+        out: list[app_commands.Choice[int]] = []
+        seen = set()
+
+        for r in rows:
+            sid = safe_int(r.get("season_id", 0), 0)
+            if sid != season_selected:
+                continue
+
+            cyc = safe_int(r.get("cycle", 0), 0)
+            if cyc <= 0 or cyc in seen:
+                continue
+
+            st = str(r.get("status", "")).strip().lower() or "indefinido"
+            label = f"Ciclo {cyc} / {st}"
+
+            if q and q not in label.lower() and q not in str(cyc):
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=cyc))
+            seen.add(cyc)
+
+        out.sort(key=lambda c: c.value)
+        return out[:25]
+    except Exception:
+        return []
+
+
+# =========================================================
 # /pods_ver
 # =========================================================
-@client.tree.command(name="pods_ver", description="Mostra seu POD em um ciclo.")
-@app_commands.describe(cycle="Número do ciclo")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def pods_ver(interaction: discord.Interaction, cycle: int):
+@client.tree.command(name="pods_ver", description="Mostra todos os PODs de uma season/ciclo.")
+@app_commands.describe(season="Season", cycle="Número do ciclo")
+@app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
+async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
     await interaction.response.defer(ephemeral=True)
 
     try:
         sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return await interaction.followup.send("❌ Não existe season ativa.", ephemeral=True)
-
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+
+        ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
         rows = cached_get_all_records(ws_pods, ttl_seconds=10)
         nick_map = build_players_nick_map(ws_players)
 
-        uid = str(interaction.user.id)
-        my_pod = None
-        pod_players: list[str] = []
-
+        pods: dict[str, list[str]] = {}
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+            if safe_int(r.get("season_id", 0), 0) != season:
                 continue
             if safe_int(r.get("cycle", 0), 0) != cycle:
                 continue
@@ -2329,30 +2401,25 @@ async def pods_ver(interaction: discord.Interaction, cycle: int):
             if not pod or not pid:
                 continue
 
-            if pid == uid:
-                my_pod = pod
+            pods.setdefault(pod, []).append(pid)
 
-        if not my_pod:
-            return await interaction.followup.send("❌ Você não está em nenhum POD deste ciclo.", ephemeral=True)
+        if not pods:
+            return await interaction.followup.send(
+                f"❌ Não há PODs gerados na **Season {season} / Ciclo {cycle}**.",
+                ephemeral=True
+            )
 
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
-            if str(r.get("pod", "")).strip() != my_pod:
-                continue
-            pid = str(r.get("player_id", "")).strip()
-            if pid:
-                pod_players.append(pid)
+        def pod_sort_key(x: str):
+            return safe_int(x, 999999)
 
-        pod_players = list(dict.fromkeys(pod_players))
+        lines = [f"📦 **PODs da Season {season} / Ciclo {cycle}**"]
+        for pod in sorted(pods.keys(), key=pod_sort_key):
+            lines.append(f"\n**POD {pod}**")
+            players = list(dict.fromkeys(pods[pod]))
+            for i, pid in enumerate(players, start=1):
+                lines.append(f"{i}. {_player_display_name(nick_map, pid)}")
 
-        lines = [f"📦 **Seu POD no Ciclo {cycle}**", f"**POD {my_pod}**"]
-        for i, pid in enumerate(pod_players, start=1):
-            lines.append(f"{i}. {_player_display_name(nick_map, pid)}")
-
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /pods_ver: {e}", ephemeral=True)
@@ -3419,8 +3486,8 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
     nick="Nome e Sobrenome (sem abreviações)",
     season="Season para cadastrar",
     ciclo="Ciclo para cadastrar",
-    deck="Opcional: nome do deck",
-    decklist="Opcional: link (moxfield/ligamagic)"
+    deck="Nome do deck",
+    decklist="Link (moxfield/ligamagic)"
 )
 @app_commands.autocomplete(season=ac_owner_season, ciclo=ac_owner_cycle_for_season)
 async def cadastrar_player(
@@ -3429,8 +3496,8 @@ async def cadastrar_player(
     nick: str,
     season: int,
     ciclo: int,
-    deck: str = "",
-    decklist: str = ""
+    deck: str,
+    decklist: str
 ):
     if not await is_owner_only(interaction):
         return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
@@ -3527,23 +3594,23 @@ async def cadastrar_player(
         rown = ensure_deck_row(ws_decks, season, ciclo, did)
         col_deck = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        if deck.strip():
-            nm = deck.strip()
-            if len(nm) > 80:
-                return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
-            ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
-            msg_parts.append(f"- Deck setado: **{nm}**")
+        nm = str(deck or "").strip()
+        if not nm:
+            return await interaction.followup.send("❌ Informe o deck.", ephemeral=True)
+        if len(nm) > 80:
+            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
 
-        if decklist.strip():
-            ok, val = validate_decklist_url(decklist)
-            if not ok:
-                return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
-            ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
-            msg_parts.append("- Decklist setada.")
+        ok, val = validate_decklist_url(decklist)
+        if not ok:
+            return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
 
+        ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
+        ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
         ws_decks.update([[nowc]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
         cache_invalidate(ws_decks)
 
+        msg_parts.append(f"- Deck setado: **{nm}**")
+        msg_parts.append("- Decklist setada.")
         msg_parts.append(f"- Referência final: **Season {season} / Ciclo {ciclo}**")
 
         await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
