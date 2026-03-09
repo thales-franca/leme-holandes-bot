@@ -1743,7 +1743,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
     ("jogador", "/inscrever", "Se inscreve com season, ciclo, deck e decklist válidos."),
     ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
-    ("jogador", "/pods_ver", "Mostra seu POD no ciclo atual."),
+    ("jogador", "/pods_ver", "Mostra todos os PODs no ciclo atual + deck + decklist."),
     ("jogador", "/meus_matches", "Lista seus matches do ciclo."),
     ("jogador", "/resultado", "Reporta resultado V-D-E (games) para um match."),
     ("jogador", "/rejeitar", "Rejeita um resultado pendente (janela 48h)."),
@@ -2746,7 +2746,7 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
                 player_block = [
                     f"{i}. **{_player_display_name(nick_map, pid)}**",
                     f"   Deck: {deck_name}",
-                    f"   Decklist: {decklist_url}",
+                    f"   Decklist: <{decklist_url}>",
                 ]
                 pod_block_lines.extend(player_block)
 
