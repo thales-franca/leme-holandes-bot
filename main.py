@@ -1,7 +1,6 @@
 # =================================================
 # BLOCO ORIGINAL: BLOCO 1/8
 # SUB-BLOCO: A
-# LINHAS: 1 até 224
 # RESUMO: Cabeçalho do bloco, imports, princípios do projeto,
 # keep-alive do Render, configurações de ambiente, helpers
 # de data/hora, helpers gerais e início do sistema de cache
@@ -227,7 +226,6 @@ def cache_invalidate(ws, kind: str | None = None):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 1/8
 # SUB-BLOCO: B
-# LINHAS: 227 até 436 
 # RESUMO: Final do sistema de cache do Google Sheets, helpers de integração com Google Sheets,
 # criação e validação de abas, sistema de log administrativo no Discord, helpers de autorização
 # (owner, ADM, organizador, jogador), validação de URLs de decklist (Moxfield e LigaMagic) e
@@ -439,7 +437,6 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 # =================================================
 # BLOCO ORIGINAL: BLOCO 2/8
 # SUB-BLOCO: A
-# LINHAS: 439 até 661
 # RESUMO: Definição do schema das abas do Google Sheets, cabeçalhos e colunas obrigatórias,
 # garantia de criação das abas, helpers de season, leitura e atualização da season atual,
 # status de temporada e fechamento das demais seasons.
@@ -664,7 +661,6 @@ def close_all_other_seasons(sh, keep_open_id: int):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 2/8
 # SUB-BLOCO: B
-# LINHAS: 664 até 845
 # RESUMO: Helpers de ciclos (busca, status, tempos, listagem e sugestões de ciclos),
 # helpers de jogadores (localização e mapa de nicknames) e helpers de decks por ciclo
 # incluindo localização de linha, criação garantida de registro e leitura dos campos.
@@ -848,7 +844,6 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # =================================================
 # BLOCO ORIGINAL: BLOCO 3/8
 # SUB-BLOCO: A
-# LINHAS: 848 até 1037
 # RESUMO: Cabeçalho do bloco, helpers de matches, geração de IDs, prazo de auto-confirmação,
 # round robin, varredura de auto-confirmação, heurística anti-repetição entre jogadores e
 # cálculo de prazo do ciclo com base no maior POD.
@@ -1040,7 +1035,6 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =================================================
 # BLOCO ORIGINAL: BLOCO 3/8
 # SUB-BLOCO: B/2
-# LINHAS: 1040 até 1228
 # RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
@@ -1231,7 +1225,6 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 4/8
 # SUB-BLOCO: ÚNICA
-# LINHAS: 1231 até 1458
 # RESUMO: Função de recálculo oficial do ciclo, incluindo auto-confirmação silenciosa,
 # leitura de jogadores e matches válidos, montagem de estatísticas, cálculo de MWP, GWP,
 # OMW e OGW com piso, ordenação do ranking, reconstrução da aba Standings do zero e retorno
@@ -1461,7 +1454,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 5/8
 # SUB-BLOCO: A
-# LINHAS: 1464 até 1656
 # RESUMO: Cabeçalho do bloco, import adicional de asyncio e tasks, definição do cliente
 # Discord, setup inicial do bot, configuração de onboarding, logs administrativos,
 # rotina automática de limpeza do canal de boas-vindas e preparação do before_loop.
@@ -1659,7 +1651,6 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 # =================================================
 # BLOCO ORIGINAL: BLOCO 5/8
 # SUB-BLOCO: B
-# LINHAS: 1659 até 1846
 # RESUMO: Funções auxiliares para envio de mensagens longas no Discord,
 # upsert de jogadores no Google Sheets com blindagem contra erro 429,
 # catálogo oficial de comandos da liga e implementação do comando /comando.
@@ -1849,7 +1840,6 @@ async def meuid(interaction: discord.Interaction):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 5/8
 # SUB-BLOCO: C/3
-# LINHAS: 1849 até 2045
 # RESUMO: Implementação completa do sistema de onboarding do bot,
 # incluindo Modal para cadastro de nome/sobrenome, Views persistentes
 # com botões (start, confirmar, participar/assistir), aplicação do cargo
@@ -2048,7 +2038,6 @@ async def onboarding(interaction: discord.Interaction):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 6/8
 # SUB-BLOCO: A/2
-# LINHAS: 2048 até 2354
 # RESUMO: Cabeçalho do bloco, regras implementadas, helpers para verificar se o jogador
 # está ativo na season ou no ciclo, helper para garantir linha na aba Decks, helpers
 # de autocomplete para /inscrever e comando /inscrever com season, ciclo, deck e decklist.
@@ -2357,7 +2346,6 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # =================================================
 # BLOCO ORIGINAL: BLOCO 6/8
 # SUB-BLOCO: B/2
-# LINHAS: 2357 até 2518
 # RESUMO: Comandos /drop, /deck e /decklist, incluindo validações de inscrição
 # ativa no ciclo, controle administrativo de alteração de deck e decklist,
 # validação de URL de decklist, atualização das abas no Google Sheets e
@@ -2520,8 +2508,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 
 # =================================================
 # BLOCO ORIGINAL: BLOCO 7/8
-# SUB-BLOCO: A
-# LINHAS: 2521 até 2779
+# SUB-BLOCO: A/2
 # RESUMO: Cabeçalho do bloco, constante de auto-confirmação, helpers de visualização,
 # parser de placar V-D-E, autocomplete de /pods_ver e comandos /pods_ver e /meus_matches
 # para visualização de PODs e matches do jogador.
@@ -2667,12 +2654,27 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
         sh = open_sheet()
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
 
         ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
         ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+        ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
         rows = cached_get_all_records(ws_pods, ttl_seconds=10)
+        deck_rows = cached_get_all_records(ws_decks, ttl_seconds=10)
         nick_map = build_players_nick_map(ws_players)
+
+        deck_map: dict[tuple[int, int, str], dict[str, str]] = {}
+        for r in deck_rows:
+            sid = safe_int(r.get("season_id", 0), 0)
+            cyc = safe_int(r.get("cycle", 0), 0)
+            pid = str(r.get("player_id", "")).strip()
+            if not pid:
+                continue
+            deck_map[(sid, cyc, pid)] = {
+                "deck": str(r.get("deck", "")).strip(),
+                "decklist_url": str(r.get("decklist_url", "")).strip(),
+            }
 
         pods: dict[str, list[str]] = {}
         for r in rows:
@@ -2702,7 +2704,13 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
             lines.append(f"\n**POD {pod}**")
             players = list(dict.fromkeys(pods[pod]))
             for i, pid in enumerate(players, start=1):
-                lines.append(f"{i}. {_player_display_name(nick_map, pid)}")
+                deck_info = deck_map.get((season, cycle, pid), {})
+                deck_name = deck_info.get("deck", "") or "PENDENTE"
+                decklist_url = deck_info.get("decklist_url", "") or "PENDENTE"
+
+                lines.append(f"{i}. **{_player_display_name(nick_map, pid)}**")
+                lines.append(f"   Deck: {deck_name}")
+                lines.append(f"   Decklist: {decklist_url}")
 
         await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True)
 
@@ -2782,7 +2790,6 @@ async def meus_matches(interaction: discord.Interaction, cycle: int):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 7/8
 # SUB-BLOCO: B/2
-# LINHAS: 2782 à 2945
 # RESUMO: Comandos de interação com resultados de partidas: /resultado para reportar
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
 # Inclui atualização de dados no Sheets, auto-confirm timer e invalidação de cache.
@@ -2948,7 +2955,6 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: A/7
-# LINHAS: 2948 até 3129
 # RESUMO: Cabeçalho do bloco, helper para exigir season ativa, helpers de standings/ranking
 # e comandos administrativos iniciais: /forcesync, /ciclo_abrir, /ciclo_fechar e /ciclo_encerrar.
 # =================================================
@@ -3132,7 +3138,6 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: B/7
-# LINHAS: 3132 até 3345
 # RESUMO: Comandos relacionados a prazo, pendências e ranking do ciclo, incluindo
 # /prazo, /deadline, /recalcular, /ranking e /standings_publicar.
 # =================================================
@@ -3348,7 +3353,6 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: C
-# LINHAS: 3348 até 3684
 # RESUMO: Comandos administrativos de encerramento de resultados e gestão de matches:
 # /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo e /ranking_geral.
 # =================================================
@@ -3687,7 +3691,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: D/7
-# LINHAS: 3687 à 3977
 # RESUMO: Comandos administrativos de temporada e cadastro manual de jogadores.
 # Ajustado para permitir uso de /cadastrar_player por ADM, Organizador e Owner.
 # Nenhuma outra lógica foi alterada.
@@ -3980,7 +3983,6 @@ async def cadastrar_player(
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: E/7
-# LINHAS: 3980 à 4133
 # RESUMO: Finalização do comando /cadastrar_player (Enrollments e Decks)
 # e início das regras do sistema de geração de pods e layout de pods
 # utilizadas posteriormente pelo comando /start_cycle.
@@ -4136,7 +4138,6 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: F/7
-# LINHAS: 4136 à 4321
 # RESUMO: Algoritmo anti-repetição de pods, gravação em lote para reduzir 429,
 # normalização automática de ciclo parcialmente gerado e comando /start_cycle
 # com match_id curto por pod no formato Sx-Cy-Pz-01.
@@ -4324,7 +4325,6 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/8
 # SUB-BLOCO: G/7
-# LINHAS: 4324 à 4823
 # RESUMO: Comandos administrativos finais do sistema incluindo exportação,
 # fechamento automático de resultados, substituição de jogadores, histórico
 # de confrontos, estatísticas da liga e novo comando /inscritos para consulta
