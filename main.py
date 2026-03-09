@@ -2379,8 +2379,9 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # SUB-BLOCO: B/2
 # RESUMO: Comandos /drop, /deck e /decklist, incluindo validações de inscrição
 # ativa no ciclo, controle administrativo de alteração de deck e decklist,
-# validação de URL de decklist, atualização das abas no Google Sheets e
-# invalidação de cache após escrita.
+# seleção de jogador por nickname do banco Players, validação de URL de
+# decklist, atualização das abas no Google Sheets e invalidação de cache
+# após escrita.
 # =================================================
 
 # =========================================================
@@ -2429,12 +2430,78 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
+# Helpers autocomplete /deck e /decklist
+# =========================================================
+async def ac_player_nick(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
+        q = str(current or "").strip().lower()
+        rows = cached_get_all_records(ws_players, ttl_seconds=10)
+
+        out: list[app_commands.Choice[str]] = []
+        seen = set()
+
+        for r in rows:
+            pid = str(r.get("discord_id", "")).strip()
+            nick = str(r.get("nick", "")).strip()
+            if not pid or not nick:
+                continue
+
+            if q and q not in nick.lower() and q not in pid:
+                continue
+
+            if pid in seen:
+                continue
+
+            out.append(app_commands.Choice(name=nick[:100], value=pid))
+            seen.add(pid)
+
+        return out[:25]
+    except Exception:
+        return []
+
+
+def resolve_player_nick(ws_players, player_id: str) -> str:
+    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+    pid = str(player_id).strip()
+    for r in rows:
+        if str(r.get("discord_id", "")).strip() == pid:
+            return str(r.get("nick", "")).strip() or pid
+    return pid
+
+
+def resolve_player_id_from_value(ws_players, jogador: str) -> str:
+    raw = str(jogador or "").strip()
+    if not raw:
+        return ""
+
+    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+
+    for r in rows:
+        pid = str(r.get("discord_id", "")).strip()
+        if pid == raw:
+            return pid
+
+    raw_norm = raw.lower()
+    for r in rows:
+        pid = str(r.get("discord_id", "")).strip()
+        nick = str(r.get("nick", "")).strip()
+        if nick.lower() == raw_norm:
+            return pid
+
+    return ""
+
+
+# =========================================================
 # /deck
 # =========================================================
 @client.tree.command(name="deck", description="(ADM/Organizador/Owner) Define ou altera deck do jogador no ciclo.")
 @app_commands.describe(cycle="Ciclo", nome="Nome do deck", jogador="Jogador")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador: discord.Member | None = None):
+@app_commands.autocomplete(cycle=ac_cycle_open, jogador=ac_player_nick)
+async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador: str):
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -2448,10 +2515,16 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
         season_id = get_current_season_id(sh)
 
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
         ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
-        alvo = jogador or interaction.user
-        pid = str(alvo.id)
+        pid = resolve_player_id_from_value(ws_players, jogador)
+        if not pid:
+            return await interaction.followup.send(
+                "❌ Jogador não encontrado no cadastro.",
+                ephemeral=True
+            )
 
         if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
@@ -2472,7 +2545,8 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
         ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
         cache_invalidate(ws_decks)
 
-        await interaction.followup.send(f"✅ Deck salvo: **{nome}**", ephemeral=True)
+        nick = resolve_player_nick(ws_players, pid)
+        await interaction.followup.send(f"✅ Deck salvo para **{nick}**: **{nome}**", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
@@ -2483,8 +2557,8 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
 # =========================================================
 @client.tree.command(name="decklist", description="(ADM/Organizador/Owner) Define ou altera decklist do jogador no ciclo.")
 @app_commands.describe(cycle="Ciclo", url="Link da decklist", jogador="Jogador")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogador: discord.Member | None = None):
+@app_commands.autocomplete(cycle=ac_cycle_open, jogador=ac_player_nick)
+async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogador: str):
     await interaction.response.defer(ephemeral=True)
 
     ok, val = validate_decklist_url(url)
@@ -2502,10 +2576,16 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
         season_id = get_current_season_id(sh)
 
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
         ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
-        alvo = jogador or interaction.user
-        pid = str(alvo.id)
+        pid = resolve_player_id_from_value(ws_players, jogador)
+        if not pid:
+            return await interaction.followup.send(
+                "❌ Jogador não encontrado no cadastro.",
+                ephemeral=True
+            )
 
         if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
             return await interaction.followup.send(
@@ -2522,7 +2602,8 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
         ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
         cache_invalidate(ws_decks)
 
-        await interaction.followup.send("✅ Decklist salva.", ephemeral=True)
+        nick = resolve_player_nick(ws_players, pid)
+        await interaction.followup.send(f"✅ Decklist salva para **{nick}**.", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
