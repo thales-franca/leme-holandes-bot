@@ -1235,7 +1235,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     """
     Recalcula o ranking do ciclo (SEMPRE do zero):
     - Piso 33,3% primeiro (MWP/GWP)
-    - Ranking: Pontos > OMW% > GW% > OGW%
+    - Ranking: MWP% > OMW% > GW% > OGW% > Pontos
     - Match points: Win=3, Draw=1, Loss=0 (por match)
     - GWP: (W + 0.5*D) / GamesPlayed (com piso)
     - OMW: média do MWP (já com piso) dos oponentes enfrentados
@@ -1389,9 +1389,9 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             "ogw_percent": pct1(ogw[pid]),
         })
 
-    # Ordena: Pontos > OMW > GW > OGW
+    # Ordena: MWP > OMW > GW > OGW > Pontos
     out_rows.sort(
-        key=lambda r: (r["match_points"], r["omw_percent"], r["gw_percent"], r["ogw_percent"]),
+        key=lambda r: (r["mwp_percent"], r["omw_percent"], r["gw_percent"], r["ogw_percent"], r["match_points"]),
         reverse=True
     )
 
@@ -3795,25 +3795,26 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             table.append({
                 "pid": pid,
                 "pts": s["pts"],
+                "mwp": pct1(mwp[pid]),
                 "omw": pct1(omw[pid]),
                 "gw": pct1(gwp[pid]),
                 "ogw": pct1(ogw[pid]),
                 "j": s["matches"],
             })
 
-        table.sort(key=lambda r: (r["pts"], r["omw"], r["gw"], r["ogw"]), reverse=True)
+        table.sort(key=lambda r: (r["mwp"], r["omw"], r["gw"], r["ogw"], r["pts"]), reverse=True)
 
         top = max(10, min(top, 60))
         out = [f"🏆 Ranking Geral — Season {season_id} (Top {top})"]
-        out.append("pos | jogador | pts | OMW | GW | OGW | J")
-        out.append("--- | ------ | --- | --- | --- | --- | ---")
+        out.append("pos | jogador | MWP | pts | OMW | GW | OGW | J")
+        out.append("--- | ------ | --- | --- | --- | --- | --- | ---")
 
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
         nick_map = build_players_nick_map(ws_players)
 
         for i, r in enumerate(table[:top], 1):
             out.append(
-                f"{i} | {nick_map.get(r['pid'], r['pid'])} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}"
+                f"{i} | {nick_map.get(r['pid'], r['pid'])} | {r['mwp']} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}"
             )
 
         await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
