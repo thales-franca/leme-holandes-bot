@@ -1943,17 +1943,48 @@ class OnboardingChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # aplica cargo Jogador (se existir)
+        # aplica cargo Jogador (se existir) e ajusta nickname para Nome Sobrenome salvo no Sheets
         try:
             guild = interaction.guild
+            nome_salvo = ""
+
+            try:
+                sh = open_sheet()
+                ensure_all_sheets(sh)
+                ws_players = sh.worksheet("Players")
+                rows = cached_get_all_records(ws_players, ttl_seconds=10)
+                uid = str(interaction.user.id).strip()
+                for r in rows:
+                    if str(r.get("discord_id", "")).strip() == uid:
+                        nome_salvo = str(r.get("nick", "")).strip()
+                        break
+            except Exception:
+                nome_salvo = ""
+
+            if not nome_salvo or len(nome_salvo.split()) != 2:
+                return await interaction.response.send_message(
+                    "⚠️ Seu cadastro não está com Nome e Sobrenome válidos. Refaça o onboarding ou procure um ADM.",
+                    ephemeral=True
+                )
+
             if guild:
+                member = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
+
+                try:
+                    await member.edit(nick=nome_salvo, reason="Onboarding Leme Holandês")
+                except Exception:
+                    return await interaction.response.send_message(
+                        "⚠️ Não consegui aplicar seu Nome e Sobrenome no servidor. Verifique se o bot tem permissão de gerenciar apelidos e tente novamente.",
+                        ephemeral=True
+                    )
+
                 role = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
                 if role:
-                    member = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
                     try:
                         await member.add_roles(role, reason="Onboarding Leme Holandês")
                     except Exception:
                         pass
+
             await interaction.response.send_message("✅ Perfeito. Você está marcado como **Jogador**.", ephemeral=True)
         except Exception:
             try:
