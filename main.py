@@ -1243,7 +1243,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     - Considera apenas matches:
       active=TRUE e confirmed_status=confirmed e result_type != bye
     """
-    ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=2000, cols=25)
+    ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
     ws_matches = sh.worksheet("Matches")
     ws_standings = sh.worksheet("Standings")
 
@@ -1253,11 +1253,16 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     except Exception:
         pass
 
-    # Base de jogadores (Players) — ranking inclui TODOS cadastrados
-    players_rows = ws_players.get_all_records()
+    # Base de jogadores do ciclo — ranking inclui apenas inscritos no ciclo
+    ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+    enr_rows = ws_enr.get_all_records()
     all_player_ids = set()
-    for r in players_rows:
-        pid = str(r.get("discord_id", "")).strip()
+    for r in enr_rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        if safe_int(r.get("cycle", 0), 0) != cycle:
+            continue
+        pid = str(r.get("player_id", "")).strip()
         if pid:
             all_player_ids.add(pid)
 
