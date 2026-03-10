@@ -1125,6 +1125,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     """
     Sugere matches relevantes ao usuário:
     - Mostra apenas matches do usuário na season ativa e active=TRUE
+    - Considera apenas o ciclo vigente com status LOCKED
     - Exibe no formato "Nick vs Nick | pendente" quando ainda não houve lançamento
     - Exibe no formato "Nick vs Nick | registrado" quando já houve lançamento
     - Mantém o match_id como valor interno da escolha
@@ -1138,19 +1139,31 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
 
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
 
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
         nick_map = build_players_nick_map(ws_players)
+
+        locked_cycles = set()
+        for c, st in list_cycles(ws_cycles, season_id):
+            if str(st or "").strip().lower() == "locked":
+                locked_cycles.add(c)
+
+        if not locked_cycles:
+            return []
 
         rows = ws_matches.get_all_records()
         found: list[app_commands.Choice[str]] = []
 
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            if safe_int(r.get("cycle", 0), 0) not in locked_cycles:
                 continue
             if not as_bool(r.get("active", "TRUE")):
                 continue
@@ -3090,17 +3103,14 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
 # =========================================================
 # /meus_matches
 # =========================================================
-@client.tree.command(name="meus_matches", description="Lista seus matches do ciclo.")
-@app_commands.describe(cycle="Número do ciclo")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def meus_matches(interaction: discord.Interaction, cycle: int):
+@client.tree.command(name="meus_matches", description="Lista seus matches da season/ciclo.")
+@app_commands.describe(season="Season", cycle="Número do ciclo")
+@app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
+async def meus_matches(interaction: discord.Interaction, season: int, cycle: int):
     await interaction.response.defer(ephemeral=True)
 
     try:
         sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return await interaction.followup.send("❌ Não existe season ativa.", ephemeral=True)
 
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
@@ -3113,7 +3123,7 @@ async def meus_matches(interaction: discord.Interaction, cycle: int):
 
         items = []
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+            if safe_int(r.get("season_id", 0), 0) != season:
                 continue
             if safe_int(r.get("cycle", 0), 0) != cycle:
                 continue
@@ -3143,9 +3153,12 @@ async def meus_matches(interaction: discord.Interaction, cycle: int):
             )
 
         if not items:
-            return await interaction.followup.send("❌ Você não possui matches neste ciclo.", ephemeral=True)
+            return await interaction.followup.send(
+                f"❌ Você não possui matches na **Season {season} / Ciclo {cycle}**.",
+                ephemeral=True
+            )
 
-        msg = f"🎮 **Seus matches no Ciclo {cycle}**\n" + "\n".join(items)
+        msg = f"🎮 **Seus matches na Season {season} / Ciclo {cycle}**\n" + "\n".join(items)
         await send_followup_chunks(interaction, msg, ephemeral=True)
 
     except Exception as e:
