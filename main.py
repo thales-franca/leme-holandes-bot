@@ -1188,8 +1188,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
 # REVISÃO: otimização forte do autocomplete de match_id com cache derivado
-# em memória, redução de trabalho por tecla digitada e filtro mais rápido
-# para uso em celular e no Render.
+# em memória, redução de trabalho por tecla digitada, filtro mais rápido
+# para uso em celular e no Render, e blindagem para exigir no mínimo 2 caracteres.
 # =================================================
 
 # =========================
@@ -1393,6 +1393,14 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     - Se o usuário digitar manualmente o match_id, continua funcionando normalmente
     """
     try:
+        q = str(current or "").strip().lower()
+
+        # BLINDAGEM DE PERFORMANCE:
+        # evita busca ampla demais no primeiro autocomplete
+        # e reduz drasticamente o risco de timeout/Unknown interaction
+        if len(q) < 2:
+            return []
+
         sh = open_sheet()
         season_id = get_current_season_id(sh)
         if season_id <= 0:
@@ -1402,7 +1410,6 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         uid = str(interaction.user.id).strip()
-        q = str(current or "").strip().lower()
 
         cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
 
@@ -1448,7 +1455,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
 
         found: list[app_commands.Choice[str]] = []
         for item in cached_entries:
-            if q and q not in item["search"]:
+            if q not in item["search"]:
                 continue
 
             found.append(app_commands.Choice(name=item["label"], value=item["mid"]))
