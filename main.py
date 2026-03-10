@@ -1193,28 +1193,29 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =================================================
 
 # =========================
-# AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
+# CACHE DERIVADO — AUTOCOMPLETE MATCH_ID
 # =========================
-
-# Cache derivado específico para autocomplete de match_id
 _AC_MATCH_PENDING_CACHE: dict[str, dict] = {}
 _AC_MATCH_PENDING_CACHE_LOCK = threading.Lock()
+_AC_MATCH_PENDING_TTL_SECONDS = 25
 
 def _ac_match_pending_cache_key(season_id: int, uid: str, locked_cycles: set[int]) -> str:
     locked_txt = ",".join(str(x) for x in sorted(locked_cycles))
     return f"S{season_id}:U{uid}:L{locked_txt}"
 
-def _ac_match_pending_cache_get(season_id: int, uid: str, locked_cycles: set[int], ttl_seconds: int = 10):
+def _ac_match_pending_cache_get(season_id: int, uid: str, locked_cycles: set[int], ttl_seconds: int = _AC_MATCH_PENDING_TTL_SECONDS):
     key = _ac_match_pending_cache_key(season_id, uid, locked_cycles)
     now = _cache_now()
     with _AC_MATCH_PENDING_CACHE_LOCK:
         item = _AC_MATCH_PENDING_CACHE.get(key)
         if not item:
             return None
+
         ts = item.get("ts")
         if ts is None or (now - ts > ttl_seconds):
             _AC_MATCH_PENDING_CACHE.pop(key, None)
             return None
+
         return item.get("data")
 
 def _ac_match_pending_cache_set(season_id: int, uid: str, locked_cycles: set[int], data):
@@ -1232,7 +1233,51 @@ def _ac_match_pending_cache_set(season_id: int, uid: str, locked_cycles: set[int
         for k in expired:
             _AC_MATCH_PENDING_CACHE.pop(k, None)
 
+def _build_match_ac_entries_for_user(match_rows: list[dict], nick_map: dict[str, str], season_id: int, uid: str, locked_cycles: set[int]) -> list[dict]:
+    entries = []
 
+    for r in match_rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        cyc = safe_int(r.get("cycle", 0), 0)
+        if cyc not in locked_cycles:
+            continue
+
+        if not as_bool(r.get("active", "TRUE")):
+            continue
+
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
+        if uid not in (a, b):
+            continue
+
+        mid = str(r.get("match_id", "")).strip()
+        if not mid:
+            continue
+
+        a_name = nick_map.get(a, a)
+        b_name = nick_map.get(b, b)
+
+        status = str(r.get("confirmed_status", "")).strip().lower()
+        reported_by = str(r.get("reported_by_id", "")).strip()
+
+        visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
+        label = f"{a_name} vs {b_name} | {visual_status}"
+        search_blob = f"{mid} {a_name} {b_name} {visual_status}".lower()
+
+        entries.append({
+            "mid": mid,
+            "label": label[:100],
+            "search": search_blob,
+        })
+
+    return entries
+
+
+# =========================
+# AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
+# =========================
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
     Lista ciclos existentes na aba Cycles (season ativa),
@@ -1373,7 +1418,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         if not locked_cycles:
             return []
 
-        cached_entries = _ac_match_pending_cache_get(season_id, uid, locked_cycles, ttl_seconds=10)
+        cached_entries = _ac_match_pending_cache_get(season_id, uid, locked_cycles, ttl_seconds=_AC_MATCH_PENDING_TTL_SECONDS)
 
         if cached_entries is None:
             ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
@@ -1392,44 +1437,13 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
                 if pid:
                     nick_map[pid] = nick or pid
 
-            entries = []
-            for r in match_rows:
-                if safe_int(r.get("season_id", 0), 0) != season_id:
-                    continue
-
-                cyc = safe_int(r.get("cycle", 0), 0)
-                if cyc not in locked_cycles:
-                    continue
-
-                if not as_bool(r.get("active", "TRUE")):
-                    continue
-
-                a = str(r.get("player_a_id", "")).strip()
-                b = str(r.get("player_b_id", "")).strip()
-                if uid not in (a, b):
-                    continue
-
-                mid = str(r.get("match_id", "")).strip()
-                if not mid:
-                    continue
-
-                a_name = nick_map.get(a, a)
-                b_name = nick_map.get(b, b)
-
-                status = str(r.get("confirmed_status", "")).strip().lower()
-                reported_by = str(r.get("reported_by_id", "")).strip()
-
-                visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
-                label = f"{a_name} vs {b_name} | {visual_status}"
-                search_blob = f"{mid} {a_name} {b_name} {visual_status}".lower()
-
-                entries.append({
-                    "mid": mid,
-                    "label": label[:100],
-                    "search": search_blob,
-                })
-
-            cached_entries = entries
+            cached_entries = _build_match_ac_entries_for_user(
+                match_rows=match_rows,
+                nick_map=nick_map,
+                season_id=season_id,
+                uid=uid,
+                locked_cycles=locked_cycles,
+            )
             _ac_match_pending_cache_set(season_id, uid, locked_cycles, cached_entries)
 
         found: list[app_commands.Choice[str]] = []
