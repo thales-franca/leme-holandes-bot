@@ -5,6 +5,8 @@
 # keep-alive do Render, configurações de ambiente, helpers
 # de data/hora, helpers gerais e início do sistema de cache
 # do Google Sheets
+# REVISÃO: reforço da infraestrutura global de cache com TTL por
+# monotonic clock, chave mais robusta por worksheet e limpeza oportunista.
 # =================================================
 
 import os
@@ -178,30 +180,78 @@ def col_letter(ci_0: int) -> str:
 _SHEETS_CACHE: dict[str, dict] = {}
 _SHEETS_CACHE_LOCK = threading.Lock()
 
+def _cache_now() -> float:
+    # monotonic evita problemas se o relógio do sistema mudar
+    return time.monotonic()
+
 def _ws_cache_prefix(ws) -> str:
     # tenta pegar id real do spreadsheet; fallback para SHEET_ID
     try:
         sid = ws.spreadsheet.id  # gspread Worksheet
     except Exception:
         sid = SHEET_ID or "unknown_sheet"
-    return f"{sid}:{ws.title}:"
+
+    # tenta pegar id estável da worksheet; fallback para título
+    try:
+        wid = str(ws.id)
+    except Exception:
+        wid = ""
+
+    try:
+        title = str(ws.title)
+    except Exception:
+        title = "unknown_ws"
+
+    if wid:
+        return f"{sid}:{wid}:{title}:"
+    return f"{sid}:{title}:"
 
 def _cache_key(ws, kind: str) -> str:
     return _ws_cache_prefix(ws) + kind
 
 def cache_get(ws, kind: str, ttl_seconds: int):
     key = _cache_key(ws, kind)
-    now = time.time()
+    now = _cache_now()
     with _SHEETS_CACHE_LOCK:
         item = _SHEETS_CACHE.get(key)
-        if item and (now - item["ts"] <= ttl_seconds):
-            return item["data"]
+        if not item:
+            return None
+
+        ts = item.get("ts")
+        if ts is None:
+            _SHEETS_CACHE.pop(key, None)
+            return None
+
+        if now - ts <= ttl_seconds:
+            return item.get("data")
+
+        # limpeza oportunista de item expirado
+        _SHEETS_CACHE.pop(key, None)
     return None
 
 def cache_set(ws, kind: str, data):
     key = _cache_key(ws, kind)
+    now = _cache_now()
+    prefix = _ws_cache_prefix(ws)
+
     with _SHEETS_CACHE_LOCK:
-        _SHEETS_CACHE[key] = {"ts": time.time(), "data": data}
+        _SHEETS_CACHE[key] = {"ts": now, "data": data}
+
+        # limpeza oportunista simples dos expirados desta worksheet
+        expired_keys = []
+        for k, item in _SHEETS_CACHE.items():
+            if not k.startswith(prefix):
+                continue
+            ts = item.get("ts")
+            if ts is None:
+                expired_keys.append(k)
+                continue
+            # margem conservadora para remover lixo antigo sem interferir no TTL ativo
+            if now - ts > 120:
+                expired_keys.append(k)
+
+        for k in expired_keys:
+            _SHEETS_CACHE.pop(k, None)
 
 def cache_invalidate(ws, kind: str | None = None):
     """
@@ -230,12 +280,15 @@ def cache_invalidate(ws, kind: str | None = None):
 # criação e validação de abas, sistema de log administrativo no Discord, helpers de autorização
 # (owner, ADM, organizador, jogador), validação de URLs de decklist (Moxfield e LigaMagic) e
 # utilitários de parsing e validação de placar V-D-E.
+# REVISÃO: reforço dos helpers de cache, redução de leitura direta do cabeçalho
+# e manutenção da mesma lógica funcional do projeto.
 # =================================================
 
 def cached_get_all_values(ws, ttl_seconds: int = 10):
     cached = cache_get(ws, "all_values", ttl_seconds)
     if cached is not None:
         return cached
+
     data = ws.get_all_values()
     cache_set(ws, "all_values", data)
     return data
@@ -244,6 +297,7 @@ def cached_get_all_records(ws, ttl_seconds: int = 10):
     cached = cache_get(ws, "all_records", ttl_seconds)
     if cached is not None:
         return cached
+
     data = ws.get_all_records()
     cache_set(ws, "all_records", data)
     return data
@@ -270,7 +324,8 @@ def open_sheet():
     return gc.open_by_key(SHEET_ID)
 
 def ensure_sheet_columns(ws, required_cols: list[str]):
-    header = ws.row_values(1)
+    vals = cached_get_all_values(ws, ttl_seconds=10)
+    header = vals[0] if vals else []
     if not header:
         raise RuntimeError(f"Aba '{ws.title}' sem cabeçalho na linha 1.")
     idx = {name: i for i, name in enumerate(header)}  # 0-based
@@ -284,7 +339,8 @@ def ensure_worksheet(sh, title: str, header: list[str], rows: int = 2000, cols: 
         ws = sh.worksheet(title)
     except Exception:
         ws = sh.add_worksheet(title=title, rows=rows, cols=cols)
-    current = ws.row_values(1)
+
+    current = cached_get_all_values(ws, ttl_seconds=10)
     if not current:
         ws.append_row(header)
         cache_invalidate(ws)  # header criado agora, limpa cache dessa aba
@@ -440,6 +496,8 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 # RESUMO: Definição do schema das abas do Google Sheets, cabeçalhos e colunas obrigatórias,
 # garantia de criação das abas, helpers de season, leitura e atualização da season atual,
 # status de temporada e fechamento das demais seasons.
+# REVISÃO: adoção de cache nos helpers centrais de season e redução de escritas
+# isoladas com batch_update, mantendo a mesma lógica funcional.
 # =================================================
 
 # [BLOCO 2/8] — SCHEMA (ABAS) + SEASON STATE + FUNÇÕES DE SEASON/CICLO (REVISADO v2)
@@ -532,7 +590,7 @@ def ensure_all_sheets(sh):
 # Season helpers
 # =========================
 def _infer_open_season_id_from_seasons_ws(ws_seasons) -> int:
-    rows = ws_seasons.get_all_records()
+    rows = cached_get_all_records(ws_seasons, ttl_seconds=10)
     open_ids = []
     for r in rows:
         sid = safe_int(r.get("season_id", 0), 0)
@@ -560,7 +618,7 @@ def get_current_season_id(arg) -> int:
     sh = arg
     try:
         ws_state = sh.worksheet("SeasonState")
-        rows = ws_state.get_all_records()
+        rows = cached_get_all_records(ws_state, ttl_seconds=10)
         for r in rows:
             if str(r.get("key", "")).strip() == "current_season_id":
                 sid = safe_int(r.get("value", 0), 0)
@@ -579,7 +637,7 @@ def get_current_season_id(arg) -> int:
 
 def set_current_season_id(sh, season_id: int):
     ws = ensure_worksheet(sh, "SeasonState", SEASONSTATE_HEADER, rows=20, cols=10)
-    vals = ws.get_all_values()
+    vals = cached_get_all_values(ws, ttl_seconds=10)
     nowb = now_br_str()
 
     found = None
@@ -592,12 +650,22 @@ def set_current_season_id(sh, season_id: int):
     if found is None:
         ws.append_row(["current_season_id", str(season_id), nowb], value_input_option="USER_ENTERED")
     else:
-        ws.update([[str(season_id)]], range_name=f"B{found}")
-        ws.update([[nowb]], range_name=f"C{found}")
+        ws.batch_update([
+            {
+                "range": f"B{found}",
+                "values": [[str(season_id)]]
+            },
+            {
+                "range": f"C{found}",
+                "values": [[nowb]]
+            },
+        ])
+
+    cache_invalidate(ws)
 
 def season_exists(sh, season_id: int) -> bool:
     ws = sh.worksheet("Seasons")
-    rows = ws.get_all_records()
+    rows = cached_get_all_records(ws, ttl_seconds=10)
     for r in rows:
         if safe_int(r.get("season_id", 0), 0) == season_id:
             return True
@@ -605,7 +673,7 @@ def season_exists(sh, season_id: int) -> bool:
 
 def get_season_status(sh, season_id: int) -> str:
     ws = sh.worksheet("Seasons")
-    rows = ws.get_all_records()
+    rows = cached_get_all_records(ws, ttl_seconds=10)
     for r in rows:
         if safe_int(r.get("season_id", 0), 0) == season_id:
             return str(r.get("status", "")).strip().lower()
@@ -614,7 +682,7 @@ def get_season_status(sh, season_id: int) -> str:
 def set_season_status(sh, season_id: int, status: str, name: str | None = None):
     status = str(status).strip().lower()
     ws = sh.worksheet("Seasons")
-    data = ws.get_all_values()
+    data = cached_get_all_values(ws, ttl_seconds=10)
     nowb = now_br_str()
 
     found = None
@@ -629,28 +697,57 @@ def set_season_status(sh, season_id: int, status: str, name: str | None = None):
         nm = name or f"Temporada {season_id}"
         ws.append_row([str(season_id), status, nm, nowb, nowb], value_input_option="USER_ENTERED")
     else:
-        ws.update([[status]], range_name=f"B{found}")
+        updates = [
+            {
+                "range": f"B{found}",
+                "values": [[status]]
+            },
+            {
+                "range": f"E{found}",
+                "values": [[nowb]]
+            },
+        ]
         if name is not None:
-            ws.update([[name]], range_name=f"C{found}")
-        ws.update([[nowb]], range_name=f"E{found}")
+            updates.append({
+                "range": f"C{found}",
+                "values": [[name]]
+            })
+        ws.batch_update(updates)
+
+    cache_invalidate(ws)
 
 def close_all_other_seasons(sh, keep_open_id: int):
     ws = sh.worksheet("Seasons")
-    data = ws.get_all_values()
+    data = cached_get_all_values(ws, ttl_seconds=10)
     if len(data) <= 1:
         return 0
+
     nowb = now_br_str()
     changed = 0
+    updates = []
+
     for i in range(2, len(data) + 1):
         row = data[i - 1]
         sid = safe_int(row[0] if len(row) > 0 else 0, 0)
         if sid <= 0 or sid == keep_open_id:
             continue
+
         st = (row[1] if len(row) > 1 else "").strip().lower()
         if st != "closed":
-            ws.update([["closed"]], range_name=f"B{i}")
-            ws.update([[nowb]], range_name=f"E{i}")
+            updates.append({
+                "range": f"B{i}",
+                "values": [["closed"]]
+            })
+            updates.append({
+                "range": f"E{i}",
+                "values": [[nowb]]
+            })
             changed += 1
+
+    if updates:
+        ws.batch_update(updates)
+        cache_invalidate(ws)
+
     return changed
 
 # =================================================
@@ -664,13 +761,15 @@ def close_all_other_seasons(sh, keep_open_id: int):
 # RESUMO: Helpers de ciclos (busca, status, tempos, listagem e sugestões de ciclos),
 # helpers de jogadores (localização e mapa de nicknames) e helpers de decks por ciclo
 # incluindo localização de linha, criação garantida de registro e leitura dos campos.
+# REVISÃO: substituição de leituras diretas por cache, remoção de ws.find()
+# e melhor reaproveitamento de dados em memória.
 # =================================================
 
 # =========================
 # Cycle helpers (por season)
 # =========================
 def get_cycle_row(ws_cycles, season_id: int, cycle: int) -> int | None:
-    rows = ws_cycles.get_all_values()
+    rows = cached_get_all_values(ws_cycles, ttl_seconds=10)
     if len(rows) <= 1:
         return None
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
@@ -683,7 +782,7 @@ def get_cycle_row(ws_cycles, season_id: int, cycle: int) -> int | None:
     return None
 
 def get_cycle_fields(ws_cycles, season_id: int, cycle: int) -> dict:
-    rows = ws_cycles.get_all_values()
+    rows = cached_get_all_values(ws_cycles, ttl_seconds=10)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
     out = {"season_id": season_id, "cycle": cycle, "status": None, "start_at_br": "", "deadline_at_br": ""}
     for r_i in range(2, len(rows) + 1):
@@ -705,8 +804,17 @@ def set_cycle_status(ws_cycles, season_id: int, cycle: int, status: str):
     if rown is None:
         ws_cycles.append_row([str(season_id), str(cycle), status, "", "", nowb, nowb], value_input_option="USER_ENTERED")
     else:
-        ws_cycles.update([[status]], range_name=f"{col_letter(col['status'])}{rown}")
-        ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_cycles.batch_update([
+            {
+                "range": f"{col_letter(col['status'])}{rown}",
+                "values": [[status]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{rown}",
+                "values": [[nowb]]
+            },
+        ])
+    cache_invalidate(ws_cycles)
 
 def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, deadline_at_br: str):
     nowb = now_br_str()
@@ -715,13 +823,25 @@ def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, dea
     if rown is None:
         ws_cycles.append_row([str(season_id), str(cycle), "open", start_at_br, deadline_at_br, nowb, nowb], value_input_option="USER_ENTERED")
     else:
-        ws_cycles.update([[start_at_br]], range_name=f"{col_letter(col['start_at_br'])}{rown}")
-        ws_cycles.update([[deadline_at_br]], range_name=f"{col_letter(col['deadline_at_br'])}{rown}")
-        ws_cycles.update([[nowb]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_cycles.batch_update([
+            {
+                "range": f"{col_letter(col['start_at_br'])}{rown}",
+                "values": [[start_at_br]]
+            },
+            {
+                "range": f"{col_letter(col['deadline_at_br'])}{rown}",
+                "values": [[deadline_at_br]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{rown}",
+                "values": [[nowb]]
+            },
+        ])
+    cache_invalidate(ws_cycles)
 
 def list_cycles(ws_cycles, season_id: int) -> list[tuple[int, str]]:
     out = []
-    for r in ws_cycles.get_all_records():
+    for r in cached_get_all_records(ws_cycles, ttl_seconds=10):
         s = safe_int(r.get("season_id", 0), 0)
         if s != season_id:
             continue
@@ -748,14 +868,23 @@ def suggest_open_cycles(ws_cycles, season_id: int, limit: int = 25) -> list[int]
 # Players helpers
 # =========================
 def find_player_row(ws_players, discord_id: int):
-    try:
-        cell = ws_players.find(str(discord_id))
-        return cell.row
-    except Exception:
+    rows = cached_get_all_values(ws_players, ttl_seconds=10)
+    if len(rows) <= 1:
         return None
 
+    col = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+    did_col = col.get("discord_id", 0)
+    target = str(discord_id).strip()
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+        v = r[did_col] if did_col < len(r) else ""
+        if str(v).strip() == target:
+            return i
+    return None
+
 def get_player_nick_map(ws_players) -> dict[str, str]:
-    data = ws_players.get_all_records()
+    data = cached_get_all_records(ws_players, ttl_seconds=10)
     m = {}
     for r in data:
         pid = str(r.get("discord_id", "")).strip()
@@ -776,7 +905,7 @@ def get_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int | 
     """
     Localiza a linha (1-based) do registro do jogador na aba Decks para (season,cycle,player).
     """
-    data = ws_decks.get_all_values()
+    data = cached_get_all_values(ws_decks, ttl_seconds=10)
     if len(data) <= 1:
         return None
     col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
@@ -806,10 +935,11 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
         [str(season_id), str(cycle), str(player_id).strip(), "", "", nowb, nowb],
         value_input_option="USER_ENTERED"
     )
+    cache_invalidate(ws_decks)
 
     # linha criada é a última
     try:
-        return len(ws_decks.get_all_values())
+        return len(cached_get_all_values(ws_decks, ttl_seconds=5))
     except Exception:
         # fallback seguro
         return (get_deck_row(ws_decks, season_id, cycle, player_id) or 2)
@@ -818,7 +948,8 @@ def get_deck_fields(ws_decks, row: int) -> dict:
     """
     Lê e retorna os campos do Decks naquela linha (1-based).
     """
-    vals = ws_decks.row_values(row)
+    vals_all = cached_get_all_values(ws_decks, ttl_seconds=10)
+    vals = vals_all[row - 1][:] if 0 < row <= len(vals_all) else []
     while len(vals) < len(DECKS_HEADER):
         vals.append("")
     return {
@@ -847,6 +978,8 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # RESUMO: Cabeçalho do bloco, helpers de matches, geração de IDs, prazo de auto-confirmação,
 # round robin, varredura de auto-confirmação, heurística anti-repetição entre jogadores e
 # cálculo de prazo do ciclo com base no maior POD.
+# REVISÃO: substituição de leituras diretas por cache, redução de updates isolados
+# em auto-confirmação e melhor reaproveitamento de dados em memória.
 # =================================================
 
 def new_match_id(season_id: int, cycle: int, pod: str) -> str:
@@ -871,12 +1004,13 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
     """
     ws_matches = sh.worksheet("Matches")
     col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-    rows = ws_matches.get_all_values()
+    rows = cached_get_all_values(ws_matches, ttl_seconds=10)
     if len(rows) <= 1:
         return 0
 
     nowu = utc_now_dt()
     changed = 0
+    updates = []
 
     for rown in range(2, len(rows) + 1):
         r = rows[rown - 1]
@@ -904,10 +1038,25 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
             continue
 
         if ac <= nowu:
-            ws_matches.update([["confirmed"]], range_name=f"{col_letter(col['confirmed_status'])}{rown}")
-            ws_matches.update([["AUTO"]], range_name=f"{col_letter(col['confirmed_by_id'])}{rown}")
-            ws_matches.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+            updates.extend([
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
+                    "values": [["confirmed"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
+                    "values": [["AUTO"]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{rown}",
+                    "values": [[now_br_str()]]
+                },
+            ])
             changed += 1
+
+    if updates:
+        ws_matches.batch_update(updates)
+        cache_invalidate(ws_matches)
 
     return changed
 
@@ -920,7 +1069,7 @@ def get_past_confirmed_pairs(ws_matches) -> set[frozenset]:
     Cria um conjunto de pares (A,B) já enfrentados em matches CONFIRMED (qualquer season/cycle),
     exceto BYE e matches inativos.
     """
-    rows = ws_matches.get_all_records()
+    rows = cached_get_all_records(ws_matches, ttl_seconds=10)
     pairs: set[frozenset] = set()
     for r in rows:
         if not as_bool(r.get("active", "TRUE")):
@@ -990,7 +1139,7 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
     else:
         start_dt = None
 
-    rows = ws_pods.get_all_records()
+    rows = cached_get_all_records(ws_pods, ttl_seconds=10)
     pods = {}
     for r in rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -1038,6 +1187,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
+# REVISÃO: redução de releituras indiretas, uso direto dos dados já cacheados
+# e otimização do autocomplete mais sensível (/resultado e /rejeitar).
 # =================================================
 
 # =========================
@@ -1058,9 +1209,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         q = str(current or "").strip()
-        items = list_cycles(ws_cycles, season_id)
-        if not items:
-            return []
+        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
 
         def label_status(st: str) -> str:
             st = (st or "").strip().lower()
@@ -1073,13 +1222,26 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
             return st or "indefinido"
 
         out: list[app_commands.Choice[str]] = []
-        for c, st in items:
+        seen = set()
+
+        for r in rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+
+            c = safe_int(r.get("cycle", 0), 0)
+            if c <= 0 or c in seen:
+                continue
+
+            st = str(r.get("status", "")).strip().lower()
             c_str = str(c)
             if q and q not in c_str:
                 continue
-            lab = f"Ciclo {c} / {label_status(st)}"
-            out.append(app_commands.Choice(name=lab, value=c_str))
 
+            lab = f"Ciclo {c} / {label_status(st)}"
+            out.append(app_commands.Choice(name=lab[:100], value=c_str))
+            seen.add(c)
+
+        out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
         return []
@@ -1100,13 +1262,20 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         q = str(current or "").strip()
-        items = list_cycles(ws_cycles, season_id)
-        if not items:
-            return []
+        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
 
         out: list[app_commands.Choice[str]] = []
-        for c, st in items:
-            st_norm = str(st or "").strip().lower()
+        seen = set()
+
+        for r in rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+
+            c = safe_int(r.get("cycle", 0), 0)
+            if c <= 0 or c in seen:
+                continue
+
+            st_norm = str(r.get("status", "")).strip().lower()
             if st_norm != "open":
                 continue
 
@@ -1115,7 +1284,9 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
                 continue
 
             out.append(app_commands.Choice(name=f"Ciclo {c} / aberto", value=c_str))
+            seen.add(c)
 
+        out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
         return []
@@ -1147,20 +1318,33 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
 
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
-        nick_map = build_players_nick_map(ws_players)
+
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+        nick_map: dict[str, str] = {}
+        for r in player_rows:
+            pid = str(r.get("discord_id", "")).strip()
+            nick = str(r.get("nick", "")).strip()
+            if pid:
+                nick_map[pid] = nick or pid
 
         locked_cycles = set()
-        for c, st in list_cycles(ws_cycles, season_id):
-            if str(st or "").strip().lower() == "locked":
+        for r in cycle_rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            c = safe_int(r.get("cycle", 0), 0)
+            st = str(r.get("status", "")).strip().lower()
+            if c > 0 and st == "locked":
                 locked_cycles.add(c)
 
         if not locked_cycles:
             return []
 
-        rows = ws_matches.get_all_records()
         found: list[app_commands.Choice[str]] = []
 
-        for r in rows:
+        for r in match_rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
                 continue
             if safe_int(r.get("cycle", 0), 0) not in locked_cycles:
@@ -1244,6 +1428,8 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # leitura de jogadores e matches válidos, montagem de estatísticas, cálculo de MWP, GWP,
 # OMW e OGW com piso, ordenação do ranking, reconstrução da aba Standings do zero e retorno
 # das linhas finais do ranking recalculado.
+# REVISÃO: substituição de leituras diretas por cache, padronização de acesso às abas
+# e invalidação explícita de cache após reconstrução da aba Standings.
 # =================================================
 
 def recalculate_cycle(sh, season_id: int, cycle: int):
@@ -1270,7 +1456,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
     # Base de jogadores do ciclo — ranking inclui apenas inscritos no ciclo
     ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-    enr_rows = ws_enr.get_all_records()
+    enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
     all_player_ids = set()
     for r in enr_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -1301,7 +1487,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
     # Filtra matches válidos (season+cycle)
     ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-    matches_rows = ws_matches.get_all_records()
+    matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
     valid = []
     for r in matches_rows:
@@ -1426,7 +1612,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         "omw_percent","ogw_percent","rank_position","last_recalc_at"
     ]
 
-    existing = ws_standings.get_all_values()
+    existing = cached_get_all_values(ws_standings, ttl_seconds=10)
     kept = []
     if existing and len(existing) > 1:
         existing_header = existing[0]
@@ -1460,6 +1646,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     if values:
         ws_standings.append_rows(values, value_input_option="USER_ENTERED")
 
+    cache_invalidate(ws_standings)
     return out_rows
 
 # =========================================================
@@ -1477,6 +1664,8 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # RESUMO: Cabeçalho do bloco, import adicional de asyncio e tasks, definição do cliente
 # Discord, setup inicial do bot, configuração de onboarding, logs administrativos,
 # rotina automática de limpeza do canal de boas-vindas e preparação do before_loop.
+# REVISÃO: remoção de espera redundante no loop de limpeza e ajuste de comentário
+# para refletir o comportamento real configurado.
 # =================================================
 
 import asyncio
@@ -1554,7 +1743,7 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
 
 # =========================================================
 # Limpeza automática do canal de boas-vindas
-# - apaga TODAS as mensagens do canal a cada 10 minutos
+# - apaga TODAS as mensagens do canal a cada 60 minutos
 # - inclui mensagens do bot, owner e qualquer interação
 # - usa purge/bulk delete para mensagens recentes
 # - mensagens com mais de 14 dias são apagadas individualmente
@@ -1562,8 +1751,6 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
 @tasks.loop(minutes=60)
 async def cleanup_welcome_channel():
     try:
-        await client.wait_until_ready()
-
         if not WELCOME_CHANNEL_ID:
             return
 
@@ -1673,7 +1860,9 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 # SUB-BLOCO: B
 # RESUMO: Funções auxiliares para envio de mensagens longas no Discord,
 # upsert de jogadores no Google Sheets com blindagem contra erro 429,
-# catálogo oficial de comandos da liga e implementação do comando /comando.
+# catálogo oficial de comandos da liga e implementação dos comandos
+# /comando e /tutorial.
+# REVISÃO: inclusão do /tutorial e ajuste do catálogo/listagem por nível.
 # =================================================
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True, limit: int = 1900):
@@ -1761,6 +1950,7 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 COMMANDS_CATALOG = [
     # Jogador
     ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
+    ("jogador", "/tutorial", "Mostra um guia rápido de como usar o bot."),
     ("jogador", "/inscrever", "Se inscreve com season, ciclo, deck e decklist válidos."),
     ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
     ("jogador", "/pods_ver", "Mostra todos os PODs no ciclo atual + deck + decklist."),
@@ -1821,7 +2011,14 @@ async def comando(interaction: discord.Interaction):
         except Exception:
             real_cmds = set()
 
-        lines = [f"📌 **Seus comandos disponíveis ({user_level.upper()})**\n"]
+        titulo_nivel = {
+            "jogador": "JOGADOR",
+            "adm": "ADM",
+            "organizador": "ORGANIZADOR",
+            "owner": "OWNER",
+        }.get(user_level, user_level.upper())
+
+        lines = [f"📌 **Seus comandos disponíveis ({titulo_nivel})**\n"]
 
         for lvl, cmd, desc in COMMANDS_CATALOG:
             if not level_allows(user_level, lvl):
@@ -1838,6 +2035,66 @@ async def comando(interaction: discord.Interaction):
     except Exception as e:
         try:
             await interaction.followup.send(f"❌ Erro no /comando: {e}", ephemeral=True)
+        except Exception:
+            pass
+
+
+# =========================================================
+# /tutorial
+# =========================================================
+@client.tree.command(name="tutorial", description="Mostra um tutorial rápido de como usar o bot.")
+async def tutorial(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
+    try:
+        lines = [
+            "📘 **Tutorial rápido do jogador**",
+            "",
+            "**1. Faça seu cadastro**",
+            "• Entre pelo onboarding do servidor e confirme seus dados.",
+            "",
+            "**2. Veja seus comandos**",
+            "• Use **/comando** para ver o que está disponível para você.",
+            "",
+            "**3. Inscreva-se no ciclo**",
+            "• Use **/inscrever** informando a season, o ciclo, o nome do deck e a decklist.",
+            "",
+            "**4. Consulte os PODs**",
+            "• Use **/pods_ver** para ver os grupos do ciclo.",
+            "",
+            "**5. Veja seus matches**",
+            "• Use **/meus_matches** para consultar suas partidas.",
+            "",
+            "**6. Envie seu resultado**",
+            "• Use **/resultado** no formato **V-D-E**. Exemplo: **2-1-0**.",
+            "",
+            "**7. Confirmação do oponente**",
+            "• O oponente pode confirmar ou rejeitar o resultado.",
+            "• Se não houver rejeição em até **48h**, o sistema pode auto-confirmar.",
+            "",
+            "**8. Acompanhe o campeonato**",
+            "• Use **/ranking** para ver o ranking do ciclo.",
+            "• Use **/ranking_geral** para ver o ranking geral da season.",
+            "• Use **/prazo** para consultar o prazo oficial do ciclo.",
+            "",
+            "**Comandos mais usados na prática**",
+            "• **/comando**",
+            "• **/inscrever**",
+            "• **/pods_ver**",
+            "• **/meus_matches**",
+            "• **/resultado**",
+            "• **/ranking**",
+            "• **/prazo**",
+        ]
+
+        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True, limit=1500)
+
+    except Exception as e:
+        try:
+            await interaction.followup.send(f"❌ Erro no /tutorial: {e}", ephemeral=True)
         except Exception:
             pass
 
@@ -1865,6 +2122,8 @@ async def meuid(interaction: discord.Interaction):
 # com botões (start, confirmar, participar/assistir), aplicação do cargo
 # Jogador, evento on_member_join para postagem automática do onboarding
 # e comando administrativo /onboarding para repostar o fluxo.
+# REVISÃO: blindagem do fluxo de confirmação/rejeição por botão em DM
+# para evitar "command error" / timeout de interação.
 # =================================================
 
 # =========================================================
@@ -2030,9 +2289,15 @@ class ResultConfirmView(discord.ui.View):
     @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success, custom_id="lhb_result_confirm")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            # responde imediatamente para evitar timeout/"interaction failed"
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+
             message = interaction.message
             if not message or not message.embeds:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Não consegui identificar o resultado para confirmação.",
                     ephemeral=True
                 )
@@ -2045,7 +2310,7 @@ class ResultConfirmView(discord.ui.View):
                     match_id = footer.split(":", 1)[1].strip()
 
             if not match_id:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Match não identificado nesta mensagem.",
                     ephemeral=True
                 )
@@ -2066,7 +2331,7 @@ class ResultConfirmView(discord.ui.View):
                     break
 
             if not found or row_data is None:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Match não encontrado.",
                     ephemeral=True
                 )
@@ -2080,27 +2345,27 @@ class ResultConfirmView(discord.ui.View):
             uid = str(interaction.user.id).strip()
 
             if uid not in (a, b):
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Você não participa deste match.",
                     ephemeral=True
                 )
 
             reported_by = str(getc("reported_by_id")).strip()
             if not reported_by:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Este match não possui resultado pendente.",
                     ephemeral=True
                 )
 
             if uid == reported_by:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Quem reportou não pode confirmar o próprio resultado.",
                     ephemeral=True
                 )
 
             status = str(getc("confirmed_status")).strip().lower()
             if status != "pending":
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Este match não está pendente.",
                     ephemeral=True
                 )
@@ -2125,7 +2390,7 @@ class ResultConfirmView(discord.ui.View):
                 pass
 
             try:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "✅ Resultado confirmado com sucesso.",
                     ephemeral=True
                 )
@@ -2134,16 +2399,22 @@ class ResultConfirmView(discord.ui.View):
 
         except Exception as e:
             try:
-                await interaction.response.send_message(f"❌ Erro ao confirmar: {e}", ephemeral=True)
+                await interaction.followup.send(f"❌ Erro ao confirmar: {e}", ephemeral=True)
             except Exception:
                 pass
 
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="lhb_result_reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            # responde imediatamente para evitar timeout/"interaction failed"
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+
             message = interaction.message
             if not message or not message.embeds:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Não consegui identificar o resultado para rejeição.",
                     ephemeral=True
                 )
@@ -2156,7 +2427,7 @@ class ResultConfirmView(discord.ui.View):
                     match_id = footer.split(":", 1)[1].strip()
 
             if not match_id:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Match não identificado nesta mensagem.",
                     ephemeral=True
                 )
@@ -2177,7 +2448,7 @@ class ResultConfirmView(discord.ui.View):
                     break
 
             if not found or row_data is None:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Match não encontrado.",
                     ephemeral=True
                 )
@@ -2191,27 +2462,27 @@ class ResultConfirmView(discord.ui.View):
             uid = str(interaction.user.id).strip()
 
             if uid not in (a, b):
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Você não participa deste match.",
                     ephemeral=True
                 )
 
             reported_by = str(getc("reported_by_id")).strip()
             if not reported_by:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Este match não possui resultado pendente.",
                     ephemeral=True
                 )
 
             if uid == reported_by:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Quem reportou não pode rejeitar o próprio resultado.",
                     ephemeral=True
                 )
 
             status = str(getc("confirmed_status")).strip().lower()
             if status != "pending":
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Este match não está pendente.",
                     ephemeral=True
                 )
@@ -2229,7 +2500,7 @@ class ResultConfirmView(discord.ui.View):
                 pass
 
             try:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "⚠️ Resultado rejeitado. O match precisa ser reportado novamente.",
                     ephemeral=True
                 )
@@ -2238,7 +2509,7 @@ class ResultConfirmView(discord.ui.View):
 
         except Exception as e:
             try:
-                await interaction.response.send_message(f"❌ Erro ao rejeitar: {e}", ephemeral=True)
+                await interaction.followup.send(f"❌ Erro ao rejeitar: {e}", ephemeral=True)
             except Exception:
                 pass
 
@@ -2315,6 +2586,8 @@ async def onboarding(interaction: discord.Interaction):
 # RESUMO: Cabeçalho do bloco, regras implementadas, helpers para verificar se o jogador
 # está ativo na season ou no ciclo, helper para garantir linha na aba Decks, helpers
 # de autocomplete para /inscrever e comando /inscrever com season, ciclo, deck e decklist.
+# REVISÃO: redução de leituras diretas no Sheets, reaproveitamento de cache
+# e autocomplete de ciclo focado apenas em ciclos abertos.
 # =================================================
 
 # =========================================================
@@ -2417,6 +2690,30 @@ def get_player_row_by_discord_id(ws_players, discord_id: str) -> int | None:
             return i
     return None
 
+def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
+    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+    did = str(discord_id).strip()
+
+    for r in rows:
+        if str(r.get("discord_id", "")).strip() == did:
+            return r
+    return None
+
+def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str) -> dict | None:
+    rows = cached_get_all_records(ws_decks, ttl_seconds=10)
+    pid = str(player_id).strip()
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        if safe_int(r.get("cycle", 0), 0) != cycle:
+            continue
+        if str(r.get("player_id", "")).strip() != pid:
+            continue
+        return r
+
+    return None
+
 async def ac_inscrever_season(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
@@ -2475,6 +2772,9 @@ async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
                 continue
 
             st = str(r.get("status", "")).strip().lower() or "indefinido"
+            if st != "open":
+                continue
+
             label = f"Ciclo {cyc} / {st}"
 
             if q and q not in label.lower() and q not in str(cyc):
@@ -2529,11 +2829,8 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
                 ephemeral=True
             )
 
-        player_fields = ws_players.row_values(player_row)
-        while len(player_fields) < len(PLAYERS_HEADER):
-            player_fields.append("")
-
-        nick_atual = str(player_fields[PLAYERS_HEADER.index("nick")]).strip()
+        player_record = get_player_record_by_discord_id(ws_players, pid) or {}
+        nick_atual = str(player_record.get("nick", "")).strip()
         if not nick_atual:
             return await interaction.followup.send(
                 "❌ Seu nick não está cadastrado corretamente. Entre em contato com um ADM.",
@@ -2571,10 +2868,9 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
                 ephemeral=True
             )
 
-        existing_deck_row = get_deck_row(ws_decks, season, cycle, pid)
-        if existing_deck_row is not None:
-            fields = get_deck_fields(ws_decks, existing_deck_row)
-            if fields.get("deck") or fields.get("decklist_url"):
+        existing_deck = get_deck_record_by_keys(ws_decks, season, cycle, pid)
+        if existing_deck is not None:
+            if str(existing_deck.get("deck", "")).strip() or str(existing_deck.get("decklist_url", "")).strip():
                 return await interaction.followup.send(
                     "❌ Já existe informação gravada para sua inscrição neste ciclo. Entre em contato com um ADM.",
                     ephemeral=True
@@ -2625,6 +2921,8 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # seleção de jogador por nickname do banco Players, validação de URL de
 # decklist, atualização das abas no Google Sheets e invalidação de cache
 # após escrita.
+# REVISÃO: redução de updates isolados, otimização leve na resolução de jogador
+# e alinhamento com o restante da estratégia de cache/performance.
 # =================================================
 
 # =========================================================
@@ -2660,8 +2958,16 @@ async def drop(interaction: discord.Interaction, cycle: int):
             ):
                 rown = idx + 1
 
-                ws_enr.update([["dropped"]], range_name=f"{col_letter(col['status'])}{rown}")
-                ws_enr.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+                ws_enr.batch_update([
+                    {
+                        "range": f"{col_letter(col['status'])}{rown}",
+                        "values": [["dropped"]]
+                    },
+                    {
+                        "range": f"{col_letter(col['updated_at'])}{rown}",
+                        "values": [[now_br_str()]]
+                    },
+                ])
                 cache_invalidate(ws_enr)
 
                 return await interaction.followup.send("✅ Você saiu do ciclo.", ephemeral=True)
@@ -2721,6 +3027,7 @@ def resolve_player_id_from_value(ws_players, jogador: str) -> str:
     if not raw:
         return ""
 
+    raw_norm = raw.lower()
     rows = cached_get_all_records(ws_players, ttl_seconds=10)
 
     for r in rows:
@@ -2728,11 +3035,8 @@ def resolve_player_id_from_value(ws_players, jogador: str) -> str:
         if pid == raw:
             return pid
 
-    raw_norm = raw.lower()
-    for r in rows:
-        pid = str(r.get("discord_id", "")).strip()
         nick = str(r.get("nick", "")).strip()
-        if nick.lower() == raw_norm:
+        if nick and nick.lower() == raw_norm:
             return pid
 
     return ""
@@ -2784,8 +3088,16 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
         if not nome or len(nome) > 80:
             return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
 
-        ws_decks.update([[nome]], range_name=f"{col_letter(col['deck'])}{rown}")
-        ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_decks.batch_update([
+            {
+                "range": f"{col_letter(col['deck'])}{rown}",
+                "values": [[nome]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{rown}",
+                "values": [[now_br_str()]]
+            },
+        ])
         cache_invalidate(ws_decks)
 
         nick = resolve_player_nick(ws_players, pid)
@@ -2841,8 +3153,16 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        ws_decks.update([[val]], range_name=f"{col_letter(col['decklist_url'])}{rown}")
-        ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+        ws_decks.batch_update([
+            {
+                "range": f"{col_letter(col['decklist_url'])}{rown}",
+                "values": [[val]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{rown}",
+                "values": [[now_br_str()]]
+            },
+        ])
         cache_invalidate(ws_decks)
 
         nick = resolve_player_nick(ws_players, pid)
@@ -2867,6 +3187,8 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 # RESUMO: Cabeçalho do bloco, constante de auto-confirmação, helpers de visualização,
 # parser de placar V-D-E, autocomplete de /pods_ver e comandos /pods_ver e /meus_matches
 # para visualização de PODs e matches do jogador.
+# REVISÃO: redução de leituras indiretas no Sheets e melhor aproveitamento
+# dos dados já carregados em memória para Players/Decks/Matches.
 # =================================================
 
 # =========================================================
@@ -2891,6 +3213,15 @@ def _match_status_label(status: str) -> str:
     if st == "rejected":
         return "rejeitado"
     return "aberto"
+
+def _build_nick_map_from_records(rows: list[dict]) -> dict[str, str]:
+    m: dict[str, str] = {}
+    for r in rows:
+        pid = str(r.get("discord_id", "")).strip()
+        nick = str(r.get("nick", "")).strip()
+        if pid:
+            m[pid] = nick or pid
+    return m
 
 
 # =========================================================
@@ -3016,8 +3347,10 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
         ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
         rows = cached_get_all_records(ws_pods, ttl_seconds=10)
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
         deck_rows = cached_get_all_records(ws_decks, ttl_seconds=10)
-        nick_map = build_players_nick_map(ws_players)
+
+        nick_map = _build_nick_map_from_records(player_rows)
 
         deck_map: dict[tuple[int, int, str], dict[str, str]] = {}
         for r in deck_rows:
@@ -3116,10 +3449,12 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
 
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-        nick_map = build_players_nick_map(ws_players)
-        uid = str(interaction.user.id)
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        nick_map = _build_nick_map_from_records(player_rows)
+        uid = str(interaction.user.id).strip()
 
         items = []
         for r in rows:
@@ -3176,6 +3511,8 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
 # Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
 # com botões de confirmar/rejeitar e invalidação de cache.
+# REVISÃO: redução de escritas isoladas no Sheets com batch_update, padronização
+# de timestamp UTC e manutenção da mesma lógica funcional.
 # =================================================
 
 # =========================================================
@@ -3204,7 +3541,7 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-        pid = str(interaction.user.id)
+        pid = str(interaction.user.id).strip()
 
         for idx in range(1, len(rows)):
             r = rows[idx]
@@ -3230,28 +3567,59 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
             rown = idx + 1
 
             if pid == player_a:
-                ws_matches.update([[v]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
-                ws_matches.update([[d]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
+                a_val = str(v)
+                b_val = str(d)
                 opponent_id = player_b
                 my_wins = v
                 opp_wins = d
             else:
-                ws_matches.update([[d]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
-                ws_matches.update([[v]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
+                a_val = str(d)
+                b_val = str(v)
                 opponent_id = player_a
                 my_wins = v
                 opp_wins = d
 
-            ws_matches.update([[e]], range_name=f"{col_letter(col['draw_games'])}{rown}")
-            ws_matches.update([["normal"]], range_name=f"{col_letter(col['result_type'])}{rown}")
-            ws_matches.update([["pending"]], range_name=f"{col_letter(col['confirmed_status'])}{rown}")
-            ws_matches.update([[pid]], range_name=f"{col_letter(col['reported_by_id'])}{rown}")
-            ws_matches.update([[""]], range_name=f"{col_letter(col['confirmed_by_id'])}{rown}")
+            auto_confirm = auto_confirm_deadline_iso(utc_now_dt())
+            updated_at = now_iso_utc()
 
-            auto_confirm = (datetime.utcnow() + timedelta(hours=AUTO_CONFIRM_HOURS)).isoformat()
-            ws_matches.update([[auto_confirm]], range_name=f"{col_letter(col['auto_confirm_at'])}{rown}")
-            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
-
+            ws_matches.batch_update([
+                {
+                    "range": f"{col_letter(col['a_games_won'])}{rown}",
+                    "values": [[a_val]]
+                },
+                {
+                    "range": f"{col_letter(col['b_games_won'])}{rown}",
+                    "values": [[b_val]]
+                },
+                {
+                    "range": f"{col_letter(col['draw_games'])}{rown}",
+                    "values": [[str(e)]]
+                },
+                {
+                    "range": f"{col_letter(col['result_type'])}{rown}",
+                    "values": [["normal"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
+                    "values": [["pending"]]
+                },
+                {
+                    "range": f"{col_letter(col['reported_by_id'])}{rown}",
+                    "values": [[pid]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
+                    "values": [[""]]
+                },
+                {
+                    "range": f"{col_letter(col['auto_confirm_at'])}{rown}",
+                    "values": [[auto_confirm]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{rown}",
+                    "values": [[updated_at]]
+                },
+            ])
             cache_invalidate(ws_matches)
 
             dm_status = ""
@@ -3312,7 +3680,7 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-        pid = str(interaction.user.id)
+        pid = str(interaction.user.id).strip()
 
         for idx in range(1, len(rows)):
             r = rows[idx]
@@ -3339,10 +3707,22 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
                 return await interaction.followup.send("❌ Este match não está pendente.", ephemeral=True)
 
             rown = idx + 1
+            updated_at = now_iso_utc()
 
-            ws_matches.update([["rejected"]], range_name=f"{col_letter(col['confirmed_status'])}{rown}")
-            ws_matches.update([[pid]], range_name=f"{col_letter(col['confirmed_by_id'])}{rown}")
-            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+            ws_matches.batch_update([
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
+                    "values": [["rejected"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
+                    "values": [[pid]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{rown}",
+                    "values": [[updated_at]]
+                },
+            ])
 
             cache_invalidate(ws_matches)
 
@@ -3374,6 +3754,8 @@ async def rejeitar(interaction: discord.Interaction, match_id: str):
 # SUB-BLOCO: A/7
 # RESUMO: Cabeçalho do bloco, helper para exigir season ativa, helpers de standings/ranking
 # e comandos administrativos iniciais: /forcesync, /ciclo_abrir, /ciclo_fechar e /ciclo_encerrar.
+# REVISÃO: remoção de invalidação redundante de cache em Cycles e ajuste leve de TTL
+# para reduzir pressão no Google Sheets, mantendo a mesma lógica funcional.
 # =================================================
 
 # =========================================================
@@ -3422,10 +3804,10 @@ def _format_standings_text(rows: list[dict], nick_map: dict[str, str], season_id
     return "\n".join(lines)
 
 def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -> bool:
-    for r in cached_get_all_records(ws_pods, ttl_seconds=5):
+    for r in cached_get_all_records(ws_pods, ttl_seconds=10):
         if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
             return True
-    for r in cached_get_all_records(ws_matches, ttl_seconds=5):
+    for r in cached_get_all_records(ws_matches, ttl_seconds=10):
         if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
             return True
     return False
@@ -3478,7 +3860,6 @@ async def ciclo_abrir(interaction: discord.Interaction, cycle: int):
 
         ws_cycles = sh.worksheet("Cycles")
         set_cycle_status(ws_cycles, season_id, cycle, "open")
-        cache_invalidate(ws_cycles)
 
         await interaction.followup.send(f"✅ Ciclo **{cycle}** aberto para inscrições.", ephemeral=True)
         await log_admin(interaction, f"ciclo_abrir S{season_id} C{cycle}")
@@ -3509,7 +3890,6 @@ async def ciclo_fechar(interaction: discord.Interaction, cycle: int):
             return await interaction.followup.send(f"❌ O ciclo {cycle} não existe.", ephemeral=True)
 
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
-        cache_invalidate(ws_cycles)
 
         await interaction.followup.send(f"✅ Inscrições do ciclo **{cycle}** fechadas.", ephemeral=True)
         await log_admin(interaction, f"ciclo_fechar S{season_id} C{cycle}")
@@ -3539,7 +3919,6 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
             return await interaction.followup.send(f"❌ O ciclo {cycle} não existe.", ephemeral=True)
 
         set_cycle_status(ws_cycles, season_id, cycle, "completed")
-        cache_invalidate(ws_cycles)
 
         await interaction.followup.send(f"✅ Ciclo **{cycle}** encerrado.", ephemeral=True)
         await log_admin(interaction, f"ciclo_encerrar S{season_id} C{cycle}")
@@ -3557,6 +3936,8 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 # SUB-BLOCO: B/7
 # RESUMO: Comandos relacionados a prazo, pendências e ranking do ciclo, incluindo
 # /prazo, /deadline, /recalcular, /ranking e /standings_publicar.
+# REVISÃO: melhor aproveitamento de cache, redução de releitura indireta de Players
+# e pequeno ajuste de TTL para diminuir pressão no Google Sheets.
 # =================================================
 
 # =========================================================
@@ -3624,7 +4005,7 @@ async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12
         nowu = utc_now_dt()
         limit = nowu + timedelta(hours=max(1, min(horas, 48)))
 
-        rows = cached_get_all_records(ws, ttl_seconds=5)
+        rows = cached_get_all_records(ws, ttl_seconds=10)
         items = []
 
         for r in rows:
@@ -3706,7 +4087,9 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        nick_map = build_players_nick_map(ws_players)
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        nick_map = _build_nick_map_from_records(player_rows)
+
         text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
         await send_followup_chunks(interaction, text, ephemeral=False)
 
@@ -3737,7 +4120,9 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
         if not rows:
             return await interaction.followup.send("⚠️ Não há standings para este ciclo ainda.", ephemeral=True)
 
-        nick_map = build_players_nick_map(ws_players)
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        nick_map = _build_nick_map_from_records(player_rows)
+
         text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
 
         target_channel = None
@@ -3772,6 +4157,8 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 # SUB-BLOCO: C
 # RESUMO: Comandos administrativos de encerramento de resultados e gestão de matches:
 # /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo e /ranking_geral.
+# REVISÃO: redução de escritas isoladas no Sheets, melhor aproveitamento dos dados
+# já carregados e eliminação de releituras desnecessárias da aba Cycles/Players.
 # =================================================
 
 # =========================================================
@@ -3804,7 +4191,7 @@ async def final(interaction: discord.Interaction, cycle: int):
             return await interaction.followup.send("❌ Deadline ainda não chegou.", ephemeral=True)
 
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        rows = cached_get_all_values(ws_matches, ttl_seconds=5)
+        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
         changed = 0
         for rown in range(2, len(rows) + 1):
@@ -3823,13 +4210,36 @@ async def final(interaction: discord.Interaction, cycle: int):
             if not as_bool(getc("active") or "TRUE"):
                 continue
 
-            ws_matches.update([["0"]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
-            ws_matches.update([["0"]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
-            ws_matches.update([["3"]], range_name=f"{col_letter(col['draw_games'])}{rown}")
-            ws_matches.update([["intentional_draw"]], range_name=f"{col_letter(col['result_type'])}{rown}")
-            ws_matches.update([["confirmed"]], range_name=f"{col_letter(col['confirmed_status'])}{rown}")
-            ws_matches.update([["AUTO_FINAL"]], range_name=f"{col_letter(col['confirmed_by_id'])}{rown}")
-            ws_matches.update([[now_br_str()]], range_name=f"{col_letter(col['updated_at'])}{rown}")
+            ws_matches.batch_update([
+                {
+                    "range": f"{col_letter(col['a_games_won'])}{rown}",
+                    "values": [["0"]]
+                },
+                {
+                    "range": f"{col_letter(col['b_games_won'])}{rown}",
+                    "values": [["0"]]
+                },
+                {
+                    "range": f"{col_letter(col['draw_games'])}{rown}",
+                    "values": [["3"]]
+                },
+                {
+                    "range": f"{col_letter(col['result_type'])}{rown}",
+                    "values": [["intentional_draw"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
+                    "values": [["confirmed"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
+                    "values": [["AUTO_FINAL"]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{rown}",
+                    "values": [[now_br_str()]]
+                },
+            ])
             changed += 1
 
         if changed:
@@ -3879,13 +4289,36 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         if not found:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-        ws_matches.update([[str(v)]], range_name=f"{col_letter(col['a_games_won'])}{found}")
-        ws_matches.update([[str(d)]], range_name=f"{col_letter(col['b_games_won'])}{found}")
-        ws_matches.update([[str(e)]], range_name=f"{col_letter(col['draw_games'])}{found}")
-        ws_matches.update([["normal"]], range_name=f"{col_letter(col['result_type'])}{found}")
-        ws_matches.update([["confirmed"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
-        ws_matches.update([[str(interaction.user.id)]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
-        ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+        ws_matches.batch_update([
+            {
+                "range": f"{col_letter(col['a_games_won'])}{found}",
+                "values": [[str(v)]]
+            },
+            {
+                "range": f"{col_letter(col['b_games_won'])}{found}",
+                "values": [[str(d)]]
+            },
+            {
+                "range": f"{col_letter(col['draw_games'])}{found}",
+                "values": [[str(e)]]
+            },
+            {
+                "range": f"{col_letter(col['result_type'])}{found}",
+                "values": [["normal"]]
+            },
+            {
+                "range": f"{col_letter(col['confirmed_status'])}{found}",
+                "values": [["confirmed"]]
+            },
+            {
+                "range": f"{col_letter(col['confirmed_by_id'])}{found}",
+                "values": [[str(interaction.user.id)]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{found}",
+                "values": [[now_iso_utc()]]
+            },
+        ])
         cache_invalidate(ws_matches)
 
         await interaction.followup.send(f"✅ Resultado editado e confirmado: **{placar}**", ephemeral=True)
@@ -3923,15 +4356,44 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
         if not found:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-        ws_matches.update([["0"]], range_name=f"{col_letter(col['a_games_won'])}{found}")
-        ws_matches.update([["0"]], range_name=f"{col_letter(col['b_games_won'])}{found}")
-        ws_matches.update([["0"]], range_name=f"{col_letter(col['draw_games'])}{found}")
-        ws_matches.update([["normal"]], range_name=f"{col_letter(col['result_type'])}{found}")
-        ws_matches.update([["open"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
-        ws_matches.update([[""]], range_name=f"{col_letter(col['reported_by_id'])}{found}")
-        ws_matches.update([[""]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
-        ws_matches.update([[""]], range_name=f"{col_letter(col['auto_confirm_at'])}{found}")
-        ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+        ws_matches.batch_update([
+            {
+                "range": f"{col_letter(col['a_games_won'])}{found}",
+                "values": [["0"]]
+            },
+            {
+                "range": f"{col_letter(col['b_games_won'])}{found}",
+                "values": [["0"]]
+            },
+            {
+                "range": f"{col_letter(col['draw_games'])}{found}",
+                "values": [["0"]]
+            },
+            {
+                "range": f"{col_letter(col['result_type'])}{found}",
+                "values": [["normal"]]
+            },
+            {
+                "range": f"{col_letter(col['confirmed_status'])}{found}",
+                "values": [["open"]]
+            },
+            {
+                "range": f"{col_letter(col['reported_by_id'])}{found}",
+                "values": [[""]]
+            },
+            {
+                "range": f"{col_letter(col['confirmed_by_id'])}{found}",
+                "values": [[""]]
+            },
+            {
+                "range": f"{col_letter(col['auto_confirm_at'])}{found}",
+                "values": [[""]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{found}",
+                "values": [[now_iso_utc()]]
+            },
+        ])
         cache_invalidate(ws_matches)
 
         await interaction.followup.send("✅ Resultado cancelado. Match reaberto.", ephemeral=True)
@@ -3960,9 +4422,22 @@ async def status_ciclo(interaction: discord.Interaction):
         if not items:
             return await interaction.followup.send("⚠️ Não há ciclos cadastrados nesta season.", ephemeral=True)
 
+        cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        cycle_fields_map: dict[int, dict] = {}
+        for r in cycle_rows:
+            if safe_int(r.get("season_id", 0), 0) != season_id:
+                continue
+            cyc = safe_int(r.get("cycle", 0), 0)
+            if cyc <= 0:
+                continue
+            cycle_fields_map[cyc] = {
+                "start_at_br": str(r.get("start_at_br", "")).strip(),
+                "deadline_at_br": str(r.get("deadline_at_br", "")).strip(),
+            }
+
         lines = [f"📘 **Status dos ciclos** | Season {season_id}"]
         for c, st in items:
-            cf = get_cycle_fields(ws_cycles, season_id, c)
+            cf = cycle_fields_map.get(c, {})
             lines.append(
                 f"• Ciclo {c} | status: **{st}** | "
                 f"início: `{cf.get('start_at_br', '') or '-'}` | "
@@ -4088,7 +4563,8 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append("--- | ------ | --- | --- | --- | --- | --- | ---")
 
         ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-        nick_map = build_players_nick_map(ws_players)
+        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        nick_map = _build_nick_map_from_records(player_rows)
 
         for i, r in enumerate(table[:top], 1):
             out.append(
@@ -4112,6 +4588,8 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 # RESUMO: Comandos administrativos de temporada e cadastro manual de jogadores.
 # Ajustado para permitir uso de /cadastrar_player por ADM, Organizador e Owner.
 # Nenhuma outra lógica foi alterada.
+# REVISÃO: adoção de cache em leitura de Seasons e redução de updates isolados
+# no bloco Players do /cadastrar_player.
 # =================================================
 
 # =========================================================
@@ -4119,7 +4597,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 # =========================================================
 def _next_season_id(sh) -> int:
     ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-    rows = ws.get_all_records()
+    rows = cached_get_all_records(ws, ttl_seconds=10)
     mx = 0
     for r in rows:
         mx = max(mx, safe_int(r.get("season_id", 0), 0))
@@ -4312,10 +4790,24 @@ async def cadastrar_player(
                 break
 
         if found_row:
-            ws_players.update([[raw]], range_name=f"{col_letter(col_players['nick'])}{found_row}")
-            ws_players.update([[raw]], range_name=f"{col_letter(col_players['name'])}{found_row}")
-            ws_players.update([["active"]], range_name=f"{col_letter(col_players['status'])}{found_row}")
-            ws_players.update([[nowc]], range_name=f"{col_letter(col_players['updated_at'])}{found_row}")
+            ws_players.batch_update([
+                {
+                    "range": f"{col_letter(col_players['nick'])}{found_row}",
+                    "values": [[raw]]
+                },
+                {
+                    "range": f"{col_letter(col_players['name'])}{found_row}",
+                    "values": [[raw]]
+                },
+                {
+                    "range": f"{col_letter(col_players['status'])}{found_row}",
+                    "values": [["active"]]
+                },
+                {
+                    "range": f"{col_letter(col_players['updated_at'])}{found_row}",
+                    "values": [[nowc]]
+                },
+            ])
         else:
             row = [""] * len(PLAYERS_HEADER)
             row[col_players["discord_id"]] = did
@@ -4404,6 +4896,8 @@ async def cadastrar_player(
 # RESUMO: Finalização do comando /cadastrar_player (Enrollments e Decks)
 # e início das regras do sistema de geração de pods e layout de pods
 # utilizadas posteriormente pelo comando /start_cycle.
+# REVISÃO: redução de updates isolados no trecho final de Decks do
+# /cadastrar_player, mantendo a mesma lógica funcional.
 # =================================================
 
         # =========================
@@ -4453,9 +4947,20 @@ async def cadastrar_player(
         if not ok:
             return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
 
-        ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
-        ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
-        ws_decks.update([[nowc]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
+        ws_decks.batch_update([
+            {
+                "range": f"{col_letter(col_deck['deck'])}{rown}",
+                "values": [[nm]]
+            },
+            {
+                "range": f"{col_letter(col_deck['decklist_url'])}{rown}",
+                "values": [[val]]
+            },
+            {
+                "range": f"{col_letter(col_deck['updated_at'])}{rown}",
+                "values": [[nowc]]
+            },
+        ])
         cache_invalidate(ws_decks)
 
         msg_parts.append(f"- Deck setado: **{nm}**")
@@ -4559,6 +5064,8 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 # RESUMO: Algoritmo anti-repetição de pods, gravação em lote para reduzir 429,
 # normalização automática de ciclo parcialmente gerado e comando /start_cycle
 # com match_id curto por pod no formato Sx-Cy-Pz-01.
+# REVISÃO: melhor aproveitamento de cache em Matches, eliminação de releitura
+# desnecessária do histórico de confrontos e consolidação de invalidação de cache.
 # =================================================
 
 def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
@@ -4585,6 +5092,26 @@ def _chunked_append_rows(ws, rows: list[list], chunk_size: int = 200):
         return
     for i in range(0, len(rows), chunk_size):
         ws.append_rows(rows[i:i + chunk_size], value_input_option="USER_ENTERED")
+
+
+def _past_confirmed_pairs_from_records(rows: list[dict]) -> set[frozenset]:
+    """
+    Cria um conjunto de pares (A,B) já enfrentados em matches CONFIRMED (qualquer season/cycle),
+    exceto BYE e matches inativos, usando registros já carregados em memória.
+    """
+    pairs: set[frozenset] = set()
+    for r in rows:
+        if not as_bool(r.get("active", "TRUE")):
+            continue
+        if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
+            continue
+        if str(r.get("result_type", "normal")).strip().lower() == "bye":
+            continue
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
+        if a and b:
+            pairs.add(frozenset((a, b)))
+    return pairs
 
 
 @client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
@@ -4641,7 +5168,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                 ephemeral=True
             )
 
-        enr_rows = cached_get_all_records(ws_enr, ttl_seconds=5)
+        enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
         players = []
         for r in enr_rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -4662,7 +5189,10 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
             return await interaction.followup.send("❌ pod_size inválido (use 4, 5, 6 ou 0).", ephemeral=True)
 
         layout = _choose_pod_layout(len(players), preferred_size=pod_size)
-        past_pairs = get_past_confirmed_pairs(ws_matches)
+
+        matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+        past_pairs = _past_confirmed_pairs_from_records(matches_rows)
+
         pods, score = _best_layout_shuffle_min_repeats(
             players,
             layout,
@@ -4687,7 +5217,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         _chunked_append_rows(ws_pods, pods_rows, chunk_size=200)
         cache_invalidate(ws_pods)
 
-        matches_rows = []
+        matches_rows_to_append = []
         created = 0
 
         for label, pod in pod_labels:
@@ -4696,7 +5226,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
             for seq, (a, b) in enumerate(pairs, start=1):
                 mid = f"S{season_id}-C{cycle}-P{label}-{str(seq).zfill(width)}"
-                matches_rows.append([
+                matches_rows_to_append.append([
                     mid, str(season_id), str(cycle), str(label),
                     str(a), str(b),
                     "0", "0", "0",
@@ -4708,16 +5238,16 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                 ])
                 created += 1
 
-        _chunked_append_rows(ws_matches, matches_rows, chunk_size=200)
+        _chunked_append_rows(ws_matches, matches_rows_to_append, chunk_size=200)
         cache_invalidate(ws_matches)
 
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
-        cache_invalidate(ws_cycles)
 
         start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
         if start_br and end_br:
             set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
-            cache_invalidate(ws_cycles)
+
+        cache_invalidate(ws_cycles)
 
         layout_txt = " + ".join(str(x) for x in layout)
 
@@ -4747,6 +5277,8 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 # fechamento automático de resultados, substituição de jogadores, histórico
 # de confrontos, estatísticas da liga e novo comando /inscritos para consulta
 # administrativa de inscritos por season/ciclo.
+# REVISÃO: otimização de loops pesados, redução de updates isolados no Sheets
+# e melhor aproveitamento dos dados já carregados em memória.
 # =================================================
 
 
@@ -4847,7 +5379,24 @@ async def inscritos(interaction: discord.Interaction, season: int, cycle: int):
         enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
         decks_rows = cached_get_all_records(ws_decks, ttl_seconds=10)
 
-        nick_map = build_players_nick_map(ws_players)
+        nick_map = _build_nick_map_from_records(players_rows)
+
+        deck_status_map: dict[str, dict[str, bool]] = {}
+        for d in decks_rows:
+            if safe_int(d.get("season_id", 0), 0) != season:
+                continue
+            if safe_int(d.get("cycle", 0), 0) != cycle:
+                continue
+
+            pid = str(d.get("player_id", "")).strip()
+            if not pid:
+                continue
+
+            entry = deck_status_map.setdefault(pid, {"deck_ok": False, "decklist_ok": False})
+            if str(d.get("deck", "")).strip():
+                entry["deck_ok"] = True
+            if str(d.get("decklist_url", "")).strip():
+                entry["decklist_ok"] = True
 
         inscritos = []
         inscritos_ids = set()
@@ -4866,28 +5415,10 @@ async def inscritos(interaction: discord.Interaction, season: int, cycle: int):
             pid = str(r.get("player_id", "")).strip()
             inscritos_ids.add(pid)
 
-            deck_ok = False
-            decklist_ok = False
-
-            for d in decks_rows:
-
-                if safe_int(d.get("season_id", 0), 0) != season:
-                    continue
-
-                if safe_int(d.get("cycle", 0), 0) != cycle:
-                    continue
-
-                if str(d.get("player_id", "")).strip() != pid:
-                    continue
-
-                if str(d.get("deck", "")).strip():
-                    deck_ok = True
-
-                if str(d.get("decklist_url", "")).strip():
-                    decklist_ok = True
+            st = deck_status_map.get(pid, {"deck_ok": False, "decklist_ok": False})
 
             inscritos.append(
-                f"{nick_map.get(pid, pid)} | Deck: {'OK' if deck_ok else 'PENDENTE'} | Decklist: {'OK' if decklist_ok else 'PENDENTE'}"
+                f"{nick_map.get(pid, pid)} | Deck: {'OK' if st['deck_ok'] else 'PENDENTE'} | Decklist: {'OK' if st['decklist_ok'] else 'PENDENTE'}"
             )
 
         nao_inscritos = []
@@ -4963,9 +5494,11 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         ws_decks = sh.worksheet("Decks")
 
         changed = 0
+        nowb = now_br_str()
 
         col_enr = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-        vals_enr = cached_get_all_values(ws_enr, ttl_seconds=5)
+        vals_enr = cached_get_all_values(ws_enr, ttl_seconds=10)
+        enr_updates = []
 
         for rown in range(2, len(vals_enr) + 1):
 
@@ -4977,12 +5510,22 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
             if s == season_id and c == cycle and p == old_id:
 
-                ws_enr.update([[new_id]], range_name=f"{col_letter(col_enr['player_id'])}{rown}")
-                ws_enr.update([[now_br_str()]], range_name=f"{col_letter(col_enr['updated_at'])}{rown}")
+                enr_updates.append({
+                    "range": f"{col_letter(col_enr['player_id'])}{rown}",
+                    "values": [[new_id]]
+                })
+                enr_updates.append({
+                    "range": f"{col_letter(col_enr['updated_at'])}{rown}",
+                    "values": [[nowb]]
+                })
                 changed += 1
 
+        if enr_updates:
+            ws_enr.batch_update(enr_updates)
+
         col_pods = ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
-        vals_pods = cached_get_all_values(ws_pods, ttl_seconds=5)
+        vals_pods = cached_get_all_values(ws_pods, ttl_seconds=10)
+        pods_updates = []
 
         for rown in range(2, len(vals_pods) + 1):
 
@@ -4994,11 +5537,18 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
             if s == season_id and c == cycle and p == old_id:
 
-                ws_pods.update([[new_id]], range_name=f"{col_letter(col_pods['player_id'])}{rown}")
+                pods_updates.append({
+                    "range": f"{col_letter(col_pods['player_id'])}{rown}",
+                    "values": [[new_id]]
+                })
                 changed += 1
 
+        if pods_updates:
+            ws_pods.batch_update(pods_updates)
+
         col_m = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        vals_m = cached_get_all_values(ws_matches, ttl_seconds=5)
+        vals_m = cached_get_all_values(ws_matches, ttl_seconds=10)
+        matches_updates = []
 
         for rown in range(2, len(vals_m) + 1):
 
@@ -5015,16 +5565,26 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
             if a == old_id:
 
-                ws_matches.update([[new_id]], range_name=f"{col_letter(col_m['player_a_id'])}{rown}")
+                matches_updates.append({
+                    "range": f"{col_letter(col_m['player_a_id'])}{rown}",
+                    "values": [[new_id]]
+                })
                 changed += 1
 
             if b == old_id:
 
-                ws_matches.update([[new_id]], range_name=f"{col_letter(col_m['player_b_id'])}{rown}")
+                matches_updates.append({
+                    "range": f"{col_letter(col_m['player_b_id'])}{rown}",
+                    "values": [[new_id]]
+                })
                 changed += 1
 
+        if matches_updates:
+            ws_matches.batch_update(matches_updates)
+
         col_d = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
-        vals_d = cached_get_all_values(ws_decks, ttl_seconds=5)
+        vals_d = cached_get_all_values(ws_decks, ttl_seconds=10)
+        deck_updates = []
 
         for rown in range(2, len(vals_d) + 1):
 
@@ -5036,9 +5596,18 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 
             if s == season_id and c == cycle and p == old_id:
 
-                ws_decks.update([[new_id]], range_name=f"{col_letter(col_d['player_id'])}{rown}")
-                ws_decks.update([[now_br_str()]], range_name=f"{col_letter(col_d['updated_at'])}{rown}")
+                deck_updates.append({
+                    "range": f"{col_letter(col_d['player_id'])}{rown}",
+                    "values": [[new_id]]
+                })
+                deck_updates.append({
+                    "range": f"{col_letter(col_d['updated_at'])}{rown}",
+                    "values": [[nowb]]
+                })
                 changed += 1
+
+        if deck_updates:
+            ws_decks.batch_update(deck_updates)
 
         cache_invalidate(ws_enr)
         cache_invalidate(ws_pods)
