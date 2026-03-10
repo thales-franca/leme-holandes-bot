@@ -2010,6 +2010,229 @@ class OnboardingChoiceView(discord.ui.View):
 
 
 # =========================================================
+# RESULTADO — View de confirmação por DM
+# =========================================================
+class ResultConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success, custom_id="lhb_result_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            message = interaction.message
+            if not message or not message.embeds:
+                return await interaction.response.send_message(
+                    "❌ Não consegui identificar o resultado para confirmação.",
+                    ephemeral=True
+                )
+
+            embed = message.embeds[0]
+            match_id = ""
+            if embed.footer and embed.footer.text:
+                footer = str(embed.footer.text).strip()
+                if footer.lower().startswith("match_id:"):
+                    match_id = footer.split(":", 1)[1].strip()
+
+            if not match_id:
+                return await interaction.response.send_message(
+                    "❌ Match não identificado nesta mensagem.",
+                    ephemeral=True
+                )
+
+            sh = open_sheet()
+            ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+            col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+            found = None
+            row_data = None
+            for idx in range(1, len(rows)):
+                r = rows[idx]
+                val = r[col["match_id"]] if col["match_id"] < len(r) else ""
+                if str(val).strip() == match_id:
+                    found = idx + 1
+                    row_data = r
+                    break
+
+            if not found or row_data is None:
+                return await interaction.response.send_message(
+                    "❌ Match não encontrado.",
+                    ephemeral=True
+                )
+
+            def getc(name: str) -> str:
+                ci = col[name]
+                return row_data[ci] if ci < len(row_data) else ""
+
+            a = str(getc("player_a_id")).strip()
+            b = str(getc("player_b_id")).strip()
+            uid = str(interaction.user.id).strip()
+
+            if uid not in (a, b):
+                return await interaction.response.send_message(
+                    "❌ Você não participa deste match.",
+                    ephemeral=True
+                )
+
+            reported_by = str(getc("reported_by_id")).strip()
+            if not reported_by:
+                return await interaction.response.send_message(
+                    "❌ Este match não possui resultado pendente.",
+                    ephemeral=True
+                )
+
+            if uid == reported_by:
+                return await interaction.response.send_message(
+                    "❌ Quem reportou não pode confirmar o próprio resultado.",
+                    ephemeral=True
+                )
+
+            status = str(getc("confirmed_status")).strip().lower()
+            if status != "pending":
+                return await interaction.response.send_message(
+                    "❌ Este match não está pendente.",
+                    ephemeral=True
+                )
+
+            ws_matches.update([["confirmed"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
+            ws_matches.update([[uid]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
+            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+            cache_invalidate(ws_matches)
+
+            season_id = safe_int(getc("season_id"), 0)
+            cycle = safe_int(getc("cycle"), 0)
+            try:
+                recalculate_cycle(sh, season_id, cycle)
+            except Exception:
+                pass
+
+            try:
+                for child in self.children:
+                    child.disabled = True
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+            try:
+                await interaction.response.send_message(
+                    "✅ Resultado confirmado com sucesso.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ Erro ao confirmar: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="lhb_result_reject")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            message = interaction.message
+            if not message or not message.embeds:
+                return await interaction.response.send_message(
+                    "❌ Não consegui identificar o resultado para rejeição.",
+                    ephemeral=True
+                )
+
+            embed = message.embeds[0]
+            match_id = ""
+            if embed.footer and embed.footer.text:
+                footer = str(embed.footer.text).strip()
+                if footer.lower().startswith("match_id:"):
+                    match_id = footer.split(":", 1)[1].strip()
+
+            if not match_id:
+                return await interaction.response.send_message(
+                    "❌ Match não identificado nesta mensagem.",
+                    ephemeral=True
+                )
+
+            sh = open_sheet()
+            ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+            col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+            found = None
+            row_data = None
+            for idx in range(1, len(rows)):
+                r = rows[idx]
+                val = r[col["match_id"]] if col["match_id"] < len(r) else ""
+                if str(val).strip() == match_id:
+                    found = idx + 1
+                    row_data = r
+                    break
+
+            if not found or row_data is None:
+                return await interaction.response.send_message(
+                    "❌ Match não encontrado.",
+                    ephemeral=True
+                )
+
+            def getc(name: str) -> str:
+                ci = col[name]
+                return row_data[ci] if ci < len(row_data) else ""
+
+            a = str(getc("player_a_id")).strip()
+            b = str(getc("player_b_id")).strip()
+            uid = str(interaction.user.id).strip()
+
+            if uid not in (a, b):
+                return await interaction.response.send_message(
+                    "❌ Você não participa deste match.",
+                    ephemeral=True
+                )
+
+            reported_by = str(getc("reported_by_id")).strip()
+            if not reported_by:
+                return await interaction.response.send_message(
+                    "❌ Este match não possui resultado pendente.",
+                    ephemeral=True
+                )
+
+            if uid == reported_by:
+                return await interaction.response.send_message(
+                    "❌ Quem reportou não pode rejeitar o próprio resultado.",
+                    ephemeral=True
+                )
+
+            status = str(getc("confirmed_status")).strip().lower()
+            if status != "pending":
+                return await interaction.response.send_message(
+                    "❌ Este match não está pendente.",
+                    ephemeral=True
+                )
+
+            ws_matches.update([["rejected"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
+            ws_matches.update([[uid]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
+            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+            cache_invalidate(ws_matches)
+
+            try:
+                for child in self.children:
+                    child.disabled = True
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+            try:
+                await interaction.response.send_message(
+                    "⚠️ Resultado rejeitado. O match precisa ser reportado novamente.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ Erro ao rejeitar: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+
+# =========================================================
 # Posting do onboarding no canal (evento + comando admin)
 # =========================================================
 async def post_onboarding_message(channel: discord.abc.Messageable, member_mention: str | None = None):
@@ -2940,7 +3163,8 @@ async def meus_matches(interaction: discord.Interaction, cycle: int):
 # SUB-BLOCO: B/2
 # RESUMO: Comandos de interação com resultados de partidas: /resultado para reportar
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
-# Inclui atualização de dados no Sheets, auto-confirm timer e invalidação de cache.
+# Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
+# com botões de confirmar/rejeitar e invalidação de cache.
 # =================================================
 
 # =========================================================
@@ -2997,9 +3221,15 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
             if pid == player_a:
                 ws_matches.update([[v]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
                 ws_matches.update([[d]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
+                opponent_id = player_b
+                my_wins = v
+                opp_wins = d
             else:
                 ws_matches.update([[d]], range_name=f"{col_letter(col['a_games_won'])}{rown}")
                 ws_matches.update([[v]], range_name=f"{col_letter(col['b_games_won'])}{rown}")
+                opponent_id = player_a
+                my_wins = v
+                opp_wins = d
 
             ws_matches.update([[e]], range_name=f"{col_letter(col['draw_games'])}{rown}")
             ws_matches.update([["normal"]], range_name=f"{col_letter(col['result_type'])}{rown}")
@@ -3013,8 +3243,36 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
 
             cache_invalidate(ws_matches)
 
+            dm_status = ""
+            try:
+                user_level = await get_access_level(interaction)
+            except Exception:
+                user_level = "jogador"
+
+            if user_level == "jogador":
+                try:
+                    opponent_user = client.get_user(int(opponent_id))
+                    if opponent_user is None:
+                        opponent_user = await client.fetch_user(int(opponent_id))
+
+                    reporter_name = interaction.user.display_name if hasattr(interaction.user, "display_name") else str(interaction.user)
+                    embed = discord.Embed(
+                        title="Resultado reportado",
+                        description=(
+                            f"**{reporter_name}** registrou o resultado **{my_wins}-{opp_wins}-{e}**.\n"
+                            f"O prazo para confirmar ou rejeitar é de **48h**."
+                        )
+                    )
+                    embed.add_field(name="Match", value=f"`{match_id}`", inline=False)
+                    embed.set_footer(text=f"match_id:{match_id}")
+
+                    await opponent_user.send(embed=embed, view=ResultConfirmView())
+                    dm_status = "\n📩 O oponente foi notificado por DM para confirmar ou rejeitar."
+                except Exception:
+                    dm_status = "\n⚠️ Não consegui enviar DM ao oponente, mas o prazo de **48h** segue normalmente."
+
             await interaction.followup.send(
-                f"✅ Resultado enviado: **{placar}**\nO oponente tem **48h** para rejeitar.",
+                f"✅ Resultado enviado: **{placar}**\nO oponente tem **48h** para confirmar ou rejeitar.{dm_status}",
                 ephemeral=True
             )
 
