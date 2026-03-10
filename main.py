@@ -1187,13 +1187,52 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
-# REVISÃO: redução de releituras indiretas, uso direto dos dados já cacheados
-# e otimização do autocomplete mais sensível (/resultado e /rejeitar).
+# REVISÃO: otimização forte do autocomplete de match_id com cache derivado
+# em memória, redução de trabalho por tecla digitada e filtro mais rápido
+# para uso em celular e no Render.
 # =================================================
 
 # =========================
 # AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
 # =========================
+
+# Cache derivado específico para autocomplete de match_id
+_AC_MATCH_PENDING_CACHE: dict[str, dict] = {}
+_AC_MATCH_PENDING_CACHE_LOCK = threading.Lock()
+
+def _ac_match_pending_cache_key(season_id: int, uid: str, locked_cycles: set[int]) -> str:
+    locked_txt = ",".join(str(x) for x in sorted(locked_cycles))
+    return f"S{season_id}:U{uid}:L{locked_txt}"
+
+def _ac_match_pending_cache_get(season_id: int, uid: str, locked_cycles: set[int], ttl_seconds: int = 10):
+    key = _ac_match_pending_cache_key(season_id, uid, locked_cycles)
+    now = _cache_now()
+    with _AC_MATCH_PENDING_CACHE_LOCK:
+        item = _AC_MATCH_PENDING_CACHE.get(key)
+        if not item:
+            return None
+        ts = item.get("ts")
+        if ts is None or (now - ts > ttl_seconds):
+            _AC_MATCH_PENDING_CACHE.pop(key, None)
+            return None
+        return item.get("data")
+
+def _ac_match_pending_cache_set(season_id: int, uid: str, locked_cycles: set[int], data):
+    key = _ac_match_pending_cache_key(season_id, uid, locked_cycles)
+    now = _cache_now()
+    with _AC_MATCH_PENDING_CACHE_LOCK:
+        _AC_MATCH_PENDING_CACHE[key] = {"ts": now, "data": data}
+
+        # limpeza oportunista simples
+        expired = []
+        for k, item in _AC_MATCH_PENDING_CACHE.items():
+            ts = item.get("ts")
+            if ts is None or (now - ts > 120):
+                expired.append(k)
+        for k in expired:
+            _AC_MATCH_PENDING_CACHE.pop(k, None)
+
+
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
     """
     Lista ciclos existentes na aba Cycles (season ativa),
@@ -1241,6 +1280,9 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
             out.append(app_commands.Choice(name=lab[:100], value=c_str))
             seen.add(c)
 
+            if len(out) >= 25:
+                break
+
         out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
@@ -1286,6 +1328,9 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
             out.append(app_commands.Choice(name=f"Ciclo {c} / aberto", value=c_str))
             seen.add(c)
 
+            if len(out) >= 25:
+                break
+
         out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
@@ -1308,27 +1353,13 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         if season_id <= 0:
             return []
 
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
         ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
         cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
-        match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-
-        nick_map: dict[str, str] = {}
-        for r in player_rows:
-            pid = str(r.get("discord_id", "")).strip()
-            nick = str(r.get("nick", "")).strip()
-            if pid:
-                nick_map[pid] = nick or pid
 
         locked_cycles = set()
         for r in cycle_rows:
@@ -1342,40 +1373,76 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         if not locked_cycles:
             return []
 
+        cached_entries = _ac_match_pending_cache_get(season_id, uid, locked_cycles, ttl_seconds=10)
+
+        if cached_entries is None:
+            ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+            ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+
+            ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+            ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
+            player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+            match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+            nick_map: dict[str, str] = {}
+            for r in player_rows:
+                pid = str(r.get("discord_id", "")).strip()
+                nick = str(r.get("nick", "")).strip()
+                if pid:
+                    nick_map[pid] = nick or pid
+
+            entries = []
+            for r in match_rows:
+                if safe_int(r.get("season_id", 0), 0) != season_id:
+                    continue
+
+                cyc = safe_int(r.get("cycle", 0), 0)
+                if cyc not in locked_cycles:
+                    continue
+
+                if not as_bool(r.get("active", "TRUE")):
+                    continue
+
+                a = str(r.get("player_a_id", "")).strip()
+                b = str(r.get("player_b_id", "")).strip()
+                if uid not in (a, b):
+                    continue
+
+                mid = str(r.get("match_id", "")).strip()
+                if not mid:
+                    continue
+
+                a_name = nick_map.get(a, a)
+                b_name = nick_map.get(b, b)
+
+                status = str(r.get("confirmed_status", "")).strip().lower()
+                reported_by = str(r.get("reported_by_id", "")).strip()
+
+                visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
+                label = f"{a_name} vs {b_name} | {visual_status}"
+                search_blob = f"{mid} {a_name} {b_name} {visual_status}".lower()
+
+                entries.append({
+                    "mid": mid,
+                    "label": label[:100],
+                    "search": search_blob,
+                })
+
+            cached_entries = entries
+            _ac_match_pending_cache_set(season_id, uid, locked_cycles, cached_entries)
+
         found: list[app_commands.Choice[str]] = []
-
-        for r in match_rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if safe_int(r.get("cycle", 0), 0) not in locked_cycles:
-                continue
-            if not as_bool(r.get("active", "TRUE")):
+        for item in cached_entries:
+            if q and q not in item["search"]:
                 continue
 
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
-            if uid not in (a, b):
-                continue
+            found.append(app_commands.Choice(name=item["label"], value=item["mid"]))
 
-            mid = str(r.get("match_id", "")).strip()
-            if not mid:
-                continue
+            if len(found) >= 25:
+                break
 
-            a_name = nick_map.get(a, a)
-            b_name = nick_map.get(b, b)
-
-            status = str(r.get("confirmed_status", "")).strip().lower()
-            reported_by = str(r.get("reported_by_id", "")).strip()
-
-            visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
-            label = f"{a_name} vs {b_name} | {visual_status}"
-
-            if q and q not in label.lower() and q not in mid.lower():
-                continue
-
-            found.append(app_commands.Choice(name=label[:100], value=mid))
-
-        return found[:25]
+        return found
     except Exception:
         return []
 
