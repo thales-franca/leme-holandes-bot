@@ -1123,10 +1123,12 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
 
 async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
     """
-    Sugere match_id relevantes ao usuário:
-    - Matches "em aberto" (confirmed_status vazio/open e sem reported_by_id) para /resultado
-    - Matches "pending" onde o usuário é o oponente (reported_by_id != user) para /rejeitar
-    Sempre filtra season ativa e active=TRUE.
+    Sugere matches relevantes ao usuário:
+    - Mostra apenas matches do usuário na season ativa e active=TRUE
+    - Exibe no formato "Nick vs Nick | pendente" quando ainda não houve lançamento
+    - Exibe no formato "Nick vs Nick | registrado" quando já houve lançamento
+    - Mantém o match_id como valor interno da escolha
+    - Se o usuário digitar manualmente o match_id, continua funcionando normalmente
     """
     try:
         sh = open_sheet()
@@ -1134,14 +1136,18 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         if season_id <= 0:
             return []
 
-        ws = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ensure_sheet_columns(ws, MATCHES_REQUIRED_COLS)
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
 
-        uid = str(interaction.user.id)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
+        uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
+        nick_map = build_players_nick_map(ws_players)
 
-        rows = ws.get_all_records()
-        found = []
+        rows = ws_matches.get_all_records()
+        found: list[app_commands.Choice[str]] = []
 
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -1158,29 +1164,21 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
             if not mid:
                 continue
 
+            a_name = nick_map.get(a, a)
+            b_name = nick_map.get(b, b)
+
             status = str(r.get("confirmed_status", "")).strip().lower()
-            status = status or "open"
             reported_by = str(r.get("reported_by_id", "")).strip()
 
-            is_open_for_report = (status in ("open", "") and not reported_by)
-            is_pending_for_reject = (status == "pending" and reported_by and reported_by != uid)
+            visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
+            label = f"{a_name} vs {b_name} | {visual_status}"
 
-            if not (is_open_for_report or is_pending_for_reject):
+            if q and q not in label.lower() and q not in mid.lower():
                 continue
 
-            if q and q not in mid.lower():
-                continue
+            found.append(app_commands.Choice(name=label[:100], value=mid))
 
-            found.append(mid)
-
-        seen = set()
-        uniq = []
-        for m in found:
-            if m not in seen:
-                uniq.append(m)
-                seen.add(m)
-
-        return [app_commands.Choice(name=m, value=m) for m in uniq[:25]]
+        return found[:25]
     except Exception:
         return []
 
