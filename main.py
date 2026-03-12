@@ -1,23 +1,19 @@
 # =================================================
 # BLOCO ORIGINAL: BLOCO 1/8
 # SUB-BLOCO: A
-# RESUMO: Cabeçalho do bloco, imports, princípios do projeto,
-# keep-alive do Render, configurações de ambiente, helpers
-# de data/hora, helpers gerais e início do sistema de cache
-# do Google Sheets
-# REVISÃO: reforço da infraestrutura global de cache com TTL por
-# monotonic clock, chave mais robusta por worksheet e limpeza oportunista.
+# REVISÃO FINAL — cache + RAM index + locks globais
 # =================================================
 
 import os
 import json
-import time  # <-- ADICIONADO (cache TTL)
+import time
 import threading
 import random
 import csv
 import io
+
 from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timezone, timedelta, time as dtime, date  # evita conflito com import time acima
+from datetime import datetime, timezone, timedelta, time as dtime, date
 
 import discord
 from discord import app_commands
@@ -28,52 +24,38 @@ from google.oauth2.service_account import Credentials
 
 
 # =========================================================
-# LEME HOLANDÊS BOT — Discord + Google Sheets + Render
-# =========================================================
-# PRINCÍPIOS DO PROJETO (fixos):
-# - Tudo na MESMA planilha, com histórico completo.
-# - Season existe e separa os dados (season_id).
-# - Ciclos existem DENTRO de uma season (cycle_number).
-# - Somente o DONO do servidor controla Season (abrir/fechar).
-# - ADM/Organizador controlam ciclo e operação do torneio.
-# - Deck e Decklist: 1 vez POR CICLO (não trava ciclo seguinte).
-# - Ranking oficial: Pontos > OMW% > GW% > OGW%
-# - Piso 33,3% aplicado em MWP e GWP antes de calcular OMW/OGW
-# - Recalcular ranking sempre do zero (nunca incremental)
-# - Resultado: V-D-E em GAMES (Vitória/Derrota/Empate)
-# - Empate em games conta como 0.5 na GWP
-# - Report vira PENDENTE; oponente tem 48h para rejeitar
-# - Se não rejeitar, varredura /recalcular auto-confirma
-# - Prazo do ciclo (/prazo): depende do maior POD
-#   POD 3 -> 5 dias corridos
-#   POD 4 -> 8 dias corridos
-#   POD 5 ou 6 -> 10 dias corridos
-#   Ciclo começa 14:00 (BR) e termina no último dia às 13:59 (BR)
-# - /final (ADM): aplica 0-0-3 (ID) em matches sem report após prazo
+# LEME HOLANDÊS BOT
 # =========================================================
 
 
 # =========================
 # HTTP keep-alive (Render)
 # =========================
+
 app = Flask(__name__)
 
 @app.get("/")
 def home():
     return "LEME HOLANDÊS BOT online", 200
 
+
 def _run_web():
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
+
 def keep_alive():
-    t = threading.Thread(target=_run_web, daemon=True)
+    t = threading.Thread(
+        target=_run_web,
+        daemon=True
+    )
     t.start()
 
 
 # =========================
 # Configs / Env
 # =========================
+
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
@@ -82,116 +64,136 @@ SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
 ROLE_ORGANIZADOR = os.getenv("ROLE_ORGANIZADOR", "Organizador")
 ROLE_ADM = os.getenv("ROLE_ADM", "ADM")
-ROLE_JOGADOR = os.getenv("ROLE_JOGADOR", "Jogador")  # nome do cargo "Jogador"
+ROLE_JOGADOR = os.getenv("ROLE_JOGADOR", "Jogador")
 
-# Canal de ranking público (opcional)
 RANKING_CHANNEL_ID = int(os.getenv("RANKING_CHANNEL_ID", "0"))
-
-# Canal de log administrativo (você já configurou)
 LOG_ADMIN_CHANNEL_ID = int(os.getenv("LOG_ADMIN_CHANNEL_ID", "0"))
 
 
 # =========================
 # Time helpers (BR)
 # =========================
+
 BR_TZ = timezone(timedelta(hours=-3))
+
 
 def now_br_dt() -> datetime:
     return datetime.now(BR_TZ)
 
+
 def now_br_str() -> str:
     return now_br_dt().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def now_iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def utc_now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def parse_iso_dt(s: str):
+
     try:
+
         raw = str(s).strip()
+
         if not raw:
             return None
 
-        # Trata timestamps ISO com 'Z' final
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
 
         dt = datetime.fromisoformat(raw)
 
-        # Se vier naive, assume UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
 
-        # Normaliza para UTC aware
         return dt.astimezone(timezone.utc)
+
     except Exception:
         return None
+
 
 def parse_br_dt(s: str):
-    # "YYYY-MM-DD HH:MM:SS" assumed BR
+
     try:
-        return datetime.strptime(str(s).strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=BR_TZ)
+        return datetime.strptime(
+            str(s).strip(),
+            "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=BR_TZ)
+
     except Exception:
         return None
 
+
 def fmt_br_dt(dt: datetime) -> str:
-    return dt.astimezone(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.astimezone(BR_TZ).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 # =========================
 # Helpers gerais
 # =========================
+
 def safe_int(v, default=0):
     try:
         return int(str(v).strip())
     except Exception:
         return default
 
+
 def as_bool(v):
     s = str(v).strip().lower()
     return s in ("true", "1", "yes", "y", "sim")
 
+
 def floor_333(x: float) -> float:
     return max(x, 1/3)
+
 
 def pct1(x: float) -> float:
     return round(x * 100.0, 1)
 
+
 def col_letter(ci_0: int) -> str:
-    # A=0, B=1...
+
     n = ci_0
     s = ""
+
     while True:
+
         s = chr(n % 26 + 65) + s
+
         n = n // 26 - 1
+
         if n < 0:
             break
+
     return s
 
 
-# =========================
-# CACHE (Sheets reads) — ADICIONADO
-# - reduz leituras repetidas e evita APIError 429 (Read requests)
-# - TTL curto para não “envelhecer” dados (padrão: 10s)
-# - invalidar cache sempre que houver escrita na aba
-# =========================
+# =========================================================
+# CACHE (Sheets)
+# =========================================================
+
 _SHEETS_CACHE: dict[str, dict] = {}
 _SHEETS_CACHE_LOCK = threading.Lock()
 
-def _cache_now() -> float:
-    # monotonic evita problemas se o relógio do sistema mudar
+
+def _cache_now():
     return time.monotonic()
 
-def _ws_cache_prefix(ws) -> str:
-    # tenta pegar id real do spreadsheet; fallback para SHEET_ID
+
+def _ws_cache_prefix(ws):
+
     try:
-        sid = ws.spreadsheet.id  # gspread Worksheet
+        sid = ws.spreadsheet.id
     except Exception:
         sid = SHEET_ID or "unknown_sheet"
 
-    # tenta pegar id estável da worksheet; fallback para título
     try:
         wid = str(ws.id)
     except Exception:
@@ -204,20 +206,29 @@ def _ws_cache_prefix(ws) -> str:
 
     if wid:
         return f"{sid}:{wid}:{title}:"
+
     return f"{sid}:{title}:"
 
-def _cache_key(ws, kind: str) -> str:
+
+def _cache_key(ws, kind: str):
     return _ws_cache_prefix(ws) + kind
 
-def cache_get(ws, kind: str, ttl_seconds: int):
+
+def cache_get(ws, kind, ttl_seconds):
+
     key = _cache_key(ws, kind)
+
     now = _cache_now()
+
     with _SHEETS_CACHE_LOCK:
+
         item = _SHEETS_CACHE.get(key)
+
         if not item:
             return None
 
         ts = item.get("ts")
+
         if ts is None:
             _SHEETS_CACHE.pop(key, None)
             return None
@@ -225,48 +236,107 @@ def cache_get(ws, kind: str, ttl_seconds: int):
         if now - ts <= ttl_seconds:
             return item.get("data")
 
-        # limpeza oportunista de item expirado
         _SHEETS_CACHE.pop(key, None)
+
     return None
 
-def cache_set(ws, kind: str, data):
+
+def cache_set(ws, kind, data):
+
     key = _cache_key(ws, kind)
+
     now = _cache_now()
+
     prefix = _ws_cache_prefix(ws)
 
     with _SHEETS_CACHE_LOCK:
-        _SHEETS_CACHE[key] = {"ts": now, "data": data}
 
-        # limpeza oportunista simples dos expirados desta worksheet
-        expired_keys = []
+        _SHEETS_CACHE[key] = {
+            "ts": now,
+            "data": data
+        }
+
+        expired = []
+
         for k, item in _SHEETS_CACHE.items():
+
             if not k.startswith(prefix):
                 continue
-            ts = item.get("ts")
-            if ts is None:
-                expired_keys.append(k)
-                continue
-            # margem conservadora para remover lixo antigo sem interferir no TTL ativo
-            if now - ts > 120:
-                expired_keys.append(k)
 
-        for k in expired_keys:
+            ts = item.get("ts")
+
+            if ts is None:
+                expired.append(k)
+                continue
+
+            if now - ts > 120:
+                expired.append(k)
+
+        for k in expired:
             _SHEETS_CACHE.pop(k, None)
 
-def cache_invalidate(ws, kind: str | None = None):
-    """
-    Invalida cache de uma aba.
-    - kind=None: invalida tudo dessa worksheet
-    - kind='all_values' ou 'all_records': invalida só o tipo
-    """
+
+def cache_invalidate(ws, kind=None):
+
     prefix = _ws_cache_prefix(ws)
+
     with _SHEETS_CACHE_LOCK:
+
         if kind is None:
-            keys = [k for k in _SHEETS_CACHE.keys() if k.startswith(prefix)]
+
+            keys = [
+                k for k in _SHEETS_CACHE
+                if k.startswith(prefix)
+            ]
+
             for k in keys:
                 _SHEETS_CACHE.pop(k, None)
+
         else:
-            _SHEETS_CACHE.pop(prefix + kind, None)
+
+            _SHEETS_CACHE.pop(
+                prefix + kind,
+                None
+            )
+
+
+# =========================================================
+# RAM INDEX (NOVO)
+# =========================================================
+
+_MATCH_RAM_INDEX = None
+_MATCH_RAM_LOCK = threading.Lock()
+
+_PLAYER_RAM_INDEX = None
+_PLAYER_RAM_LOCK = threading.Lock()
+
+_CYCLE_RAM_INDEX = None
+_CYCLE_RAM_LOCK = threading.Lock()
+
+
+def invalidate_match_ram_index():
+
+    global _MATCH_RAM_INDEX
+
+    with _MATCH_RAM_LOCK:
+        _MATCH_RAM_INDEX = None
+
+
+def invalidate_player_ram_index():
+
+    global _PLAYER_RAM_INDEX
+
+    with _PLAYER_RAM_LOCK:
+        _PLAYER_RAM_INDEX = None
+
+
+def invalidate_cycle_ram_index():
+
+    global _CYCLE_RAM_INDEX
+
+    with _CYCLE_RAM_LOCK:
+        _CYCLE_RAM_INDEX = None
+
 
 # =================================================
 # FIM DO SUB-BLOCO A/2
@@ -979,7 +1049,7 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # round robin, varredura de auto-confirmação, heurística anti-repetição entre jogadores e
 # cálculo de prazo do ciclo com base no maior POD.
 # REVISÃO: substituição de leituras diretas por cache, redução de updates isolados
-# em auto-confirmação, integração com invalidação do índice RAM de autocomplete
+# em auto-confirmação, integração com invalidação dos índices RAM de matches/autocomplete
 # e padronização de timestamp UTC.
 # =================================================
 
@@ -1027,6 +1097,7 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
             continue
         if not as_bool(getc("active") or "TRUE"):
             continue
+
         status = (getc("confirmed_status") or "").strip().lower()
         if status != "pending":
             continue
@@ -1059,6 +1130,7 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
     if updates:
         ws_matches.batch_update(updates)
         cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
         invalidate_match_ac_index()
 
     return changed
@@ -1190,10 +1262,43 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
-# REVISÃO: integração com o índice em memória do BLOCO 9 para autocomplete
-# instantâneo de /resultado e /rejeitar, exibindo OPONENTE + status e mantendo
-# match_id como valor interno.
+# REVISÃO: integração com o índice RAM de MATCHES e com os índices RAM de CYCLES,
+# mantendo autocomplete instantâneo de /resultado e /rejeitar, exibindo OPONENTE
+# + status e mantendo match_id como valor interno, com debounce leve para reduzir
+# rajadas de chamadas do Discord sem alterar a UX.
 # =================================================
+
+# =========================
+# DEBOUNCE LEVE — AUTOCOMPLETE
+# =========================
+_AC_DEBOUNCE_STATE: dict[str, float] = {}
+_AC_DEBOUNCE_LOCK = threading.Lock()
+_AC_DEBOUNCE_WINDOW_SECONDS = 0.08
+
+def _ac_should_skip(interaction: discord.Interaction, ac_name: str, window_seconds: float = _AC_DEBOUNCE_WINDOW_SECONDS) -> bool:
+    """
+    Throttle leve por usuário + autocomplete.
+    Reduz rajadas muito próximas disparadas pelo Discord/mobile.
+    """
+    try:
+        uid = str(interaction.user.id)
+    except Exception:
+        uid = "0"
+
+    key = f"{ac_name}:{uid}"
+    now = _cache_now()
+
+    with _AC_DEBOUNCE_LOCK:
+        last = _AC_DEBOUNCE_STATE.get(key, 0.0)
+        _AC_DEBOUNCE_STATE[key] = now
+
+        # limpeza oportunista simples
+        expired = [k for k, ts in _AC_DEBOUNCE_STATE.items() if now - ts > 30]
+        for k in expired:
+            _AC_DEBOUNCE_STATE.pop(k, None)
+
+    return (now - last) < window_seconds
+
 
 # =========================
 # AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
@@ -1204,51 +1309,31 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
     com label mostrando status.
     """
     try:
+        if _ac_should_skip(interaction, "ac_cycle_open"):
+            return []
+
         sh = open_sheet()
         season_id = get_current_season_id(sh)
         if season_id <= 0:
             return []
 
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-
-        q = str(current or "").strip()
-        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
-
-        def label_status(st: str) -> str:
-            st = (st or "").strip().lower()
-            if st == "open":
-                return "aberto"
-            if st in ("locked", "closed"):
-                return "fechado"
-            if st == "completed":
-                return "concluído"
-            return st or "indefinido"
+        q = str(current or "").strip().lower()
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_id,
+            query=q,
+            only_open=False,
+            limit=25
+        )
 
         out: list[app_commands.Choice[str]] = []
-        seen = set()
-
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not label or not value:
                 continue
+            out.append(app_commands.Choice(name=label[:100], value=value))
 
-            c = safe_int(r.get("cycle", 0), 0)
-            if c <= 0 or c in seen:
-                continue
-
-            st = str(r.get("status", "")).strip().lower()
-            c_str = str(c)
-            if q and q not in c_str:
-                continue
-
-            lab = f"Ciclo {c} / {label_status(st)}"
-            out.append(app_commands.Choice(name=lab[:100], value=c_str))
-            seen.add(c)
-
-            if len(out) >= 25:
-                break
-
-        out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
         return []
@@ -1260,43 +1345,31 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
     Uso principal: /inscrever
     """
     try:
+        if _ac_should_skip(interaction, "ac_cycle_only_open"):
+            return []
+
         sh = open_sheet()
         season_id = get_current_season_id(sh)
         if season_id <= 0:
             return []
 
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-
-        q = str(current or "").strip()
-        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        q = str(current or "").strip().lower()
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_id,
+            query=q,
+            only_open=True,
+            limit=25
+        )
 
         out: list[app_commands.Choice[str]] = []
-        seen = set()
-
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not label or not value:
                 continue
+            out.append(app_commands.Choice(name=label[:100], value=value))
 
-            c = safe_int(r.get("cycle", 0), 0)
-            if c <= 0 or c in seen:
-                continue
-
-            st_norm = str(r.get("status", "")).strip().lower()
-            if st_norm != "open":
-                continue
-
-            c_str = str(c)
-            if q and q not in c_str:
-                continue
-
-            out.append(app_commands.Choice(name=f"Ciclo {c} / aberto", value=c_str))
-            seen.add(c)
-
-            if len(out) >= 25:
-                break
-
-        out.sort(key=lambda x: safe_int(x.value, 0))
         return out[:25]
     except Exception:
         return []
@@ -1306,26 +1379,84 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     """
     Sugere matches relevantes ao usuário:
     - Mostra apenas matches do usuário na season ativa e active=TRUE
-    - Considera apenas ciclos LOCKED indexados no BLOCO 9
+    - Considera apenas ciclos LOCKED
     - Exibe no formato "Oponente | POD X | pendente/registrado"
     - Mantém o match_id como valor interno da escolha
     - Pode abrir automaticamente sem digitação, pois usa índice em memória
     """
     try:
+        if _ac_should_skip(interaction, "ac_match_id_user_pending"):
+            return []
+
         sh = open_sheet()
+        season_id = get_current_season_id(sh)
+        if season_id <= 0:
+            return []
+
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        items = get_match_ac_choices_for_user(sh, uid, query=q, limit=25)
+        nick_map = get_player_nick_map_fast(sh)
+        matches = get_matches_for_player_fast(
+            sh,
+            player_id=uid,
+            season_id=season_id,
+            cycle=None,
+            only_active=True
+        )
+
+        if not matches:
+            return []
+
+        # identifica ciclos locked da season ativa
+        locked_items = get_cycle_choices_fast(
+            sh,
+            season_id=season_id,
+            query="locked",
+            only_open=False,
+            limit=25
+        )
+        locked_cycles = {
+            safe_int(item.get("value", 0), 0)
+            for item in locked_items
+            if "fechado" in str(item.get("label", "")).lower()
+        }
 
         out: list[app_commands.Choice[str]] = []
-        for item in items:
-            label = str(item.get("label", "")).strip()
-            value = str(item.get("value", "")).strip()
-            if not label or not value:
+        seen = set()
+
+        def visual_status_from_match(r: dict) -> str:
+            status = str(r.get("confirmed_status", "")).strip().lower()
+            reported_by = str(r.get("reported_by_id", "")).strip()
+            return "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
+
+        for r in matches:
+            cyc = safe_int(r.get("cycle", 0), 0)
+            if cyc not in locked_cycles:
                 continue
 
-            out.append(app_commands.Choice(name=label[:100], value=value))
+            mid = str(r.get("match_id", "")).strip()
+            if not mid or mid in seen:
+                continue
+
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+            opp = b if uid == a else a
+            opp_name = nick_map.get(opp, opp)
+            pod = str(r.get("pod", "")).strip()
+            visual_status = visual_status_from_match(r)
+
+            if pod:
+                label = f"{opp_name} | POD {pod} | {visual_status}"
+            else:
+                label = f"{opp_name} | {visual_status}"
+
+            search_blob = f"{mid} {opp_name} {pod} {visual_status}".lower()
+            if q and q not in search_blob:
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=mid))
+            seen.add(mid)
 
             if len(out) >= 25:
                 break
@@ -1341,6 +1472,9 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
     Mantém liberdade do usuário digitar manualmente.
     """
     try:
+        if _ac_should_skip(interaction, "ac_score_vde"):
+            return []
+
         q = str(current or "").strip().replace(" ", "")
 
         options = [
@@ -1619,12 +1753,48 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 # RESUMO: Cabeçalho do bloco, import adicional de asyncio e tasks, definição do cliente
 # Discord, setup inicial do bot, configuração de onboarding, logs administrativos,
 # rotina automática de limpeza do canal de boas-vindas e preparação do before_loop.
-# REVISÃO: remoção de espera redundante no loop de limpeza e ajuste de comentário
-# para refletir o comportamento real configurado.
+# REVISÃO: remoção de espera redundante no loop de limpeza, ajuste de comentário
+# para refletir o comportamento real configurado e warm cache dos índices RAM
+# no boot do bot para melhorar a performance do primeiro uso.
 # =================================================
 
 import asyncio
 from discord.ext import tasks
+
+# =========================================================
+# Warm cache dos índices RAM
+# =========================================================
+async def warm_ram_indexes():
+    """
+    Pré-carrega os índices RAM no boot do bot para evitar que o primeiro
+    autocomplete/comando faça leituras pesadas no Google Sheets.
+    """
+    try:
+        sh = open_sheet()
+
+        try:
+            ensure_player_ram_index(sh)
+        except Exception:
+            pass
+
+        try:
+            ensure_cycle_ram_index(sh)
+        except Exception:
+            pass
+
+        try:
+            ensure_season_ram_index(sh)
+        except Exception:
+            pass
+
+        try:
+            ensure_match_ram_index(sh)
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
 
 # =========================
 # Discord Bot (Client)
@@ -1664,6 +1834,12 @@ class LemeBot(discord.Client):
                 await self.tree.sync(guild=guild)
             else:
                 await self.tree.sync()
+        except Exception:
+            pass
+
+        # Warm cache dos índices RAM
+        try:
+            await warm_ram_indexes()
         except Exception:
             pass
 
@@ -2077,8 +2253,7 @@ async def meuid(interaction: discord.Interaction):
 # com botões (start, confirmar, participar/assistir), aplicação do cargo
 # Jogador, evento on_member_join para postagem automática do onboarding
 # e comando administrativo /onboarding para repostar o fluxo.
-# REVISÃO: integração com o índice RAM de autocomplete de matches via
-# invalidate_match_ac_index(), além de blindagem do fluxo de confirmação/
+# REVISÃO: integração com MATCH RAM INDEX, além de blindagem do fluxo de confirmação/
 # rejeição por botão em DM para evitar "command error" / timeout de interação.
 # =================================================
 
@@ -2274,10 +2449,13 @@ class ResultConfirmView(discord.ui.View):
             sh = open_sheet()
             ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+            match_row = get_match_by_id_fast(sh, match_id)
 
             found = None
             row_data = None
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
             for idx in range(1, len(rows)):
                 r = rows[idx]
                 val = r[col["match_id"]] if col["match_id"] < len(r) else ""
@@ -2286,15 +2464,17 @@ class ResultConfirmView(discord.ui.View):
                     row_data = r
                     break
 
-            if not found or row_data is None:
+            if not found:
                 return await interaction.followup.send(
                     "❌ Match não encontrado.",
                     ephemeral=True
                 )
 
             def getc(name: str) -> str:
+                if match_row is not None and name in match_row:
+                    return str(match_row.get(name, ""))
                 ci = col[name]
-                return row_data[ci] if ci < len(row_data) else ""
+                return row_data[ci] if row_data is not None and ci < len(row_data) else ""
 
             a = str(getc("player_a_id")).strip()
             b = str(getc("player_b_id")).strip()
@@ -2342,6 +2522,7 @@ class ResultConfirmView(discord.ui.View):
                 },
             ])
             cache_invalidate(ws_matches)
+            invalidate_match_ram_index()
             invalidate_match_ac_index()
 
             season_id = safe_int(getc("season_id"), 0)
@@ -2404,10 +2585,13 @@ class ResultConfirmView(discord.ui.View):
             sh = open_sheet()
             ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+            match_row = get_match_by_id_fast(sh, match_id)
 
             found = None
             row_data = None
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
             for idx in range(1, len(rows)):
                 r = rows[idx]
                 val = r[col["match_id"]] if col["match_id"] < len(r) else ""
@@ -2416,15 +2600,17 @@ class ResultConfirmView(discord.ui.View):
                     row_data = r
                     break
 
-            if not found or row_data is None:
+            if not found:
                 return await interaction.followup.send(
                     "❌ Match não encontrado.",
                     ephemeral=True
                 )
 
             def getc(name: str) -> str:
+                if match_row is not None and name in match_row:
+                    return str(match_row.get(name, ""))
                 ci = col[name]
-                return row_data[ci] if ci < len(row_data) else ""
+                return row_data[ci] if row_data is not None and ci < len(row_data) else ""
 
             a = str(getc("player_a_id")).strip()
             b = str(getc("player_b_id")).strip()
@@ -2472,6 +2658,7 @@ class ResultConfirmView(discord.ui.View):
                 },
             ])
             cache_invalidate(ws_matches)
+            invalidate_match_ram_index()
             invalidate_match_ac_index()
 
             try:
@@ -2704,6 +2891,9 @@ def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str
 
 async def ac_inscrever_season(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_inscrever_season"):
+            return []
+
         sh = open_sheet()
         q = str(current or "").strip().lower()
 
@@ -2723,6 +2913,9 @@ async def ac_inscrever_season(interaction: discord.Interaction, current: str):
 
 async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_inscrever_cycle"):
+            return []
+
         sh = open_sheet()
 
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
@@ -2896,8 +3089,8 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # decklist, atualização das abas no Google Sheets e invalidação de cache
 # após escrita.
 # REVISÃO: integração com índice RAM de Players para autocomplete e resolução
-# rápida de jogador, redução de updates isolados e alinhamento com a estratégia
-# geral de cache/performance.
+# rápida de jogador, redução de updates isolados, debounce leve no autocomplete
+# e alinhamento com a estratégia geral de cache/performance.
 # =================================================
 
 # =========================================================
@@ -2958,6 +3151,9 @@ async def drop(interaction: discord.Interaction, cycle: int):
 # =========================================================
 async def ac_player_nick(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_player_nick"):
+            return []
+
         sh = open_sheet()
         q = str(current or "").strip().lower()
 
@@ -3160,7 +3356,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 # RESUMO: Cabeçalho do bloco, constante de auto-confirmação, helpers de visualização,
 # parser de placar V-D-E, autocomplete de /pods_ver e comandos /pods_ver e /meus_matches
 # para visualização de PODs e matches do jogador.
-# REVISÃO: integração com índices RAM de Seasons/Cycles/Players, redução de leituras
+# REVISÃO: integração com índices RAM de Seasons/Cycles/Players/Matches, redução de leituras
 # indiretas no Sheets e melhor aproveitamento dos dados já carregados em memória
 # para Players/Decks/Matches.
 # =================================================
@@ -3392,24 +3588,19 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 
     try:
         sh = open_sheet()
-
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-
-        rows = cached_get_all_records(ws_matches, ttl_seconds=10)
         nick_map = get_player_nick_map_fast(sh)
         uid = str(interaction.user.id).strip()
 
+        rows = get_matches_for_player_fast(
+            sh,
+            player_id=uid,
+            season_id=season,
+            cycle=cycle,
+            only_active=True
+        )
+
         items = []
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season:
-                continue
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
-            if not as_bool(r.get("active", "TRUE")):
-                continue
-
             a = str(r.get("player_a_id", "")).strip()
             b = str(r.get("player_b_id", "")).strip()
             if uid not in (a, b):
@@ -3456,9 +3647,8 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
 # Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
 # com botões de confirmar/rejeitar e invalidação de cache.
-# REVISÃO: integração com o índice RAM de autocomplete de matches via
-# invalidate_match_ac_index(), mantendo UX com "oponente" no comando,
-# batch_update e a mesma lógica funcional.
+# REVISÃO: integração com MATCH RAM INDEX, mantendo UX com "oponente" no comando,
+# batch_update, invalidação correta do índice RAM e mesma lógica funcional.
 # =================================================
 
 # =========================================================
@@ -3487,126 +3677,126 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+        # usa índice RAM primeiro
+        match_row = get_match_by_id_fast(sh, match_id)
+
+        if not match_row:
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+        else:
+            rows = None
+
         pid = str(interaction.user.id).strip()
 
-        for idx in range(1, len(rows)):
-            r = rows[idx]
+        found_row = None
 
-            def getc(name):
-                ci = col[name]
-                return r[ci] if ci < len(r) else ""
+        if rows is not None:
+            for idx in range(1, len(rows)):
+                r = rows[idx]
 
-            if str(getc("match_id")).strip() != match_id:
-                continue
+                def getc(name):
+                    ci = col[name]
+                    return r[ci] if ci < len(r) else ""
 
-            player_a = str(getc("player_a_id")).strip()
-            player_b = str(getc("player_b_id")).strip()
+                if str(getc("match_id")).strip() == match_id:
+                    found_row = idx + 1
+                    player_a = str(getc("player_a_id")).strip()
+                    player_b = str(getc("player_b_id")).strip()
+                    status = str(getc("confirmed_status")).strip().lower()
+                    break
+        else:
+            player_a = match_row["player_a_id"]
+            player_b = match_row["player_b_id"]
+            status = match_row["confirmed_status"]
 
-            if pid not in (player_a, player_b):
-                return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
+            # precisa achar linha real no sheet
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+            for idx in range(1, len(rows)):
+                r = rows[idx]
+                if str(r[col["match_id"]]).strip() == match_id:
+                    found_row = idx + 1
+                    break
 
-            status = str(getc("confirmed_status")).strip().lower()
+        if not found_row:
+            return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-            if status == "confirmed":
-                return await interaction.followup.send("❌ Este match já está confirmado.", ephemeral=True)
+        if pid not in (player_a, player_b):
+            return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
 
-            rown = idx + 1
+        if status == "confirmed":
+            return await interaction.followup.send("❌ Este match já está confirmado.", ephemeral=True)
 
-            if pid == player_a:
-                a_val = str(v)
-                b_val = str(d)
-                opponent_id = player_b
-                my_wins = v
-                opp_wins = d
-            else:
-                a_val = str(d)
-                b_val = str(v)
-                opponent_id = player_a
-                my_wins = v
-                opp_wins = d
+        rown = found_row
 
-            auto_confirm = auto_confirm_deadline_iso(utc_now_dt())
-            updated_at = now_iso_utc()
+        if pid == player_a:
+            a_val = str(v)
+            b_val = str(d)
+            opponent_id = player_b
+            my_wins = v
+            opp_wins = d
+        else:
+            a_val = str(d)
+            b_val = str(v)
+            opponent_id = player_a
+            my_wins = v
+            opp_wins = d
 
-            ws_matches.batch_update([
-                {
-                    "range": f"{col_letter(col['a_games_won'])}{rown}",
-                    "values": [[a_val]]
-                },
-                {
-                    "range": f"{col_letter(col['b_games_won'])}{rown}",
-                    "values": [[b_val]]
-                },
-                {
-                    "range": f"{col_letter(col['draw_games'])}{rown}",
-                    "values": [[str(e)]]
-                },
-                {
-                    "range": f"{col_letter(col['result_type'])}{rown}",
-                    "values": [["normal"]]
-                },
-                {
-                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
-                    "values": [["pending"]]
-                },
-                {
-                    "range": f"{col_letter(col['reported_by_id'])}{rown}",
-                    "values": [[pid]]
-                },
-                {
-                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
-                    "values": [[""]]
-                },
-                {
-                    "range": f"{col_letter(col['auto_confirm_at'])}{rown}",
-                    "values": [[auto_confirm]]
-                },
-                {
-                    "range": f"{col_letter(col['updated_at'])}{rown}",
-                    "values": [[updated_at]]
-                },
-            ])
-            cache_invalidate(ws_matches)
-            invalidate_match_ac_index()
+        auto_confirm = auto_confirm_deadline_iso(utc_now_dt())
+        updated_at = now_iso_utc()
 
-            dm_status = ""
+        ws_matches.batch_update([
+            {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[a_val]]},
+            {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[b_val]]},
+            {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [[str(e)]]},
+            {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["normal"]]},
+            {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["pending"]]},
+            {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [[pid]]},
+            {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[""]]},
+            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[auto_confirm]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
+        ])
+
+        cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
+
+        dm_status = ""
+
+        try:
+            user_level = await get_access_level(interaction)
+        except Exception:
+            user_level = "jogador"
+
+        if user_level == "jogador":
             try:
-                user_level = await get_access_level(interaction)
-            except Exception:
-                user_level = "jogador"
+                opponent_user = client.get_user(int(opponent_id))
+                if opponent_user is None:
+                    opponent_user = await client.fetch_user(int(opponent_id))
 
-            if user_level == "jogador":
-                try:
-                    opponent_user = client.get_user(int(opponent_id))
-                    if opponent_user is None:
-                        opponent_user = await client.fetch_user(int(opponent_id))
-
-                    reporter_name = interaction.user.display_name if hasattr(interaction.user, "display_name") else str(interaction.user)
-                    embed = discord.Embed(
-                        title="Resultado reportado",
-                        description=(
-                            f"**{reporter_name}** registrou o resultado **{my_wins}-{opp_wins}-{e}**.\n"
-                            f"O prazo para confirmar ou rejeitar é de **48h**."
-                        )
+                reporter_name = interaction.user.display_name
+                embed = discord.Embed(
+                    title="Resultado reportado",
+                    description=(
+                        f"**{reporter_name}** registrou o resultado "
+                        f"**{my_wins}-{opp_wins}-{e}**.\n"
+                        f"O prazo para confirmar ou rejeitar é de **48h**."
                     )
-                    embed.add_field(name="Match", value=f"`{match_id}`", inline=False)
-                    embed.set_footer(text=f"match_id:{match_id}")
+                )
 
-                    await opponent_user.send(embed=embed, view=ResultConfirmView())
-                    dm_status = "\n📩 O oponente foi notificado por DM para confirmar ou rejeitar."
-                except Exception:
-                    dm_status = "\n⚠️ Não consegui enviar DM ao oponente, mas o prazo de **48h** segue normalmente."
+                embed.add_field(name="Match", value=f"`{match_id}`", inline=False)
+                embed.set_footer(text=f"match_id:{match_id}")
 
-            await interaction.followup.send(
-                f"✅ Resultado enviado: **{placar}**\nO oponente tem **48h** para confirmar ou rejeitar.{dm_status}",
-                ephemeral=True
-            )
+                await opponent_user.send(embed=embed, view=ResultConfirmView())
+                dm_status = "\n📩 O oponente foi notificado por DM."
 
-            await log_admin(interaction, f"resultado reportado {match_id} {placar}")
-            return
+            except Exception:
+                dm_status = "\n⚠️ Não consegui enviar DM, mas o prazo segue."
 
-        await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Resultado enviado: **{placar}**\n"
+            f"O oponente tem **48h** para confirmar ou rejeitar.{dm_status}",
+            ephemeral=True
+        )
+
+        await log_admin(interaction, f"resultado reportado {match_id} {placar}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /resultado: {e}", ephemeral=True)
@@ -3629,63 +3819,74 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+        match_row = get_match_by_id_fast(sh, match_id)
+
+        if not match_row:
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+        else:
+            rows = None
+
         pid = str(interaction.user.id).strip()
+        found_row = None
 
-        for idx in range(1, len(rows)):
-            r = rows[idx]
+        if rows is not None:
+            for idx in range(1, len(rows)):
+                r = rows[idx]
+                if str(r[col["match_id"]]).strip() == match_id:
+                    found_row = idx + 1
+                    player_a = str(r[col["player_a_id"]]).strip()
+                    player_b = str(r[col["player_b_id"]]).strip()
+                    status = str(r[col["confirmed_status"]]).strip().lower()
+                    reported_by = str(r[col["reported_by_id"]]).strip()
+                    break
+        else:
+            player_a = match_row["player_a_id"]
+            player_b = match_row["player_b_id"]
+            status = match_row["confirmed_status"]
+            reported_by = match_row["reported_by_id"]
 
-            def getc(name):
-                ci = col[name]
-                return r[ci] if ci < len(r) else ""
+            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+            for idx in range(1, len(rows)):
+                if str(rows[idx][col["match_id"]]).strip() == match_id:
+                    found_row = idx + 1
+                    break
 
-            if str(getc("match_id")).strip() != match_id:
-                continue
+        if not found_row:
+            return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-            player_a = str(getc("player_a_id")).strip()
-            player_b = str(getc("player_b_id")).strip()
+        if pid not in (player_a, player_b):
+            return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
 
-            if pid not in (player_a, player_b):
-                return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
-
-            reported_by = str(getc("reported_by_id")).strip()
-            if reported_by == pid:
-                return await interaction.followup.send("❌ Quem reportou não pode rejeitar o próprio resultado.", ephemeral=True)
-
-            status = str(getc("confirmed_status")).strip().lower()
-            if status != "pending":
-                return await interaction.followup.send("❌ Este match não está pendente.", ephemeral=True)
-
-            rown = idx + 1
-            updated_at = now_iso_utc()
-
-            ws_matches.batch_update([
-                {
-                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
-                    "values": [["rejected"]]
-                },
-                {
-                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
-                    "values": [[pid]]
-                },
-                {
-                    "range": f"{col_letter(col['updated_at'])}{rown}",
-                    "values": [[updated_at]]
-                },
-            ])
-
-            cache_invalidate(ws_matches)
-            invalidate_match_ac_index()
-
-            await interaction.followup.send(
-                "⚠️ Resultado rejeitado. O match precisa ser reportado novamente.",
+        if reported_by == pid:
+            return await interaction.followup.send(
+                "❌ Quem reportou não pode rejeitar.",
                 ephemeral=True
             )
 
-            await log_admin(interaction, f"resultado rejeitado {match_id}")
-            return
+        if status != "pending":
+            return await interaction.followup.send(
+                "❌ Este match não está pendente.",
+                ephemeral=True
+            )
 
-        await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+        rown = found_row
+        updated_at = now_iso_utc()
+
+        ws_matches.batch_update([
+            {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["rejected"]]},
+            {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[pid]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
+        ])
+
+        cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
+
+        await interaction.followup.send(
+            "⚠️ Resultado rejeitado. Reporte novamente.",
+            ephemeral=True
+        )
+
+        await log_admin(interaction, f"resultado rejeitado {match_id}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /rejeitar: {e}", ephemeral=True)
@@ -3693,7 +3894,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 
 # =========================================================
 # [BLOCO 7/8 termina aqui]
-# =========================================================
+# =================================================
 
 # =================================================
 # FIM DO SUB-BLOCO B/2
@@ -4108,10 +4309,9 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 # SUB-BLOCO: C
 # RESUMO: Comandos administrativos de encerramento de resultados e gestão de matches:
 # /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo e /ranking_geral.
-# REVISÃO: integração com o índice RAM de autocomplete de matches via
-# invalidate_match_ac_index(), redução de escritas isoladas no Sheets, melhor
-# aproveitamento dos dados já carregados e eliminação de releituras desnecessárias
-# da aba Cycles/Players.
+# REVISÃO: integração com os índices RAM de matches/autocomplete, redução de escritas
+# isoladas no Sheets, melhor aproveitamento dos dados já carregados e eliminação
+# de releituras desnecessárias da aba Cycles/Players.
 # =================================================
 
 # =========================================================
@@ -4201,6 +4401,7 @@ async def final(interaction: discord.Interaction, cycle: int):
         if changed:
             ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
+            invalidate_match_ram_index()
             invalidate_match_ac_index()
 
         await interaction.followup.send(f"✅ FINAL aplicado. {changed} matches ajustados.", ephemeral=True)
@@ -4278,6 +4479,7 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
             },
         ])
         cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
         invalidate_match_ac_index()
 
         await interaction.followup.send(f"✅ Resultado editado e confirmado: **{placar}**", ephemeral=True)
@@ -4354,6 +4556,7 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
             },
         ])
         cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
         invalidate_match_ac_index()
 
         await interaction.followup.send("✅ Resultado cancelado. Match reaberto.", ephemeral=True)
@@ -4422,9 +4625,10 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         sh = open_sheet()
         season_id = require_current_season(sh)
 
+        rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=None, only_active=False) if False else None
+        # ranking geral agrega toda a season, então mantém leitura da season inteira
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
         stats: dict[str, dict] = {}
@@ -4522,9 +4726,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append("pos | jogador | MWP | pts | OMW | GW | OGW | J")
         out.append("--- | ------ | --- | --- | --- | --- | --- | ---")
 
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        nick_map = _build_nick_map_from_records(player_rows)
+        nick_map = get_player_nick_map_fast(sh)
 
         for i, r in enumerate(table[:top], 1):
             out.append(
@@ -4548,8 +4750,9 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 # RESUMO: Comandos administrativos de temporada e cadastro manual de jogadores.
 # Ajustado para permitir uso de /cadastrar_player por ADM, Organizador e Owner.
 # Nenhuma outra lógica foi alterada.
-# REVISÃO: adoção de cache em leitura de Seasons e redução de updates isolados
-# no bloco Players do /cadastrar_player.
+# REVISÃO: adoção de cache em leitura de Seasons, integração com índices RAM de
+# Seasons/Cycles/Players, debounce leve nos autocompletes e redução de updates
+# isolados no bloco Players e Decks do /cadastrar_player.
 # =================================================
 
 # =========================================================
@@ -4582,6 +4785,7 @@ async def startseason(interaction: discord.Interaction, nome: str = ""):
         set_season_status(sh, new_id, "open", name=season_name)
         close_all_other_seasons(sh, keep_open_id=new_id)
         set_current_season_id(sh, new_id)
+        invalidate_season_ram_index()
 
         await interaction.followup.send(
             f"✅ Season aberta e ativa: **{season_name}** (ID {new_id}).",
@@ -4608,6 +4812,7 @@ async def closeseason(interaction: discord.Interaction):
 
         set_season_status(sh, sid, "closed")
         set_current_season_id(sh, 0)
+        invalidate_season_ram_index()
 
         await interaction.followup.send(f"✅ Season **{sid}** fechada.", ephemeral=True)
         await log_admin(interaction, f"OWNER closeseason: closed S{sid}")
@@ -4621,28 +4826,22 @@ async def closeseason(interaction: discord.Interaction):
 # =========================================================
 async def ac_owner_season(interaction: discord.Interaction, current: str):
     try:
-        sh = open_sheet()
-        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-        ensure_sheet_columns(ws, SEASONS_REQUIRED)
+        if _ac_should_skip(interaction, "ac_owner_season"):
+            return []
 
+        sh = open_sheet()
         q = str(current or "").strip().lower()
-        rows = cached_get_all_records(ws, ttl_seconds=10)
+
+        items = get_season_choices_fast(sh, query=q, limit=25)
 
         out: list[app_commands.Choice[int]] = []
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid <= 0:
-                continue
-            st = str(r.get("status", "")).strip().lower()
-            name = str(r.get("name", "")).strip()
-            label = f"Season {sid} / {st or 'indefinido'}"
-            if name:
-                label += f" / {name}"
-            if q and q not in label.lower() and q not in str(sid):
+        for item in items:
+            sid = safe_int(item.get("season_id", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if sid <= 0 or not label:
                 continue
             out.append(app_commands.Choice(name=label[:100], value=sid))
 
-        out.sort(key=lambda c: c.value, reverse=True)
         return out[:25]
     except Exception:
         return []
@@ -4650,9 +4849,10 @@ async def ac_owner_season(interaction: discord.Interaction, current: str):
 
 async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_owner_cycle_for_season"):
+            return []
+
         sh = open_sheet()
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
         q = str(current or "").strip().lower()
@@ -4660,29 +4860,22 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
         if season_selected <= 0:
             return []
 
-        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_selected,
+            query=q,
+            only_open=False,
+            limit=25
+        )
 
         out: list[app_commands.Choice[int]] = []
-        seen = set()
-
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid != season_selected:
+        for item in items:
+            cyc = safe_int(item.get("value", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if cyc <= 0 or not label:
                 continue
-
-            cyc = safe_int(r.get("cycle", 0), 0)
-            if cyc <= 0 or cyc in seen:
-                continue
-
-            st = str(r.get("status", "")).strip().lower() or "indefinido"
-            label = f"Ciclo {cyc} / {st}"
-            if q and q not in label.lower() and q not in str(cyc):
-                continue
-
             out.append(app_commands.Choice(name=label[:100], value=cyc))
-            seen.add(cyc)
 
-        out.sort(key=lambda c: c.value)
         return out[:25]
     except Exception:
         return []
@@ -4779,6 +4972,7 @@ async def cadastrar_player(
             ws_players.append_row(row, value_input_option="USER_ENTERED")
 
         cache_invalidate(ws_players)
+        invalidate_player_ram_index()
 
         msg_parts = [f"✅ Player cadastrado/atualizado: **{raw}** ({membro.id})"]
 
@@ -4806,8 +5000,16 @@ async def cadastrar_player(
             )
             msg_parts.append(f"- Inscrição criada na **Season {season} / Ciclo {ciclo}**.")
         else:
-            ws_enr.update([["active"]], range_name=f"{col_letter(col_enr['status'])}{enr_row}")
-            ws_enr.update([[nowc]], range_name=f"{col_letter(col_enr['updated_at'])}{enr_row}")
+            ws_enr.batch_update([
+                {
+                    "range": f"{col_letter(col_enr['status'])}{enr_row}",
+                    "values": [["active"]]
+                },
+                {
+                    "range": f"{col_letter(col_enr['updated_at'])}{enr_row}",
+                    "values": [[nowc]]
+                },
+            ])
             msg_parts.append(f"- Inscrição reativada/confirmada na **Season {season} / Ciclo {ciclo}**.")
 
         cache_invalidate(ws_enr)
@@ -4829,9 +5031,20 @@ async def cadastrar_player(
         if not ok:
             return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
 
-        ws_decks.update([[nm]], range_name=f"{col_letter(col_deck['deck'])}{rown}")
-        ws_decks.update([[val]], range_name=f"{col_letter(col_deck['decklist_url'])}{rown}")
-        ws_decks.update([[nowc]], range_name=f"{col_letter(col_deck['updated_at'])}{rown}")
+        ws_decks.batch_update([
+            {
+                "range": f"{col_letter(col_deck['deck'])}{rown}",
+                "values": [[nm]]
+            },
+            {
+                "range": f"{col_letter(col_deck['decklist_url'])}{rown}",
+                "values": [[val]]
+            },
+            {
+                "range": f"{col_letter(col_deck['updated_at'])}{rown}",
+                "values": [[nowc]]
+            },
+        ])
         cache_invalidate(ws_decks)
 
         msg_parts.append(f"- Deck setado: **{nm}**")
