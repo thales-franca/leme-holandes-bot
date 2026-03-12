@@ -979,7 +979,8 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 # round robin, varredura de auto-confirmação, heurística anti-repetição entre jogadores e
 # cálculo de prazo do ciclo com base no maior POD.
 # REVISÃO: substituição de leituras diretas por cache, redução de updates isolados
-# em auto-confirmação e melhor reaproveitamento de dados em memória.
+# em auto-confirmação, integração com invalidação do índice RAM de autocomplete
+# e padronização de timestamp UTC.
 # =================================================
 
 def new_match_id(season_id: int, cycle: int, pod: str) -> str:
@@ -1011,6 +1012,7 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
     nowu = utc_now_dt()
     changed = 0
     updates = []
+    updated_at = now_iso_utc()
 
     for rown in range(2, len(rows) + 1):
         r = rows[rown - 1]
@@ -1049,7 +1051,7 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
                 },
                 {
                     "range": f"{col_letter(col['updated_at'])}{rown}",
-                    "values": [[now_br_str()]]
+                    "values": [[updated_at]]
                 },
             ])
             changed += 1
@@ -1057,6 +1059,7 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
     if updates:
         ws_matches.batch_update(updates)
         cache_invalidate(ws_matches)
+        invalidate_match_ac_index()
 
     return changed
 
@@ -1187,103 +1190,10 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
 # incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
 # e sugestões de placar V-D-E.
-# REVISÃO: otimização forte do autocomplete de match_id com cache derivado
-# em memória, redução de trabalho por tecla digitada, filtro mais rápido
-# para uso em celular e no Render, blindagem para exigir no mínimo 2 caracteres
-# e exibição do OPONENTE + status no lugar do match_id.
+# REVISÃO: integração com o índice em memória do BLOCO 9 para autocomplete
+# instantâneo de /resultado e /rejeitar, exibindo OPONENTE + status e mantendo
+# match_id como valor interno.
 # =================================================
-
-# =========================
-# CACHE DERIVADO — AUTOCOMPLETE MATCH_ID
-# =========================
-_AC_MATCH_PENDING_CACHE: dict[str, dict] = {}
-_AC_MATCH_PENDING_CACHE_LOCK = threading.Lock()
-_AC_MATCH_PENDING_TTL_SECONDS = 25
-
-def _ac_match_pending_cache_key(season_id: int, uid: str, locked_cycles: set[int]) -> str:
-    locked_txt = ",".join(str(x) for x in sorted(locked_cycles))
-    return f"S{season_id}:U{uid}:L{locked_txt}"
-
-def _ac_match_pending_cache_get(season_id: int, uid: str, locked_cycles: set[int], ttl_seconds: int = _AC_MATCH_PENDING_TTL_SECONDS):
-    key = _ac_match_pending_cache_key(season_id, uid, locked_cycles)
-    now = _cache_now()
-    with _AC_MATCH_PENDING_CACHE_LOCK:
-        item = _AC_MATCH_PENDING_CACHE.get(key)
-        if not item:
-            return None
-
-        ts = item.get("ts")
-        if ts is None or (now - ts > ttl_seconds):
-            _AC_MATCH_PENDING_CACHE.pop(key, None)
-            return None
-
-        return item.get("data")
-
-def _ac_match_pending_cache_set(season_id: int, uid: str, locked_cycles: set[int], data):
-    key = _ac_match_pending_cache_key(season_id, uid, locked_cycles)
-    now = _cache_now()
-    with _AC_MATCH_PENDING_CACHE_LOCK:
-        _AC_MATCH_PENDING_CACHE[key] = {"ts": now, "data": data}
-
-        # limpeza oportunista simples
-        expired = []
-        for k, item in _AC_MATCH_PENDING_CACHE.items():
-            ts = item.get("ts")
-            if ts is None or (now - ts > 120):
-                expired.append(k)
-        for k in expired:
-            _AC_MATCH_PENDING_CACHE.pop(k, None)
-
-def _build_match_ac_entries_for_user(match_rows: list[dict], nick_map: dict[str, str], season_id: int, uid: str, locked_cycles: set[int]) -> list[dict]:
-    entries = []
-
-    for r in match_rows:
-        if safe_int(r.get("season_id", 0), 0) != season_id:
-            continue
-
-        cyc = safe_int(r.get("cycle", 0), 0)
-        if cyc not in locked_cycles:
-            continue
-
-        if not as_bool(r.get("active", "TRUE")):
-            continue
-
-        a = str(r.get("player_a_id", "")).strip()
-        b = str(r.get("player_b_id", "")).strip()
-        if uid not in (a, b):
-            continue
-
-        mid = str(r.get("match_id", "")).strip()
-        if not mid:
-            continue
-
-        opp_id = b if uid == a else a
-        opp_name = nick_map.get(opp_id, opp_id)
-
-        status = str(r.get("confirmed_status", "")).strip().lower()
-        reported_by = str(r.get("reported_by_id", "")).strip()
-        pod = str(r.get("pod", "")).strip()
-
-        visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
-
-        if pod:
-            label = f"{opp_name} | POD {pod} | {visual_status}"
-        else:
-            label = f"{opp_name} | {visual_status}"
-
-        search_blob = f"{mid} {opp_name} {visual_status} {pod}".lower()
-
-        entries.append({
-            "mid": mid,
-            "label": label[:100],
-            "search": search_blob,
-            "cycle": cyc,
-        })
-
-    # prioriza ciclo mais alto e depois label
-    entries.sort(key=lambda x: (-safe_int(x.get("cycle", 0), 0), x["label"].lower()))
-    return entries
-
 
 # =========================
 # AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
@@ -1396,88 +1306,31 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     """
     Sugere matches relevantes ao usuário:
     - Mostra apenas matches do usuário na season ativa e active=TRUE
-    - Considera apenas o ciclo vigente com status LOCKED
+    - Considera apenas ciclos LOCKED indexados no BLOCO 9
     - Exibe no formato "Oponente | POD X | pendente/registrado"
     - Mantém o match_id como valor interno da escolha
-    - Se o usuário digitar manualmente o match_id, continua funcionando normalmente
+    - Pode abrir automaticamente sem digitação, pois usa índice em memória
     """
     try:
+        sh = open_sheet()
+        uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        # BLINDAGEM DE PERFORMANCE:
-        # exige pelo menos 2 caracteres para evitar busca ampla demais
-        # e reduzir drasticamente o risco de timeout/Unknown interaction
-        if len(q) < 2:
-            return []
+        items = get_match_ac_choices_for_user(sh, uid, query=q, limit=25)
 
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return []
-
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-
-        uid = str(interaction.user.id).strip()
-
-        cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
-
-        locked_cycles = set()
-        for r in cycle_rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            c = safe_int(r.get("cycle", 0), 0)
-            st = str(r.get("status", "")).strip().lower()
-            if c > 0 and st == "locked":
-                locked_cycles.add(c)
-
-        if not locked_cycles:
-            return []
-
-        cached_entries = _ac_match_pending_cache_get(
-            season_id,
-            uid,
-            locked_cycles,
-            ttl_seconds=_AC_MATCH_PENDING_TTL_SECONDS
-        )
-
-        if cached_entries is None:
-            ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-            ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-
-            ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-            ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-
-            player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-            match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-
-            nick_map: dict[str, str] = {}
-            for r in player_rows:
-                pid = str(r.get("discord_id", "")).strip()
-                nick = str(r.get("nick", "")).strip()
-                if pid:
-                    nick_map[pid] = nick or pid
-
-            cached_entries = _build_match_ac_entries_for_user(
-                match_rows=match_rows,
-                nick_map=nick_map,
-                season_id=season_id,
-                uid=uid,
-                locked_cycles=locked_cycles,
-            )
-            _ac_match_pending_cache_set(season_id, uid, locked_cycles, cached_entries)
-
-        found: list[app_commands.Choice[str]] = []
-        for item in cached_entries:
-            if q not in item["search"]:
+        out: list[app_commands.Choice[str]] = []
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not label or not value:
                 continue
 
-            found.append(app_commands.Choice(name=item["label"], value=item["mid"]))
+            out.append(app_commands.Choice(name=label[:100], value=value))
 
-            if len(found) >= 25:
+            if len(out) >= 25:
                 break
 
-        return found
+        return out
     except Exception:
         return []
 
@@ -2224,8 +2077,9 @@ async def meuid(interaction: discord.Interaction):
 # com botões (start, confirmar, participar/assistir), aplicação do cargo
 # Jogador, evento on_member_join para postagem automática do onboarding
 # e comando administrativo /onboarding para repostar o fluxo.
-# REVISÃO: blindagem do fluxo de confirmação/rejeição por botão em DM
-# para evitar "command error" / timeout de interação.
+# REVISÃO: integração com o índice RAM de autocomplete de matches via
+# invalidate_match_ac_index(), além de blindagem do fluxo de confirmação/
+# rejeição por botão em DM para evitar "command error" / timeout de interação.
 # =================================================
 
 # =========================================================
@@ -2472,10 +2326,23 @@ class ResultConfirmView(discord.ui.View):
                     ephemeral=True
                 )
 
-            ws_matches.update([["confirmed"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
-            ws_matches.update([[uid]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
-            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+            updated_at = now_iso_utc()
+            ws_matches.batch_update([
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{found}",
+                    "values": [["confirmed"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{found}",
+                    "values": [[uid]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{found}",
+                    "values": [[updated_at]]
+                },
+            ])
             cache_invalidate(ws_matches)
+            invalidate_match_ac_index()
 
             season_id = safe_int(getc("season_id"), 0)
             cycle = safe_int(getc("cycle"), 0)
@@ -2589,10 +2456,23 @@ class ResultConfirmView(discord.ui.View):
                     ephemeral=True
                 )
 
-            ws_matches.update([["rejected"]], range_name=f"{col_letter(col['confirmed_status'])}{found}")
-            ws_matches.update([[uid]], range_name=f"{col_letter(col['confirmed_by_id'])}{found}")
-            ws_matches.update([[now_iso_utc()]], range_name=f"{col_letter(col['updated_at'])}{found}")
+            updated_at = now_iso_utc()
+            ws_matches.batch_update([
+                {
+                    "range": f"{col_letter(col['confirmed_status'])}{found}",
+                    "values": [["rejected"]]
+                },
+                {
+                    "range": f"{col_letter(col['confirmed_by_id'])}{found}",
+                    "values": [[uid]]
+                },
+                {
+                    "range": f"{col_letter(col['updated_at'])}{found}",
+                    "values": [[updated_at]]
+                },
+            ])
             cache_invalidate(ws_matches)
+            invalidate_match_ac_index()
 
             try:
                 for child in self.children:
@@ -2688,8 +2568,9 @@ async def onboarding(interaction: discord.Interaction):
 # RESUMO: Cabeçalho do bloco, regras implementadas, helpers para verificar se o jogador
 # está ativo na season ou no ciclo, helper para garantir linha na aba Decks, helpers
 # de autocomplete para /inscrever e comando /inscrever com season, ciclo, deck e decklist.
-# REVISÃO: redução de leituras diretas no Sheets, reaproveitamento de cache
-# e autocomplete de ciclo focado apenas em ciclos abertos.
+# REVISÃO: integração com índices RAM de Seasons/Cycles/Players, redução de leituras
+# diretas no Sheets, reaproveitamento de cache e autocomplete de ciclo focado apenas
+# em ciclos abertos.
 # =================================================
 
 # =========================================================
@@ -2793,13 +2674,18 @@ def get_player_row_by_discord_id(ws_players, discord_id: str) -> int | None:
     return None
 
 def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
-    rows = cached_get_all_records(ws_players, ttl_seconds=10)
     did = str(discord_id).strip()
 
-    for r in rows:
-        if str(r.get("discord_id", "")).strip() == did:
-            return r
-    return None
+    try:
+        sh = ws_players.spreadsheet
+        row = get_player_row_fast(sh, did)
+        return row if row else None
+    except Exception:
+        rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        for r in rows:
+            if str(r.get("discord_id", "")).strip() == did:
+                return r
+        return None
 
 def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str) -> dict | None:
     rows = cached_get_all_records(ws_decks, ttl_seconds=10)
@@ -2819,30 +2705,18 @@ def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str
 async def ac_inscrever_season(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
-        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-        ensure_sheet_columns(ws, SEASONS_REQUIRED)
-
         q = str(current or "").strip().lower()
-        rows = cached_get_all_records(ws, ttl_seconds=10)
+
+        items = get_season_choices_fast(sh, query=q, limit=25)
 
         out: list[app_commands.Choice[int]] = []
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid <= 0:
+        for item in items:
+            sid = safe_int(item.get("season_id", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if sid <= 0 or not label:
                 continue
-
-            st = str(r.get("status", "")).strip().lower()
-            nm = str(r.get("name", "")).strip()
-            label = f"Season {sid} / {st or 'indefinido'}"
-            if nm:
-                label += f" / {nm}"
-
-            if q and q not in label.lower() and q not in str(sid):
-                continue
-
             out.append(app_commands.Choice(name=label[:100], value=sid))
 
-        out.sort(key=lambda c: c.value, reverse=True)
         return out[:25]
     except Exception:
         return []
@@ -2850,8 +2724,6 @@ async def ac_inscrever_season(interaction: discord.Interaction, current: str):
 async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
         q = str(current or "").strip().lower()
@@ -2859,33 +2731,22 @@ async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
         if season_selected <= 0:
             return []
 
-        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_selected,
+            query=q,
+            only_open=True,
+            limit=25
+        )
 
         out: list[app_commands.Choice[int]] = []
-        seen = set()
-
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid != season_selected:
+        for item in items:
+            cyc = safe_int(item.get("value", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if cyc <= 0 or not label:
                 continue
-
-            cyc = safe_int(r.get("cycle", 0), 0)
-            if cyc <= 0 or cyc in seen:
-                continue
-
-            st = str(r.get("status", "")).strip().lower() or "indefinido"
-            if st != "open":
-                continue
-
-            label = f"Ciclo {cyc} / {st}"
-
-            if q and q not in label.lower() and q not in str(cyc):
-                continue
-
             out.append(app_commands.Choice(name=label[:100], value=cyc))
-            seen.add(cyc)
 
-        out.sort(key=lambda c: c.value)
         return out[:25]
     except Exception:
         return []
@@ -2993,9 +2854,20 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
         rown = ensure_deck_row(ws_decks, season, cycle, pid)
         col_decks = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        ws_decks.update([[deck]], range_name=f"{col_letter(col_decks['deck'])}{rown}")
-        ws_decks.update([[val]], range_name=f"{col_letter(col_decks['decklist_url'])}{rown}")
-        ws_decks.update([[nowb]], range_name=f"{col_letter(col_decks['updated_at'])}{rown}")
+        ws_decks.batch_update([
+            {
+                "range": f"{col_letter(col_decks['deck'])}{rown}",
+                "values": [[deck]]
+            },
+            {
+                "range": f"{col_letter(col_decks['decklist_url'])}{rown}",
+                "values": [[val]]
+            },
+            {
+                "range": f"{col_letter(col_decks['updated_at'])}{rown}",
+                "values": [[nowb]]
+            },
+        ])
         cache_invalidate(ws_decks)
 
         await interaction.followup.send(
@@ -3023,8 +2895,9 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # seleção de jogador por nickname do banco Players, validação de URL de
 # decklist, atualização das abas no Google Sheets e invalidação de cache
 # após escrita.
-# REVISÃO: redução de updates isolados, otimização leve na resolução de jogador
-# e alinhamento com o restante da estratégia de cache/performance.
+# REVISÃO: integração com índice RAM de Players para autocomplete e resolução
+# rápida de jogador, redução de updates isolados e alinhamento com a estratégia
+# geral de cache/performance.
 # =================================================
 
 # =========================================================
@@ -3086,29 +2959,17 @@ async def drop(interaction: discord.Interaction, cycle: int):
 async def ac_player_nick(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-
         q = str(current or "").strip().lower()
-        rows = cached_get_all_records(ws_players, ttl_seconds=10)
+
+        items = get_player_choices_fast(sh, query=q, limit=25)
 
         out: list[app_commands.Choice[str]] = []
-        seen = set()
-
-        for r in rows:
-            pid = str(r.get("discord_id", "")).strip()
-            nick = str(r.get("nick", "")).strip()
-            if not pid or not nick:
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not label or not value:
                 continue
-
-            if q and q not in nick.lower() and q not in pid:
-                continue
-
-            if pid in seen:
-                continue
-
-            out.append(app_commands.Choice(name=nick[:100], value=pid))
-            seen.add(pid)
+            out.append(app_commands.Choice(name=label[:100], value=value))
 
         return out[:25]
     except Exception:
@@ -3116,12 +2977,18 @@ async def ac_player_nick(interaction: discord.Interaction, current: str):
 
 
 def resolve_player_nick(ws_players, player_id: str) -> str:
-    rows = cached_get_all_records(ws_players, ttl_seconds=10)
-    pid = str(player_id).strip()
-    for r in rows:
-        if str(r.get("discord_id", "")).strip() == pid:
-            return str(r.get("nick", "")).strip() or pid
-    return pid
+    try:
+        sh = ws_players.spreadsheet
+        nick_map = get_player_nick_map_fast(sh)
+        pid = str(player_id).strip()
+        return nick_map.get(pid, pid)
+    except Exception:
+        rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        pid = str(player_id).strip()
+        for r in rows:
+            if str(r.get("discord_id", "")).strip() == pid:
+                return str(r.get("nick", "")).strip() or pid
+        return pid
 
 
 def resolve_player_id_from_value(ws_players, jogador: str) -> str:
@@ -3129,19 +2996,23 @@ def resolve_player_id_from_value(ws_players, jogador: str) -> str:
     if not raw:
         return ""
 
-    raw_norm = raw.lower()
-    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+    try:
+        sh = ws_players.spreadsheet
+        return resolve_player_id_fast(sh, raw)
+    except Exception:
+        raw_norm = raw.lower()
+        rows = cached_get_all_records(ws_players, ttl_seconds=10)
 
-    for r in rows:
-        pid = str(r.get("discord_id", "")).strip()
-        if pid == raw:
-            return pid
+        for r in rows:
+            pid = str(r.get("discord_id", "")).strip()
+            if pid == raw:
+                return pid
 
-        nick = str(r.get("nick", "")).strip()
-        if nick and nick.lower() == raw_norm:
-            return pid
+            nick = str(r.get("nick", "")).strip()
+            if nick and nick.lower() == raw_norm:
+                return pid
 
-    return ""
+        return ""
 
 
 # =========================================================
@@ -3289,8 +3160,9 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 # RESUMO: Cabeçalho do bloco, constante de auto-confirmação, helpers de visualização,
 # parser de placar V-D-E, autocomplete de /pods_ver e comandos /pods_ver e /meus_matches
 # para visualização de PODs e matches do jogador.
-# REVISÃO: redução de leituras indiretas no Sheets e melhor aproveitamento
-# dos dados já carregados em memória para Players/Decks/Matches.
+# REVISÃO: integração com índices RAM de Seasons/Cycles/Players, redução de leituras
+# indiretas no Sheets e melhor aproveitamento dos dados já carregados em memória
+# para Players/Decks/Matches.
 # =================================================
 
 # =========================================================
@@ -3359,30 +3231,18 @@ def parse_vde(score: str):
 async def ac_pods_ver_season(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
-        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-        ensure_sheet_columns(ws, SEASONS_REQUIRED)
-
         q = str(current or "").strip().lower()
-        rows = cached_get_all_records(ws, ttl_seconds=10)
+
+        items = get_season_choices_fast(sh, query=q, limit=25)
 
         out: list[app_commands.Choice[int]] = []
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid <= 0:
+        for item in items:
+            sid = safe_int(item.get("season_id", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if sid <= 0 or not label:
                 continue
-
-            st = str(r.get("status", "")).strip().lower()
-            nm = str(r.get("name", "")).strip()
-            label = f"Season {sid} / {st or 'indefinido'}"
-            if nm:
-                label += f" / {nm}"
-
-            if q and q not in label.lower() and q not in str(sid):
-                continue
-
             out.append(app_commands.Choice(name=label[:100], value=sid))
 
-        out.sort(key=lambda c: c.value, reverse=True)
         return out[:25]
     except Exception:
         return []
@@ -3391,8 +3251,6 @@ async def ac_pods_ver_season(interaction: discord.Interaction, current: str):
 async def ac_pods_ver_cycle(interaction: discord.Interaction, current: str):
     try:
         sh = open_sheet()
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
         q = str(current or "").strip().lower()
@@ -3400,30 +3258,22 @@ async def ac_pods_ver_cycle(interaction: discord.Interaction, current: str):
         if season_selected <= 0:
             return []
 
-        rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_selected,
+            query=q,
+            only_open=False,
+            limit=25
+        )
 
         out: list[app_commands.Choice[int]] = []
-        seen = set()
-
-        for r in rows:
-            sid = safe_int(r.get("season_id", 0), 0)
-            if sid != season_selected:
+        for item in items:
+            cyc = safe_int(item.get("value", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if cyc <= 0 or not label:
                 continue
-
-            cyc = safe_int(r.get("cycle", 0), 0)
-            if cyc <= 0 or cyc in seen:
-                continue
-
-            st = str(r.get("status", "")).strip().lower() or "indefinido"
-            label = f"Ciclo {cyc} / {st}"
-
-            if q and q not in label.lower() and q not in str(cyc):
-                continue
-
             out.append(app_commands.Choice(name=label[:100], value=cyc))
-            seen.add(cyc)
 
-        out.sort(key=lambda c: c.value)
         return out[:25]
     except Exception:
         return []
@@ -3441,18 +3291,14 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
     try:
         sh = open_sheet()
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
 
         ensure_sheet_columns(ws_pods, PODSHISTORY_REQUIRED)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
         ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
         rows = cached_get_all_records(ws_pods, ttl_seconds=10)
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
         deck_rows = cached_get_all_records(ws_decks, ttl_seconds=10)
-
-        nick_map = _build_nick_map_from_records(player_rows)
+        nick_map = get_player_nick_map_fast(sh)
 
         deck_map: dict[tuple[int, int, str], dict[str, str]] = {}
         for r in deck_rows:
@@ -3548,14 +3394,11 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
         sh = open_sheet()
 
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
 
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        nick_map = _build_nick_map_from_records(player_rows)
+        nick_map = get_player_nick_map_fast(sh)
         uid = str(interaction.user.id).strip()
 
         items = []
@@ -3613,9 +3456,9 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
 # Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
 # com botões de confirmar/rejeitar e invalidação de cache.
-# REVISÃO: ajuste de UX para exibir "oponente" no lugar de "match_id" no comando,
-# mantendo o match_id como valor interno do autocomplete, além de preservar batch_update
-# e a mesma lógica funcional.
+# REVISÃO: integração com o índice RAM de autocomplete de matches via
+# invalidate_match_ac_index(), mantendo UX com "oponente" no comando,
+# batch_update e a mesma lógica funcional.
 # =================================================
 
 # =========================================================
@@ -3725,6 +3568,7 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
                 },
             ])
             cache_invalidate(ws_matches)
+            invalidate_match_ac_index()
 
             dm_status = ""
             try:
@@ -3831,6 +3675,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
             ])
 
             cache_invalidate(ws_matches)
+            invalidate_match_ac_index()
 
             await interaction.followup.send(
                 "⚠️ Resultado rejeitado. O match precisa ser reportado novamente.",
@@ -4263,8 +4108,10 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 # SUB-BLOCO: C
 # RESUMO: Comandos administrativos de encerramento de resultados e gestão de matches:
 # /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo e /ranking_geral.
-# REVISÃO: redução de escritas isoladas no Sheets, melhor aproveitamento dos dados
-# já carregados e eliminação de releituras desnecessárias da aba Cycles/Players.
+# REVISÃO: integração com o índice RAM de autocomplete de matches via
+# invalidate_match_ac_index(), redução de escritas isoladas no Sheets, melhor
+# aproveitamento dos dados já carregados e eliminação de releituras desnecessárias
+# da aba Cycles/Players.
 # =================================================
 
 # =========================================================
@@ -4300,6 +4147,9 @@ async def final(interaction: discord.Interaction, cycle: int):
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
         changed = 0
+        updates = []
+        updated_at = now_iso_utc()
+
         for rown in range(2, len(rows) + 1):
             r = rows[rown - 1]
 
@@ -4316,7 +4166,7 @@ async def final(interaction: discord.Interaction, cycle: int):
             if not as_bool(getc("active") or "TRUE"):
                 continue
 
-            ws_matches.batch_update([
+            updates.extend([
                 {
                     "range": f"{col_letter(col['a_games_won'])}{rown}",
                     "values": [["0"]]
@@ -4343,13 +4193,15 @@ async def final(interaction: discord.Interaction, cycle: int):
                 },
                 {
                     "range": f"{col_letter(col['updated_at'])}{rown}",
-                    "values": [[now_br_str()]]
+                    "values": [[updated_at]]
                 },
             ])
             changed += 1
 
         if changed:
+            ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
+            invalidate_match_ac_index()
 
         await interaction.followup.send(f"✅ FINAL aplicado. {changed} matches ajustados.", ephemeral=True)
 
@@ -4426,6 +4278,7 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
             },
         ])
         cache_invalidate(ws_matches)
+        invalidate_match_ac_index()
 
         await interaction.followup.send(f"✅ Resultado editado e confirmado: **{placar}**", ephemeral=True)
         await log_admin(interaction, f"admin_resultado_editar {match_id} {placar}")
@@ -4501,6 +4354,7 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
             },
         ])
         cache_invalidate(ws_matches)
+        invalidate_match_ac_index()
 
         await interaction.followup.send("✅ Resultado cancelado. Match reaberto.", ephemeral=True)
         await log_admin(interaction, f"admin_resultado_cancelar {match_id}")
@@ -5170,8 +5024,10 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 # RESUMO: Algoritmo anti-repetição de pods, gravação em lote para reduzir 429,
 # normalização automática de ciclo parcialmente gerado e comando /start_cycle
 # com match_id curto por pod no formato Sx-Cy-Pz-01.
-# REVISÃO: melhor aproveitamento de cache em Matches, eliminação de releitura
-# desnecessária do histórico de confrontos e consolidação de invalidação de cache.
+# REVISÃO: integração com o índice RAM de autocomplete de matches via
+# invalidate_match_ac_index(), mantendo o melhor aproveitamento de cache em Matches,
+# eliminação de releitura desnecessária do histórico de confrontos e consolidação
+# de invalidação de cache.
 # =================================================
 
 def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
@@ -5264,6 +5120,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                 set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
 
             cache_invalidate(ws_cycles)
+            invalidate_match_ac_index()
 
             return await interaction.followup.send(
                 "⚠️ Este ciclo já possui PODs ou matches gerados.\n"
@@ -5346,6 +5203,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
         _chunked_append_rows(ws_matches, matches_rows_to_append, chunk_size=200)
         cache_invalidate(ws_matches)
+        invalidate_match_ac_index()
 
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
 
@@ -5913,4 +5771,622 @@ client.run(DISCORD_TOKEN)
 
 # =================================================
 # FIM DO SUB-BLOCO G/7
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 9/9
+# SUB-BLOCO: ÚNICO
+# RESUMO: Índice em memória para autocomplete de matches do /resultado e /rejeitar,
+# com rebuild automático por tempo, invalidação manual por evento e leitura rápida
+# por usuário sem consultar Google Sheets a cada digitação.
+# =================================================
+
+# =========================================================
+# CACHE DE ÍNDICE — AUTOCOMPLETE DE MATCHES
+# =========================================================
+_MATCH_AC_INDEX = {
+    "ts": 0.0,
+    "season_id": 0,
+    "locked_cycles": set(),
+    "by_user": {},   # user_id -> list[{"label","value","search"}]
+}
+_MATCH_AC_INDEX_LOCK = threading.Lock()
+_MATCH_AC_INDEX_TTL_SECONDS = 60
+
+
+def invalidate_match_ac_index():
+    """
+    Invalida completamente o índice de autocomplete de matches.
+    Chamar após eventos que alterem matches/ciclos, por exemplo:
+    - /start_cycle
+    - /resultado
+    - /rejeitar
+    - confirmação/rejeição por DM
+    - auto-confirm
+    - admin_resultado_editar
+    - admin_resultado_cancelar
+    """
+    with _MATCH_AC_INDEX_LOCK:
+        _MATCH_AC_INDEX["ts"] = 0.0
+        _MATCH_AC_INDEX["season_id"] = 0
+        _MATCH_AC_INDEX["locked_cycles"] = set()
+        _MATCH_AC_INDEX["by_user"] = {}
+
+
+def _match_visual_status_from_row(r: dict) -> str:
+    status = str(r.get("confirmed_status", "")).strip().lower()
+    reported_by = str(r.get("reported_by_id", "")).strip()
+    return "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
+
+
+def _build_match_ac_index(sh):
+    """
+    Reconstrói o índice completo do autocomplete de matches para a season ativa,
+    considerando apenas ciclos LOCKED e matches ACTIVE.
+    """
+    season_id = get_current_season_id(sh)
+    if season_id <= 0:
+        return {
+            "ts": _cache_now(),
+            "season_id": 0,
+            "locked_cycles": set(),
+            "by_user": {},
+        }
+
+    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+
+    ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+    ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+    cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+    player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
+    match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+    locked_cycles = set()
+    for r in cycle_rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        cyc = safe_int(r.get("cycle", 0), 0)
+        st = str(r.get("status", "")).strip().lower()
+        if cyc > 0 and st == "locked":
+            locked_cycles.add(cyc)
+
+    if not locked_cycles:
+        return {
+            "ts": _cache_now(),
+            "season_id": season_id,
+            "locked_cycles": set(),
+            "by_user": {},
+        }
+
+    nick_map: dict[str, str] = {}
+    for r in player_rows:
+        pid = str(r.get("discord_id", "")).strip()
+        nick = str(r.get("nick", "")).strip()
+        if pid:
+            nick_map[pid] = nick or pid
+
+    by_user: dict[str, list[dict]] = {}
+
+    for r in match_rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        cyc = safe_int(r.get("cycle", 0), 0)
+        if cyc not in locked_cycles:
+            continue
+
+        if not as_bool(r.get("active", "TRUE")):
+            continue
+
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
+        mid = str(r.get("match_id", "")).strip()
+        pod = str(r.get("pod", "")).strip()
+
+        if not a or not b or not mid:
+            continue
+
+        visual_status = _match_visual_status_from_row(r)
+
+        a_opp = nick_map.get(b, b)
+        b_opp = nick_map.get(a, a)
+
+        if pod:
+            label_a = f"{a_opp} | POD {pod} | {visual_status}"
+            label_b = f"{b_opp} | POD {pod} | {visual_status}"
+        else:
+            label_a = f"{a_opp} | {visual_status}"
+            label_b = f"{b_opp} | {visual_status}"
+
+        search_a = f"{mid} {a_opp} {visual_status} {pod}".lower()
+        search_b = f"{mid} {b_opp} {visual_status} {pod}".lower()
+
+        by_user.setdefault(a, []).append({
+            "label": label_a[:100],
+            "value": mid,
+            "search": search_a,
+            "cycle": cyc,
+            "status": visual_status,
+        })
+
+        by_user.setdefault(b, []).append({
+            "label": label_b[:100],
+            "value": mid,
+            "search": search_b,
+            "cycle": cyc,
+            "status": visual_status,
+        })
+
+    # ordenação: pendente primeiro, ciclo mais alto primeiro, label por último
+    for uid, items in by_user.items():
+        items.sort(
+            key=lambda x: (
+                0 if x.get("status") == "pendente" else 1,
+                -safe_int(x.get("cycle", 0), 0),
+                str(x.get("label", "")).lower(),
+            )
+        )
+
+    return {
+        "ts": _cache_now(),
+        "season_id": season_id,
+        "locked_cycles": locked_cycles,
+        "by_user": by_user,
+    }
+
+
+def ensure_match_ac_index(sh, max_age_seconds: int = _MATCH_AC_INDEX_TTL_SECONDS):
+    """
+    Garante que o índice esteja pronto e recente.
+    Rebuild automático por tempo.
+    """
+    now = _cache_now()
+
+    with _MATCH_AC_INDEX_LOCK:
+        ts = float(_MATCH_AC_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    built = _build_match_ac_index(sh)
+
+    with _MATCH_AC_INDEX_LOCK:
+        _MATCH_AC_INDEX["ts"] = built["ts"]
+        _MATCH_AC_INDEX["season_id"] = built["season_id"]
+        _MATCH_AC_INDEX["locked_cycles"] = built["locked_cycles"]
+        _MATCH_AC_INDEX["by_user"] = built["by_user"]
+
+
+def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int = 25) -> list[dict]:
+    """
+    Retorna as opções de autocomplete já prontas para um usuário.
+    Cada item retorna:
+    - label
+    - value
+    - search
+    """
+    ensure_match_ac_index(sh)
+
+    uid = str(user_id).strip()
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _MATCH_AC_INDEX_LOCK:
+        items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
+
+    if not q:
+        return items[:limit]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def get_match_ac_index_snapshot() -> dict:
+    """
+    Helper opcional de diagnóstico.
+    """
+    with _MATCH_AC_INDEX_LOCK:
+        return {
+            "ts": _MATCH_AC_INDEX.get("ts", 0.0),
+            "season_id": _MATCH_AC_INDEX.get("season_id", 0),
+            "locked_cycles": sorted(_MATCH_AC_INDEX.get("locked_cycles", set())),
+            "users_indexed": len(_MATCH_AC_INDEX.get("by_user", {})),
+        }
+
+
+# =================================================
+# FIM DO SUB-BLOCO
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 10/10
+# SUB-BLOCO: ÚNICO
+# RESUMO: Índices RAM para Players, Cycles e Seasons, com rebuild automático
+# por tempo, invalidação manual por evento e helpers rápidos para autocomplete
+# e resolução em memória sem tocar no Google Sheets a cada uso.
+# =================================================
+
+# =========================================================
+# CACHE DE ÍNDICE — PLAYERS
+# =========================================================
+_PLAYER_RAM_INDEX = {
+    "ts": 0.0,
+    "by_id": {},          # pid -> row dict
+    "nick_map": {},       # pid -> nick
+    "choices": [],        # [{"label","value","search"}]
+}
+_PLAYER_RAM_INDEX_LOCK = threading.Lock()
+_PLAYER_RAM_INDEX_TTL_SECONDS = 120
+
+
+def invalidate_player_ram_index():
+    with _PLAYER_RAM_INDEX_LOCK:
+        _PLAYER_RAM_INDEX["ts"] = 0.0
+        _PLAYER_RAM_INDEX["by_id"] = {}
+        _PLAYER_RAM_INDEX["nick_map"] = {}
+        _PLAYER_RAM_INDEX["choices"] = []
+
+
+def _build_player_ram_index(sh):
+    ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+    ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
+    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+
+    by_id: dict[str, dict] = {}
+    nick_map: dict[str, str] = {}
+    choices: list[dict] = []
+
+    for r in rows:
+        pid = str(r.get("discord_id", "")).strip()
+        if not pid:
+            continue
+
+        nick = str(r.get("nick", "")).strip() or pid
+        by_id[pid] = r
+        nick_map[pid] = nick
+
+        choices.append({
+            "label": nick[:100],
+            "value": pid,
+            "search": f"{pid} {nick}".lower(),
+        })
+
+    choices.sort(key=lambda x: x["label"].lower())
+
+    return {
+        "ts": _cache_now(),
+        "by_id": by_id,
+        "nick_map": nick_map,
+        "choices": choices,
+    }
+
+
+def ensure_player_ram_index(sh, max_age_seconds: int = _PLAYER_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _PLAYER_RAM_INDEX_LOCK:
+        ts = float(_PLAYER_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    built = _build_player_ram_index(sh)
+
+    with _PLAYER_RAM_INDEX_LOCK:
+        _PLAYER_RAM_INDEX["ts"] = built["ts"]
+        _PLAYER_RAM_INDEX["by_id"] = built["by_id"]
+        _PLAYER_RAM_INDEX["nick_map"] = built["nick_map"]
+        _PLAYER_RAM_INDEX["choices"] = built["choices"]
+
+
+def get_player_nick_map_fast(sh) -> dict[str, str]:
+    ensure_player_ram_index(sh)
+    with _PLAYER_RAM_INDEX_LOCK:
+        return dict(_PLAYER_RAM_INDEX.get("nick_map", {}))
+
+
+def get_player_row_fast(sh, player_id: str) -> dict | None:
+    ensure_player_ram_index(sh)
+    pid = str(player_id).strip()
+    with _PLAYER_RAM_INDEX_LOCK:
+        row = _PLAYER_RAM_INDEX.get("by_id", {}).get(pid)
+        return dict(row) if row else None
+
+
+def resolve_player_id_fast(sh, raw_value: str) -> str:
+    ensure_player_ram_index(sh)
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return ""
+
+    raw_norm = raw.lower()
+
+    with _PLAYER_RAM_INDEX_LOCK:
+        by_id = _PLAYER_RAM_INDEX.get("by_id", {})
+        nick_map = _PLAYER_RAM_INDEX.get("nick_map", {})
+
+        if raw in by_id:
+            return raw
+
+        for pid, nick in nick_map.items():
+            if str(nick).strip().lower() == raw_norm:
+                return pid
+
+    return ""
+
+
+def get_player_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
+    ensure_player_ram_index(sh)
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _PLAYER_RAM_INDEX_LOCK:
+        items = list(_PLAYER_RAM_INDEX.get("choices", []))
+
+    if not q:
+        return items[:limit]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
+# =========================================================
+# CACHE DE ÍNDICE — CYCLES
+# =========================================================
+_CYCLE_RAM_INDEX = {
+    "ts": 0.0,
+    "by_season": {},      # season_id -> list[{"cycle","status","label_all","label_open","search"}]
+}
+_CYCLE_RAM_INDEX_LOCK = threading.Lock()
+_CYCLE_RAM_INDEX_TTL_SECONDS = 60
+
+
+def invalidate_cycle_ram_index():
+    with _CYCLE_RAM_INDEX_LOCK:
+        _CYCLE_RAM_INDEX["ts"] = 0.0
+        _CYCLE_RAM_INDEX["by_season"] = {}
+
+
+def _label_cycle_status(st: str) -> str:
+    st = str(st or "").strip().lower()
+    if st == "open":
+        return "aberto"
+    if st in ("locked", "closed"):
+        return "fechado"
+    if st == "completed":
+        return "concluído"
+    return st or "indefinido"
+
+
+def _build_cycle_ram_index(sh):
+    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+    rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+    by_season: dict[int, list[dict]] = {}
+
+    seen_pairs = set()
+
+    for r in rows:
+        season_id = safe_int(r.get("season_id", 0), 0)
+        cycle = safe_int(r.get("cycle", 0), 0)
+        if season_id <= 0 or cycle <= 0:
+            continue
+
+        key = (season_id, cycle)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+
+        st = str(r.get("status", "")).strip().lower()
+        label_all = f"Ciclo {cycle} / {_label_cycle_status(st)}"
+        label_open = f"Ciclo {cycle} / aberto"
+
+        by_season.setdefault(season_id, []).append({
+            "cycle": cycle,
+            "status": st,
+            "label_all": label_all[:100],
+            "label_open": label_open[:100],
+            "search": f"{cycle} {st} {label_all}".lower(),
+        })
+
+    for season_id in by_season:
+        by_season[season_id].sort(key=lambda x: safe_int(x.get("cycle", 0), 0))
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+    }
+
+
+def ensure_cycle_ram_index(sh, max_age_seconds: int = _CYCLE_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _CYCLE_RAM_INDEX_LOCK:
+        ts = float(_CYCLE_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    built = _build_cycle_ram_index(sh)
+
+    with _CYCLE_RAM_INDEX_LOCK:
+        _CYCLE_RAM_INDEX["ts"] = built["ts"]
+        _CYCLE_RAM_INDEX["by_season"] = built["by_season"]
+
+
+def get_cycle_choices_fast(sh, season_id: int, query: str = "", only_open: bool = False, limit: int = 25) -> list[dict]:
+    ensure_cycle_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _CYCLE_RAM_INDEX_LOCK:
+        items = list(_CYCLE_RAM_INDEX.get("by_season", {}).get(sid, []))
+
+    out = []
+    for item in items:
+        if only_open and str(item.get("status", "")).strip().lower() != "open":
+            continue
+        if q and q not in str(item.get("search", "")):
+            continue
+
+        out.append({
+            "label": item["label_open"] if only_open else item["label_all"],
+            "value": str(item["cycle"]),
+        })
+
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+# =========================================================
+# CACHE DE ÍNDICE — SEASONS
+# =========================================================
+_SEASON_RAM_INDEX = {
+    "ts": 0.0,
+    "items": [],   # [{"season_id","status","name","label","search"}]
+}
+_SEASON_RAM_INDEX_LOCK = threading.Lock()
+_SEASON_RAM_INDEX_TTL_SECONDS = 120
+
+
+def invalidate_season_ram_index():
+    with _SEASON_RAM_INDEX_LOCK:
+        _SEASON_RAM_INDEX["ts"] = 0.0
+        _SEASON_RAM_INDEX["items"] = []
+
+
+def _build_season_ram_index(sh):
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
+    ensure_sheet_columns(ws, SEASONS_REQUIRED)
+
+    rows = cached_get_all_records(ws, ttl_seconds=10)
+    items = []
+
+    for r in rows:
+        sid = safe_int(r.get("season_id", 0), 0)
+        if sid <= 0:
+            continue
+
+        st = str(r.get("status", "")).strip().lower()
+        nm = str(r.get("name", "")).strip()
+
+        label = f"Season {sid} / {st or 'indefinido'}"
+        if nm:
+            label += f" / {nm}"
+
+        items.append({
+            "season_id": sid,
+            "status": st,
+            "name": nm,
+            "label": label[:100],
+            "search": f"{sid} {st} {nm} {label}".lower(),
+        })
+
+    items.sort(key=lambda x: safe_int(x.get("season_id", 0), 0), reverse=True)
+
+    return {
+        "ts": _cache_now(),
+        "items": items,
+    }
+
+
+def ensure_season_ram_index(sh, max_age_seconds: int = _SEASON_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _SEASON_RAM_INDEX_LOCK:
+        ts = float(_SEASON_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    built = _build_season_ram_index(sh)
+
+    with _SEASON_RAM_INDEX_LOCK:
+        _SEASON_RAM_INDEX["ts"] = built["ts"]
+        _SEASON_RAM_INDEX["items"] = built["items"]
+
+
+def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
+    ensure_season_ram_index(sh)
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _SEASON_RAM_INDEX_LOCK:
+        items = list(_SEASON_RAM_INDEX.get("items", []))
+
+    if not q:
+        return items[:limit]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
+# =========================================================
+# INVALIDAÇÃO GERAL OPCIONAL
+# =========================================================
+def invalidate_all_ram_indexes():
+    invalidate_match_ac_index()
+    invalidate_player_ram_index()
+    invalidate_cycle_ram_index()
+    invalidate_season_ram_index()
+
+
+# =========================================================
+# SNAPSHOT OPCIONAL DE DIAGNÓSTICO
+# =========================================================
+def get_ram_indexes_snapshot() -> dict:
+    with _PLAYER_RAM_INDEX_LOCK:
+        player_snapshot = {
+            "ts": _PLAYER_RAM_INDEX.get("ts", 0.0),
+            "players_indexed": len(_PLAYER_RAM_INDEX.get("by_id", {})),
+        }
+
+    with _CYCLE_RAM_INDEX_LOCK:
+        cycle_snapshot = {
+            "ts": _CYCLE_RAM_INDEX.get("ts", 0.0),
+            "seasons_indexed": len(_CYCLE_RAM_INDEX.get("by_season", {})),
+        }
+
+    with _SEASON_RAM_INDEX_LOCK:
+        season_snapshot = {
+            "ts": _SEASON_RAM_INDEX.get("ts", 0.0),
+            "seasons_loaded": len(_SEASON_RAM_INDEX.get("items", [])),
+        }
+
+    return {
+        "players": player_snapshot,
+        "cycles": cycle_snapshot,
+        "seasons": season_snapshot,
+        "matches": get_match_ac_index_snapshot(),
+    }
+
+
+# =================================================
+# FIM DO SUB-BLOCO
 # =================================================
