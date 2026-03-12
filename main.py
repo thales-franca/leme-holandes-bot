@@ -1189,7 +1189,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # e sugestões de placar V-D-E.
 # REVISÃO: otimização forte do autocomplete de match_id com cache derivado
 # em memória, redução de trabalho por tecla digitada, filtro mais rápido
-# para uso em celular e no Render, e blindagem para exigir no mínimo 2 caracteres.
+# para uso em celular e no Render, blindagem para exigir no mínimo 2 caracteres
+# e exibição do OPONENTE + status no lugar do match_id.
 # =================================================
 
 # =========================
@@ -1256,22 +1257,31 @@ def _build_match_ac_entries_for_user(match_rows: list[dict], nick_map: dict[str,
         if not mid:
             continue
 
-        a_name = nick_map.get(a, a)
-        b_name = nick_map.get(b, b)
+        opp_id = b if uid == a else a
+        opp_name = nick_map.get(opp_id, opp_id)
 
         status = str(r.get("confirmed_status", "")).strip().lower()
         reported_by = str(r.get("reported_by_id", "")).strip()
+        pod = str(r.get("pod", "")).strip()
 
         visual_status = "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
-        label = f"{a_name} vs {b_name} | {visual_status}"
-        search_blob = f"{mid} {a_name} {b_name} {visual_status}".lower()
+
+        if pod:
+            label = f"{opp_name} | POD {pod} | {visual_status}"
+        else:
+            label = f"{opp_name} | {visual_status}"
+
+        search_blob = f"{mid} {opp_name} {visual_status} {pod}".lower()
 
         entries.append({
             "mid": mid,
             "label": label[:100],
             "search": search_blob,
+            "cycle": cyc,
         })
 
+    # prioriza ciclo mais alto e depois label
+    entries.sort(key=lambda x: (-safe_int(x.get("cycle", 0), 0), x["label"].lower()))
     return entries
 
 
@@ -1387,8 +1397,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     Sugere matches relevantes ao usuário:
     - Mostra apenas matches do usuário na season ativa e active=TRUE
     - Considera apenas o ciclo vigente com status LOCKED
-    - Exibe no formato "Nick vs Nick | pendente" quando ainda não houve lançamento
-    - Exibe no formato "Nick vs Nick | registrado" quando já houve lançamento
+    - Exibe no formato "Oponente | POD X | pendente/registrado"
     - Mantém o match_id como valor interno da escolha
     - Se o usuário digitar manualmente o match_id, continua funcionando normalmente
     """
@@ -1396,8 +1405,8 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         q = str(current or "").strip().lower()
 
         # BLINDAGEM DE PERFORMANCE:
-        # evita busca ampla demais no primeiro autocomplete
-        # e reduz drasticamente o risco de timeout/Unknown interaction
+        # exige pelo menos 2 caracteres para evitar busca ampla demais
+        # e reduzir drasticamente o risco de timeout/Unknown interaction
         if len(q) < 2:
             return []
 
@@ -1425,7 +1434,12 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         if not locked_cycles:
             return []
 
-        cached_entries = _ac_match_pending_cache_get(season_id, uid, locked_cycles, ttl_seconds=_AC_MATCH_PENDING_TTL_SECONDS)
+        cached_entries = _ac_match_pending_cache_get(
+            season_id,
+            uid,
+            locked_cycles,
+            ttl_seconds=_AC_MATCH_PENDING_TTL_SECONDS
+        )
 
         if cached_entries is None:
             ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
