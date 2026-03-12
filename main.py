@@ -1422,8 +1422,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =================================================
 # BLOCO ORIGINAL: BLOCO 3/12
 # SUB-BLOCO: B/2
-# REVISÃO: uso direto do MATCH AC INDEX no autocomplete crítico de /resultado
-# e /rejeitar, reduzindo releituras de matches/ciclos e mantendo a mesma UX.
+# REVISÃO: uso preferencial de snapshot imediato do MATCH AC INDEX no
+# autocomplete crítico de /resultado e /rejeitar, reduzindo timeout.
 # =================================================
 
 # =========================
@@ -1450,12 +1450,47 @@ def _ac_should_skip(interaction: discord.Interaction, ac_name: str, window_secon
         last = _AC_DEBOUNCE_STATE.get(key, 0.0)
         _AC_DEBOUNCE_STATE[key] = now
 
-        # limpeza oportunista simples
         expired = [k for k, ts in _AC_DEBOUNCE_STATE.items() if now - ts > 30]
         for k in expired:
             _AC_DEBOUNCE_STATE.pop(k, None)
 
     return (now - last) < window_seconds
+
+
+# =========================
+# Helpers rápidos — snapshot do autocomplete index
+# =========================
+def _get_match_ac_choices_snapshot_for_user(user_id: str, query: str = "", limit: int = 25) -> list[dict]:
+    """
+    Lê somente o snapshot atual do índice de autocomplete, sem rebuild.
+    Ideal para responder rápido ao Discord.
+    """
+    uid = str(user_id or "").strip()
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    if not uid:
+        return []
+
+    try:
+        with _MATCH_AC_INDEX_LOCK:
+            items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
+    except Exception:
+        return []
+
+    if not items:
+        return []
+
+    if not q:
+        return [dict(item) for item in items[:limit]]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(dict(item))
+            if len(out) >= limit:
+                break
+    return out
 
 
 # =========================
@@ -1540,26 +1575,31 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
     - Considera apenas ciclos LOCKED
     - Exibe no formato "Oponente | POD X | pendente/registrado"
     - Mantém o match_id como valor interno da escolha
-    - Pode abrir automaticamente sem digitação, pois usa índice em memória
+    - Prioriza resposta imediata usando snapshot do índice em memória
     """
     try:
         if _ac_should_skip(interaction, "ac_match_id_user_pending"):
             return []
 
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-        if season_id <= 0:
-            return []
-
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        items = get_match_ac_choices_for_user(
-            sh,
+        # 1) caminho ultra-rápido: usa snapshot atual, sem rebuild
+        items = _get_match_ac_choices_snapshot_for_user(
             user_id=uid,
             query=q,
             limit=25
         )
+
+        # 2) fallback: se ainda não houver snapshot pronto, tenta o helper normal
+        if not items:
+            sh = open_sheet()
+            items = get_match_ac_choices_for_user(
+                sh,
+                user_id=uid,
+                query=q,
+                limit=25
+            )
 
         out: list[app_commands.Choice[str]] = []
         seen = set()
@@ -1567,6 +1607,7 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         for item in items:
             label = str(item.get("label", "")).strip()
             value = str(item.get("value", "")).strip()
+
             if not label or not value or value in seen:
                 continue
 
@@ -1576,7 +1617,8 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
             if len(out) >= 25:
                 break
 
-        return out
+        return out[:25]
+
     except Exception:
         return []
 
@@ -1611,6 +1653,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
             if q and q not in s:
                 continue
             out.append(app_commands.Choice(name=s, value=s))
+
         return out[:25]
     except Exception:
         return []
@@ -2271,6 +2314,7 @@ COMMANDS_CATALOG = [
     ("adm", "/estatisticas", "Estatísticas da liga (admin)."),
     ("adm", "/inscritos", "Lista inscritos, deck/decklist e pendências do ciclo."),
     ("adm", "/cadastrar_player", "Cadastra player manualmente com season, ciclo, deck e decklist."),
+    ("adm", "/matches_ciclo", "Veja todas as Matches ID do Ciclo, quais estão pendentes e quais já foram lançadas"),
 
     # Owner
     ("owner", "/startseason", "Abre uma nova season e define como ativa (owner)."),
@@ -6097,8 +6141,8 @@ async def estatisticas(interaction: discord.Interaction):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 9/12
 # SUB-BLOCO: ÚNICO
-# REVISÃO: blindagem contra rebuild concorrente do índice de autocomplete,
-# com melhor aproveitamento do MATCH RAM INDEX sem alterar a lógica funcional.
+# REVISÃO: comportamento stale-while-revalidate para o índice de autocomplete,
+# reduzindo timeout do Discord sem alterar a lógica funcional.
 # =================================================
 
 # =========================================================
@@ -6112,7 +6156,7 @@ _MATCH_AC_INDEX = {
 }
 _MATCH_AC_INDEX_LOCK = threading.Lock()
 _MATCH_AC_INDEX_BUILD_LOCK = threading.Lock()
-_MATCH_AC_INDEX_TTL_SECONDS = 60
+_MATCH_AC_INDEX_TTL_SECONDS = 300
 
 
 def invalidate_match_ac_index():
@@ -6189,17 +6233,9 @@ def _build_match_ac_index(sh):
 
     by_user: dict[str, list[dict]] = {}
 
-    try:
-        match_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=None, only_active=True) if False else None
-    except Exception:
-        match_rows = None
-
-    if match_rows is None:
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-    else:
-        match_rows = list(match_rows)
+    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+    match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
     for r in match_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -6251,7 +6287,6 @@ def _build_match_ac_index(sh):
             "status": visual_status,
         })
 
-    # ordenação: pendente primeiro, ciclo mais alto primeiro, label por último
     for uid, items in by_user.items():
         items.sort(
             key=lambda x: (
@@ -6272,16 +6307,24 @@ def _build_match_ac_index(sh):
 def ensure_match_ac_index(sh, max_age_seconds: int = _MATCH_AC_INDEX_TTL_SECONDS):
     """
     Garante que o índice esteja pronto e recente.
-    Rebuild automático por tempo.
+    Rebuild automático por tempo, mas sem bloquear múltiplos rebuilds concorrentes.
     """
     now = _cache_now()
 
     with _MATCH_AC_INDEX_LOCK:
         ts = float(_MATCH_AC_INDEX.get("ts", 0.0) or 0.0)
+        has_data = bool(_MATCH_AC_INDEX.get("by_user", {}))
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
+        if has_data and not _MATCH_AC_INDEX_BUILD_LOCK.locked():
+            # stale aceitável: mantém snapshot vivo se alguém já vai reconstruir depois
+            pass
 
-    with _MATCH_AC_INDEX_BUILD_LOCK:
+    acquired = _MATCH_AC_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _MATCH_AC_INDEX_LOCK:
@@ -6296,6 +6339,8 @@ def ensure_match_ac_index(sh, max_age_seconds: int = _MATCH_AC_INDEX_TTL_SECONDS
             _MATCH_AC_INDEX["season_id"] = built["season_id"]
             _MATCH_AC_INDEX["locked_cycles"] = built["locked_cycles"]
             _MATCH_AC_INDEX["by_user"] = built["by_user"]
+    finally:
+        _MATCH_AC_INDEX_BUILD_LOCK.release()
 
 
 def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int = 25) -> list[dict]:
@@ -6305,15 +6350,26 @@ def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int 
     - label
     - value
     - search
-    """
-    ensure_match_ac_index(sh)
 
+    Estratégia:
+    - tenta usar snapshot atual imediatamente
+    - se estiver vazio, tenta garantir rebuild
+    - se rebuild ainda não estiver pronto, devolve vazio rapidamente
+    """
     uid = str(user_id).strip()
     q = str(query or "").strip().lower()
     limit = max(1, min(limit, 25))
 
+    if not uid:
+        return []
+
     with _MATCH_AC_INDEX_LOCK:
         items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
+
+    if not items:
+        ensure_match_ac_index(sh)
+        with _MATCH_AC_INDEX_LOCK:
+            items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
 
     if not q:
         return [dict(item) for item in items[:limit]]
@@ -7070,6 +7126,153 @@ def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
 
 # =================================================
 # FIM DO BLOCO 11/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO EXTRA
+# SUB-BLOCO: ÚNICO
+# RESUMO: Comando administrativo para listar todas as matches por season/ciclo,
+# separando partidas já registradas e pendentes, com uso prioritário do índice RAM.
+# =================================================
+
+# =========================================================
+# HELPERS — CONSULTA ADMIN DE MATCHES
+# =========================================================
+def _admin_match_status_label(status: str) -> str:
+    st = str(status or "").strip().lower()
+    if st == "confirmed":
+        return "confirmado"
+    if st == "pending":
+        return "pendente_confirmação"
+    if st == "rejected":
+        return "rejeitado"
+    return "aberto"
+
+
+def _admin_match_score_text(r: dict) -> str:
+    a_w = safe_int(r.get("a_games_won", 0), 0)
+    b_w = safe_int(r.get("b_games_won", 0), 0)
+    d_g = safe_int(r.get("draw_games", 0), 0)
+    return f"{a_w}-{b_w}-{d_g}"
+
+
+def _admin_match_is_registered(r: dict) -> bool:
+    """
+    Registrada:
+    - tem reported_by_id preenchido
+    - ou status diferente de open/vazio
+    """
+    reported_by = str(r.get("reported_by_id", "")).strip()
+    status = str(r.get("confirmed_status", "")).strip().lower()
+
+    if reported_by:
+        return True
+
+    if status not in ("", "open"):
+        return True
+
+    return False
+
+
+def _admin_match_sort_key(r: dict):
+    return (
+        safe_int(r.get("pod", 0), 999999),
+        str(r.get("match_id", "")).strip().lower(),
+    )
+
+
+# =========================================================
+# /matches_ciclo
+# =========================================================
+@client.tree.command(name="matches_ciclo", description="(ADM) Lista todas as matches do ciclo, separando registradas e pendentes.")
+@app_commands.describe(season="Season", cycle="Ciclo")
+@app_commands.autocomplete(season=ac_owner_season, cycle=ac_owner_cycle_for_season)
+async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: int):
+    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(f"❌ A season {season} não existe.", ephemeral=True)
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        cf = get_cycle_fields(ws_cycles, season, cycle)
+        if cf.get("status") is None:
+            return await interaction.followup.send(
+                f"❌ O ciclo {cycle} não existe na season {season}.",
+                ephemeral=True
+            )
+
+        nick_map = get_player_nick_map_fast(sh)
+        rows = get_matches_for_cycle_fast(sh, season_id=season, cycle=cycle, only_active=False)
+
+        if not rows:
+            return await interaction.followup.send(
+                f"⚠️ Não há matches na **Season {season} / Ciclo {cycle}**.",
+                ephemeral=True
+            )
+
+        rows = sorted(rows, key=_admin_match_sort_key)
+
+        registradas = []
+        pendentes = []
+
+        for r in rows:
+            match_id = str(r.get("match_id", "")).strip()
+            pod = str(r.get("pod", "")).strip()
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+
+            if not match_id or not a or not b:
+                continue
+
+            a_name = nick_map.get(a, a)
+            b_name = nick_map.get(b, b)
+
+            score = _admin_match_score_text(r)
+            status = _admin_match_status_label(r.get("confirmed_status", ""))
+
+            line = (
+                f"`{match_id}` | POD {pod or '-'} | "
+                f"**{a_name}** vs **{b_name}** | "
+                f"status: **{status}** | "
+                f"placar: **{score}**"
+            )
+
+            if _admin_match_is_registered(r):
+                registradas.append(line)
+            else:
+                pendentes.append(line)
+
+        lines = [f"📋 **Matches da Season {season} / Ciclo {cycle}**", ""]
+
+        lines.append(f"**Registradas:** {len(registradas)}")
+        if registradas:
+            lines.extend(registradas)
+        else:
+            lines.append("Nenhuma match registrada.")
+
+        lines.append("")
+        lines.append(f"**Pendentes:** {len(pendentes)}")
+        if pendentes:
+            lines.extend(pendentes)
+        else:
+            lines.append("Nenhuma match pendente.")
+
+        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True, limit=1800)
+        await log_admin(interaction, f"matches_ciclo season={season} cycle={cycle}")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /matches_ciclo: {e}", ephemeral=True)
+
+
+# =================================================
+# FIM DO BLOCO EXTRA
 # =================================================
 
 
