@@ -1,7 +1,7 @@
 # =================================================
-# BLOCO ORIGINAL: BLOCO 1/8
-# SUB-BLOCO: A
-# REVISÃO FINAL — cache + RAM index + locks globais
+# BLOCO ORIGINAL: BLOCO 1/12
+# SUB-BLOCO: A/2
+# REVISÃO FINAL — cache otimizado + RAM index + locks globais mais leves
 # =================================================
 
 import os
@@ -77,23 +77,23 @@ LOG_ADMIN_CHANNEL_ID = int(os.getenv("LOG_ADMIN_CHANNEL_ID", "0"))
 BR_TZ = timezone(timedelta(hours=-3))
 
 
-def now_br_dt() -> datetime:
+def now_br_dt():
     return datetime.now(BR_TZ)
 
 
-def now_br_str() -> str:
+def now_br_str():
     return now_br_dt().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def now_iso_utc() -> str:
+def now_iso_utc():
     return datetime.now(timezone.utc).isoformat()
 
 
-def utc_now_dt() -> datetime:
+def utc_now_dt():
     return datetime.now(timezone.utc)
 
 
-def parse_iso_dt(s: str):
+def parse_iso_dt(s):
 
     try:
 
@@ -116,7 +116,7 @@ def parse_iso_dt(s: str):
         return None
 
 
-def parse_br_dt(s: str):
+def parse_br_dt(s):
 
     try:
         return datetime.strptime(
@@ -128,7 +128,7 @@ def parse_br_dt(s: str):
         return None
 
 
-def fmt_br_dt(dt: datetime) -> str:
+def fmt_br_dt(dt):
     return dt.astimezone(BR_TZ).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -150,15 +150,15 @@ def as_bool(v):
     return s in ("true", "1", "yes", "y", "sim")
 
 
-def floor_333(x: float) -> float:
+def floor_333(x):
     return max(x, 1/3)
 
 
-def pct1(x: float) -> float:
+def pct1(x):
     return round(x * 100.0, 1)
 
 
-def col_letter(ci_0: int) -> str:
+def col_letter(ci_0):
 
     n = ci_0
     s = ""
@@ -179,8 +179,10 @@ def col_letter(ci_0: int) -> str:
 # CACHE (Sheets)
 # =========================================================
 
-_SHEETS_CACHE: dict[str, dict] = {}
+_SHEETS_CACHE = {}
 _SHEETS_CACHE_LOCK = threading.Lock()
+
+_CACHE_MAX_ITEMS = 500
 
 
 def _cache_now():
@@ -192,17 +194,17 @@ def _ws_cache_prefix(ws):
     try:
         sid = ws.spreadsheet.id
     except Exception:
-        sid = SHEET_ID or "unknown_sheet"
+        sid = SHEET_ID or "sheet"
 
     try:
-        wid = str(ws.id)
+        wid = ws.id
     except Exception:
-        wid = ""
+        wid = None
 
     try:
-        title = str(ws.title)
+        title = ws.title
     except Exception:
-        title = "unknown_ws"
+        title = "ws"
 
     if wid:
         return f"{sid}:{wid}:{title}:"
@@ -210,7 +212,7 @@ def _ws_cache_prefix(ws):
     return f"{sid}:{title}:"
 
 
-def _cache_key(ws, kind: str):
+def _cache_key(ws, kind):
     return _ws_cache_prefix(ws) + kind
 
 
@@ -247,33 +249,25 @@ def cache_set(ws, kind, data):
 
     now = _cache_now()
 
-    prefix = _ws_cache_prefix(ws)
-
     with _SHEETS_CACHE_LOCK:
 
         _SHEETS_CACHE[key] = {
             "ts": now,
-            "data": data
+            "data": data,
         }
 
-        expired = []
+        # limpeza leve
+        if len(_SHEETS_CACHE) > _CACHE_MAX_ITEMS:
 
-        for k, item in _SHEETS_CACHE.items():
+            cutoff = now - 120
 
-            if not k.startswith(prefix):
-                continue
+            remove = [
+                k for k, v in _SHEETS_CACHE.items()
+                if v.get("ts", 0) < cutoff
+            ]
 
-            ts = item.get("ts")
-
-            if ts is None:
-                expired.append(k)
-                continue
-
-            if now - ts > 120:
-                expired.append(k)
-
-        for k in expired:
-            _SHEETS_CACHE.pop(k, None)
+            for k in remove:
+                _SHEETS_CACHE.pop(k, None)
 
 
 def cache_invalidate(ws, kind=None):
@@ -285,7 +279,7 @@ def cache_invalidate(ws, kind=None):
         if kind is None:
 
             keys = [
-                k for k in _SHEETS_CACHE
+                k for k in list(_SHEETS_CACHE.keys())
                 if k.startswith(prefix)
             ]
 
@@ -301,7 +295,7 @@ def cache_invalidate(ws, kind=None):
 
 
 # =========================================================
-# RAM INDEX (NOVO)
+# RAM INDEX
 # =========================================================
 
 _MATCH_RAM_INDEX = None
@@ -344,14 +338,10 @@ def invalidate_cycle_ram_index():
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 1/8
-# SUB-BLOCO: B
-# RESUMO: Final do sistema de cache do Google Sheets, helpers de integração com Google Sheets,
-# criação e validação de abas, sistema de log administrativo no Discord, helpers de autorização
-# (owner, ADM, organizador, jogador), validação de URLs de decklist (Moxfield e LigaMagic) e
-# utilitários de parsing e validação de placar V-D-E.
-# REVISÃO: reforço dos helpers de cache, redução de leitura direta do cabeçalho
-# e manutenção da mesma lógica funcional do projeto.
+# BLOCO ORIGINAL: BLOCO 1/12
+# SUB-BLOCO: B/2
+# REVISÃO: cache leve para cliente/planilha do Google Sheets, melhor
+# reaproveitamento de cabeçalho e manutenção integral da lógica funcional.
 # =================================================
 
 def cached_get_all_values(ws, ttl_seconds: int = 10):
@@ -362,6 +352,7 @@ def cached_get_all_values(ws, ttl_seconds: int = 10):
     data = ws.get_all_values()
     cache_set(ws, "all_values", data)
     return data
+
 
 def cached_get_all_records(ws, ttl_seconds: int = 10):
     cached = cache_get(ws, "all_records", ttl_seconds)
@@ -376,33 +367,78 @@ def cached_get_all_records(ws, ttl_seconds: int = 10):
 # =========================
 # Google Sheets helpers
 # =========================
+_GS_CLIENT_CACHE = {
+    "client": None,
+    "service_json": None,
+}
+_GS_CLIENT_LOCK = threading.Lock()
+
+_OPEN_SHEET_CACHE = {
+    "sheet": None,
+    "sheet_id": None,
+}
+_OPEN_SHEET_LOCK = threading.Lock()
+
+
 def get_sheets_client():
     if not SERVICE_JSON:
         return None
-    data = json.loads(SERVICE_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(data, scopes=scopes)
-    return gspread.authorize(creds)
+
+    with _GS_CLIENT_LOCK:
+        cached_client = _GS_CLIENT_CACHE.get("client")
+        cached_json = _GS_CLIENT_CACHE.get("service_json")
+
+        if cached_client is not None and cached_json == SERVICE_JSON:
+            return cached_client
+
+        data = json.loads(SERVICE_JSON)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(data, scopes=scopes)
+        client = gspread.authorize(creds)
+
+        _GS_CLIENT_CACHE["client"] = client
+        _GS_CLIENT_CACHE["service_json"] = SERVICE_JSON
+
+        return client
+
 
 def open_sheet():
     gc = get_sheets_client()
     if not gc or not SHEET_ID:
         raise RuntimeError("Google Sheets não configurado (SHEET_ID ou GOOGLE_SERVICE_ACCOUNT_JSON).")
-    return gc.open_by_key(SHEET_ID)
+
+    with _OPEN_SHEET_LOCK:
+        cached_sheet = _OPEN_SHEET_CACHE.get("sheet")
+        cached_sheet_id = _OPEN_SHEET_CACHE.get("sheet_id")
+
+        if cached_sheet is not None and cached_sheet_id == SHEET_ID:
+            return cached_sheet
+
+        sh = gc.open_by_key(SHEET_ID)
+        _OPEN_SHEET_CACHE["sheet"] = sh
+        _OPEN_SHEET_CACHE["sheet_id"] = SHEET_ID
+
+        return sh
+
 
 def ensure_sheet_columns(ws, required_cols: list[str]):
     vals = cached_get_all_values(ws, ttl_seconds=10)
     header = vals[0] if vals else []
+
     if not header:
         raise RuntimeError(f"Aba '{ws.title}' sem cabeçalho na linha 1.")
-    idx = {name: i for i, name in enumerate(header)}  # 0-based
+
+    idx = {name: i for i, name in enumerate(header)}
     missing = [c for c in required_cols if c not in idx]
+
     if missing:
         raise RuntimeError(f"Aba '{ws.title}' sem colunas: {', '.join(missing)}")
+
     return idx
+
 
 def ensure_worksheet(sh, title: str, header: list[str], rows: int = 2000, cols: int = 25):
     try:
@@ -413,7 +449,8 @@ def ensure_worksheet(sh, title: str, header: list[str], rows: int = 2000, cols: 
     current = cached_get_all_values(ws, ttl_seconds=10)
     if not current:
         ws.append_row(header)
-        cache_invalidate(ws)  # header criado agora, limpa cache dessa aba
+        cache_invalidate(ws)
+
     return ws
 
 
@@ -431,20 +468,24 @@ async def log_admin(interaction: discord.Interaction | None, message: str):
             return
         if not LOG_ADMIN_CHANNEL_ID:
             return
+
         ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
         if not ch:
             try:
                 ch = await guild.fetch_channel(LOG_ADMIN_CHANNEL_ID)
             except Exception:
                 ch = None
+
         if not ch:
             return
 
         who = "SYSTEM"
         if interaction and interaction.user:
             who = f"{interaction.user} ({interaction.user.id})"
+
         ts = now_br_str()
         await ch.send(f"🧾 **LOG** [{ts} BR]\n**Quem:** {who}\n**Ação:** {message}")
+
     except Exception:
         pass
 
@@ -455,23 +496,26 @@ async def log_admin(interaction: discord.Interaction | None, message: str):
 async def has_role(interaction: discord.Interaction, role_name: str) -> bool:
     if not interaction.guild or not interaction.user:
         return False
+
     guild = interaction.guild
     member = guild.get_member(interaction.user.id)
+
     if member is None:
         try:
             member = await guild.fetch_member(interaction.user.id)
         except Exception:
             return False
+
     return any(r.name == role_name for r in member.roles)
 
+
 async def is_owner_only(interaction: discord.Interaction) -> bool:
-    # Dono real do servidor (sem cargo manual)
     if not interaction.guild or not interaction.user:
         return False
     return interaction.guild.owner_id == interaction.user.id
 
+
 async def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
-    # Admin do Discord OU cargos ADM/Organizador
     if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
         return True
     if await has_role(interaction, ROLE_ADM):
@@ -480,11 +524,12 @@ async def is_admin_or_organizer(interaction: discord.Interaction) -> bool:
         return True
     return False
 
+
 async def is_organizer_only(interaction: discord.Interaction) -> bool:
     return await has_role(interaction, ROLE_ORGANIZADOR)
 
+
 async def get_access_level(interaction: discord.Interaction) -> str:
-    # "owner" | "organizador" | "adm" | "jogador"
     if await is_owner_only(interaction):
         return "owner"
     if await has_role(interaction, ROLE_ORGANIZADOR):
@@ -499,6 +544,7 @@ async def get_access_level(interaction: discord.Interaction) -> str:
 # =========================
 def validate_decklist_url(url: str) -> tuple[bool, str]:
     raw = str(url).strip()
+
     if not raw.startswith("http://") and not raw.startswith("https://"):
         raw = "https://" + raw
 
@@ -507,6 +553,7 @@ def validate_decklist_url(url: str) -> tuple[bool, str]:
 
     parsed = urlparse(raw)
     host = (parsed.netloc or "").lower()
+
     if host.startswith("www."):
         host = host[4:]
 
@@ -532,17 +579,23 @@ def validate_decklist_url(url: str) -> tuple[bool, str]:
 # =========================
 def parse_score_3parts(score: str) -> tuple[int, int, int] | None:
     s = str(score).strip().lower().replace(" ", "")
+
     for sep in ["x", ":", "–", "—"]:
         s = s.replace(sep, "-")
+
     parts = s.split("-")
     if len(parts) != 3:
         return None
+
     a = safe_int(parts[0], -1)
     b = safe_int(parts[1], -1)
     d = safe_int(parts[2], -1)
+
     if a < 0 or b < 0 or d < 0:
         return None
+
     return (a, b, d)
+
 
 def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
     total = v + d + e
@@ -552,7 +605,7 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 
 
 # =========================================================
-# [BLOCO 1/8 termina aqui]
+# [BLOCO 1/12 termina aqui]
 # =========================================================
 
 # =================================================
@@ -561,80 +614,54 @@ def validate_3parts_rules(v: int, d: int, e: int) -> tuple[bool, str]:
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 2/8
-# SUB-BLOCO: A
-# RESUMO: Definição do schema das abas do Google Sheets, cabeçalhos e colunas obrigatórias,
-# garantia de criação das abas, helpers de season, leitura e atualização da season atual,
-# status de temporada e fechamento das demais seasons.
-# REVISÃO: adoção de cache nos helpers centrais de season e redução de escritas
-# isoladas com batch_update, mantendo a mesma lógica funcional.
+# BLOCO ORIGINAL: BLOCO 2/12
+# SUB-BLOCO: A/2
+# REVISÃO: redução de leituras repetidas, uso consistente de ensure_worksheet,
+# menos chamadas diretas ao Sheets e melhor aproveitamento do cache.
 # =================================================
-
-# [BLOCO 2/8] — SCHEMA (ABAS) + SEASON STATE + FUNÇÕES DE SEASON/CICLO (REVISADO v2)
-# AJUSTES FEITOS NESTA REVISÃO:
-# - Reintroduz ABA "Decks" (DECKS_HEADER/DECKS_REQUIRED) pois BLOCO 6 usa.
-# - Adiciona helpers: get_deck_row / get_deck_fields (usados no BLOCO 6).
-# - (ADICIONADO AGORA) ensure_deck_row (BLOCO 6 chama esse helper).
-# - ensure_all_sheets agora garante também a aba Decks.
-# - Mantém Players no formato longo (A..H) como você está usando.
-# - Mantém lógica de season atual (SeasonState -> fallback Seasons OPEN).
-# =========================================================
 
 # =========================
 # Sheets schema (headers)
 # =========================
-SEASONSTATE_HEADER = ["key", "value", "updated_at"]  # key="current_season_id"
+SEASONSTATE_HEADER = ["key", "value", "updated_at"]
 
-SEASONS_HEADER = ["season_id", "status", "name", "created_at", "updated_at"]  # status: open|closed
-SEASONS_REQUIRED = ["season_id", "status", "name", "created_at", "updated_at"]
+SEASONS_HEADER = ["season_id", "status", "name", "created_at", "updated_at"]
+SEASONS_REQUIRED = SEASONS_HEADER[:]
 
-# A: discord_id | B: nick | C: name | D: notes | E: status | F: rating | G: created_at | H: updated_at
 PLAYERS_HEADER = ["discord_id", "nick", "name", "notes", "status", "rating", "created_at", "updated_at"]
 PLAYERS_REQUIRED = PLAYERS_HEADER[:]
 
-# Deck/Decklist: 1 vez POR CICLO (por season + cycle + player_id)
 DECKS_HEADER = ["season_id", "cycle", "player_id", "deck", "decklist_url", "created_at", "updated_at"]
 DECKS_REQUIRED = DECKS_HEADER[:]
 
 ENROLLMENTS_HEADER = ["season_id", "cycle", "player_id", "status", "created_at", "updated_at"]
-ENROLLMENTS_REQUIRED = ["season_id", "cycle", "player_id", "status", "created_at", "updated_at"]
+ENROLLMENTS_REQUIRED = ENROLLMENTS_HEADER[:]
 
 CYCLES_HEADER = ["season_id", "cycle", "status", "start_at_br", "deadline_at_br", "created_at", "updated_at"]
-# status: open|locked|completed
-CYCLES_REQUIRED = ["season_id", "cycle", "status", "start_at_br", "deadline_at_br", "created_at", "updated_at"]
+CYCLES_REQUIRED = CYCLES_HEADER[:]
 
 PODSHISTORY_HEADER = ["season_id", "cycle", "pod", "player_id", "created_at"]
-PODSHISTORY_REQUIRED = ["season_id", "cycle", "pod", "player_id", "created_at"]
+PODSHISTORY_REQUIRED = PODSHISTORY_HEADER[:]
 
 MATCHES_REQUIRED_COLS = [
-    "match_id",
-    "season_id",
-    "cycle",
-    "pod",
-    "player_a_id",
-    "player_b_id",
-    "a_games_won",
-    "b_games_won",
-    "draw_games",
-    "result_type",
-    "confirmed_status",
-    "reported_by_id",
-    "confirmed_by_id",
-    "message_id",
-    "active",
-    "created_at",
-    "updated_at",
-    "auto_confirm_at",
+    "match_id","season_id","cycle","pod",
+    "player_a_id","player_b_id",
+    "a_games_won","b_games_won","draw_games",
+    "result_type","confirmed_status",
+    "reported_by_id","confirmed_by_id","message_id",
+    "active","created_at","updated_at","auto_confirm_at",
 ]
+
 MATCHES_HEADER = MATCHES_REQUIRED_COLS[:]
 
 STANDINGS_HEADER = [
-    "season_id", "cycle", "player_id",
-    "matches_played", "match_points", "mwp_percent",
-    "game_wins", "game_losses", "game_draws", "games_played", "gw_percent",
-    "omw_percent", "ogw_percent",
-    "rank_position", "last_recalc_at"
+    "season_id","cycle","player_id",
+    "matches_played","match_points","mwp_percent",
+    "game_wins","game_losses","game_draws","games_played","gw_percent",
+    "omw_percent","ogw_percent",
+    "rank_position","last_recalc_at"
 ]
+
 STANDINGS_REQUIRED = STANDINGS_HEADER[:]
 
 
@@ -642,13 +669,11 @@ STANDINGS_REQUIRED = STANDINGS_HEADER[:]
 # Ensure abas existem
 # =========================
 def ensure_all_sheets(sh):
+
     ensure_worksheet(sh, "SeasonState", SEASONSTATE_HEADER, rows=20, cols=10)
     ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
     ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-
-    # Decks por ciclo
     ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
-
     ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
     ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
     ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
@@ -660,165 +685,208 @@ def ensure_all_sheets(sh):
 # Season helpers
 # =========================
 def _infer_open_season_id_from_seasons_ws(ws_seasons) -> int:
+
     rows = cached_get_all_records(ws_seasons, ttl_seconds=10)
+
     open_ids = []
+
     for r in rows:
+
         sid = safe_int(r.get("season_id", 0), 0)
         st = str(r.get("status", "")).strip().lower()
+
         if sid > 0 and st == "open":
             open_ids.append(sid)
+
     if not open_ids:
         return 0
+
     return max(open_ids)
+
 
 def get_current_season_id(arg) -> int:
     """
-    - Se receber worksheet "Seasons": retorna a season com status=open.
-    - Se receber spreadsheet (sh): tenta SeasonState; se falhar, infere pela aba Seasons.
+    aceita worksheet Seasons OU spreadsheet sh
     """
-    # Caso 1: worksheet "Seasons"
+
     try:
-        if hasattr(arg, "title") and str(arg.title).strip().lower() == "seasons":
+        if hasattr(arg, "title") and str(arg.title).lower() == "seasons":
             ensure_sheet_columns(arg, SEASONS_REQUIRED)
             return _infer_open_season_id_from_seasons_ws(arg)
     except Exception:
         pass
 
-    # Caso 2: spreadsheet sh
     sh = arg
+
     try:
-        ws_state = sh.worksheet("SeasonState")
+        ws_state = ensure_worksheet(sh, "SeasonState", SEASONSTATE_HEADER)
         rows = cached_get_all_records(ws_state, ttl_seconds=10)
+
         for r in rows:
             if str(r.get("key", "")).strip() == "current_season_id":
                 sid = safe_int(r.get("value", 0), 0)
                 if sid > 0:
                     return sid
+
     except Exception:
         pass
 
-    # fallback: infere pela aba Seasons
     try:
-        ws_seasons = sh.worksheet("Seasons")
-        ensure_sheet_columns(ws_seasons, SEASONS_REQUIRED)
+        ws_seasons = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
         return _infer_open_season_id_from_seasons_ws(ws_seasons)
     except Exception:
         return 0
 
+
 def set_current_season_id(sh, season_id: int):
-    ws = ensure_worksheet(sh, "SeasonState", SEASONSTATE_HEADER, rows=20, cols=10)
+
+    ws = ensure_worksheet(sh, "SeasonState", SEASONSTATE_HEADER)
+
     vals = cached_get_all_values(ws, ttl_seconds=10)
+
     nowb = now_br_str()
 
     found = None
+
     for i in range(2, len(vals) + 1):
+
         row = vals[i - 1]
+
         if len(row) >= 1 and str(row[0]).strip() == "current_season_id":
             found = i
             break
 
     if found is None:
-        ws.append_row(["current_season_id", str(season_id), nowb], value_input_option="USER_ENTERED")
+
+        ws.append_row(
+            ["current_season_id", str(season_id), nowb],
+            value_input_option="USER_ENTERED"
+        )
+
     else:
+
         ws.batch_update([
-            {
-                "range": f"B{found}",
-                "values": [[str(season_id)]]
-            },
-            {
-                "range": f"C{found}",
-                "values": [[nowb]]
-            },
+            {"range": f"B{found}", "values": [[str(season_id)]]},
+            {"range": f"C{found}", "values": [[nowb]]},
         ])
 
     cache_invalidate(ws)
 
+
 def season_exists(sh, season_id: int) -> bool:
-    ws = sh.worksheet("Seasons")
+
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
+
     rows = cached_get_all_records(ws, ttl_seconds=10)
+
     for r in rows:
+
         if safe_int(r.get("season_id", 0), 0) == season_id:
             return True
+
     return False
 
+
 def get_season_status(sh, season_id: int) -> str:
-    ws = sh.worksheet("Seasons")
+
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
+
     rows = cached_get_all_records(ws, ttl_seconds=10)
+
     for r in rows:
+
         if safe_int(r.get("season_id", 0), 0) == season_id:
             return str(r.get("status", "")).strip().lower()
+
     return ""
 
+
 def set_season_status(sh, season_id: int, status: str, name: str | None = None):
+
     status = str(status).strip().lower()
-    ws = sh.worksheet("Seasons")
+
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
+
     data = cached_get_all_values(ws, ttl_seconds=10)
+
     nowb = now_br_str()
 
     found = None
+
     for i in range(2, len(data) + 1):
+
         row = data[i - 1]
+
         sid = safe_int(row[0] if len(row) > 0 else 0, 0)
+
         if sid == season_id:
             found = i
             break
 
     if found is None:
+
         nm = name or f"Temporada {season_id}"
-        ws.append_row([str(season_id), status, nm, nowb, nowb], value_input_option="USER_ENTERED")
+
+        ws.append_row(
+            [str(season_id), status, nm, nowb, nowb],
+            value_input_option="USER_ENTERED"
+        )
+
     else:
+
         updates = [
-            {
-                "range": f"B{found}",
-                "values": [[status]]
-            },
-            {
-                "range": f"E{found}",
-                "values": [[nowb]]
-            },
+            {"range": f"B{found}", "values": [[status]]},
+            {"range": f"E{found}", "values": [[nowb]]},
         ]
+
         if name is not None:
-            updates.append({
-                "range": f"C{found}",
-                "values": [[name]]
-            })
+            updates.append({"range": f"C{found}", "values": [[name]]})
+
         ws.batch_update(updates)
 
     cache_invalidate(ws)
 
+
 def close_all_other_seasons(sh, keep_open_id: int):
-    ws = sh.worksheet("Seasons")
+
+    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
+
     data = cached_get_all_values(ws, ttl_seconds=10)
+
     if len(data) <= 1:
         return 0
 
     nowb = now_br_str()
-    changed = 0
+
     updates = []
 
+    changed = 0
+
     for i in range(2, len(data) + 1):
+
         row = data[i - 1]
+
         sid = safe_int(row[0] if len(row) > 0 else 0, 0)
+
         if sid <= 0 or sid == keep_open_id:
             continue
 
         st = (row[1] if len(row) > 1 else "").strip().lower()
+
         if st != "closed":
-            updates.append({
-                "range": f"B{i}",
-                "values": [["closed"]]
-            })
-            updates.append({
-                "range": f"E{i}",
-                "values": [[nowb]]
-            })
+
+            updates.append({"range": f"B{i}", "values": [["closed"]]})
+            updates.append({"range": f"E{i}", "values": [[nowb]]})
+
             changed += 1
 
     if updates:
+
         ws.batch_update(updates)
         cache_invalidate(ws)
 
     return changed
+
 
 # =================================================
 # FIM DO SUB-BLOCO A/2
@@ -826,13 +894,10 @@ def close_all_other_seasons(sh, keep_open_id: int):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 2/8
-# SUB-BLOCO: B
-# RESUMO: Helpers de ciclos (busca, status, tempos, listagem e sugestões de ciclos),
-# helpers de jogadores (localização e mapa de nicknames) e helpers de decks por ciclo
-# incluindo localização de linha, criação garantida de registro e leitura dos campos.
-# REVISÃO: substituição de leituras diretas por cache, remoção de ws.find()
-# e melhor reaproveitamento de dados em memória.
+# BLOCO ORIGINAL: BLOCO 2/12
+# SUB-BLOCO: B/2
+# REVISÃO: redução de leituras repetidas, melhor uso de cache e menor custo
+# em busca de ciclos, players e decks sem alterar comportamento.
 # =================================================
 
 # =========================
@@ -842,38 +907,64 @@ def get_cycle_row(ws_cycles, season_id: int, cycle: int) -> int | None:
     rows = cached_get_all_values(ws_cycles, ttl_seconds=10)
     if len(rows) <= 1:
         return None
+
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
     for r_i in range(2, len(rows) + 1):
         r = rows[r_i - 1]
+
         s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
         c = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
+
         if s == season_id and c == cycle:
             return r_i
+
     return None
+
 
 def get_cycle_fields(ws_cycles, season_id: int, cycle: int) -> dict:
     rows = cached_get_all_values(ws_cycles, ttl_seconds=10)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-    out = {"season_id": season_id, "cycle": cycle, "status": None, "start_at_br": "", "deadline_at_br": ""}
+
+    out = {
+        "season_id": season_id,
+        "cycle": cycle,
+        "status": None,
+        "start_at_br": "",
+        "deadline_at_br": "",
+    }
+
     for r_i in range(2, len(rows) + 1):
         r = rows[r_i - 1]
+
         s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
         c = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
+
         if s == season_id and c == cycle:
             out["status"] = (r[col["status"]] if col["status"] < len(r) else "").strip().lower()
             out["start_at_br"] = (r[col["start_at_br"]] if col["start_at_br"] < len(r) else "").strip()
             out["deadline_at_br"] = (r[col["deadline_at_br"]] if col["deadline_at_br"] < len(r) else "").strip()
             return out
+
     return out
+
 
 def set_cycle_status(ws_cycles, season_id: int, cycle: int, status: str):
     status = str(status).strip().lower()
     nowb = now_br_str()
+
     rown = get_cycle_row(ws_cycles, season_id, cycle)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
     if rown is None:
-        ws_cycles.append_row([str(season_id), str(cycle), status, "", "", nowb, nowb], value_input_option="USER_ENTERED")
+
+        ws_cycles.append_row(
+            [str(season_id), str(cycle), status, "", "", nowb, nowb],
+            value_input_option="USER_ENTERED"
+        )
+
     else:
+
         ws_cycles.batch_update([
             {
                 "range": f"{col_letter(col['status'])}{rown}",
@@ -884,15 +975,26 @@ def set_cycle_status(ws_cycles, season_id: int, cycle: int, status: str):
                 "values": [[nowb]]
             },
         ])
+
     cache_invalidate(ws_cycles)
 
+
 def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, deadline_at_br: str):
+
     nowb = now_br_str()
+
     rown = get_cycle_row(ws_cycles, season_id, cycle)
     col = ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
     if rown is None:
-        ws_cycles.append_row([str(season_id), str(cycle), "open", start_at_br, deadline_at_br, nowb, nowb], value_input_option="USER_ENTERED")
+
+        ws_cycles.append_row(
+            [str(season_id), str(cycle), "open", start_at_br, deadline_at_br, nowb, nowb],
+            value_input_option="USER_ENTERED"
+        )
+
     else:
+
         ws_cycles.batch_update([
             {
                 "range": f"{col_letter(col['start_at_br'])}{rown}",
@@ -907,30 +1009,47 @@ def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, dea
                 "values": [[nowb]]
             },
         ])
+
     cache_invalidate(ws_cycles)
 
+
 def list_cycles(ws_cycles, season_id: int) -> list[tuple[int, str]]:
+
     out = []
+
     for r in cached_get_all_records(ws_cycles, ttl_seconds=10):
+
         s = safe_int(r.get("season_id", 0), 0)
+
         if s != season_id:
             continue
+
         c = safe_int(r.get("cycle", 0), 0)
         st = str(r.get("status", "")).strip().lower()
+
         if c > 0:
             out.append((c, st))
+
     out.sort(key=lambda x: x[0])
     return out
 
+
 def suggest_open_cycles(ws_cycles, season_id: int, limit: int = 25) -> list[int]:
+
     items = list_cycles(ws_cycles, season_id)
+
     if not items:
         return [1]
+
     max_cycle = max(c for c, _ in items)
+
     open_cycles = [c for c, st in items if st == "open"]
+
     if (max_cycle + 1) not in open_cycles:
         open_cycles.append(max_cycle + 1)
+
     open_cycles = sorted(set(open_cycles))
+
     return open_cycles[:limit]
 
 
@@ -938,30 +1057,46 @@ def suggest_open_cycles(ws_cycles, season_id: int, limit: int = 25) -> list[int]
 # Players helpers
 # =========================
 def find_player_row(ws_players, discord_id: int):
+
     rows = cached_get_all_values(ws_players, ttl_seconds=10)
+
     if len(rows) <= 1:
         return None
 
     col = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
     did_col = col.get("discord_id", 0)
+
     target = str(discord_id).strip()
 
     for i in range(2, len(rows) + 1):
+
         r = rows[i - 1]
+
         v = r[did_col] if did_col < len(r) else ""
+
         if str(v).strip() == target:
             return i
+
     return None
 
+
 def get_player_nick_map(ws_players) -> dict[str, str]:
+
     data = cached_get_all_records(ws_players, ttl_seconds=10)
+
     m = {}
+
     for r in data:
+
         pid = str(r.get("discord_id", "")).strip()
         nick = str(r.get("nick", "")).strip()
+
         if pid:
             m[pid] = nick or pid
+
     return m
+
 
 # Alias usado nos BLOCOS 5/7/8
 def build_players_nick_map(ws_players) -> dict[str, str]:
@@ -972,56 +1107,60 @@ def build_players_nick_map(ws_players) -> dict[str, str]:
 # Deck helpers (1 vez POR CICLO)
 # =========================
 def get_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int | None:
-    """
-    Localiza a linha (1-based) do registro do jogador na aba Decks para (season,cycle,player).
-    """
+
     data = cached_get_all_values(ws_decks, ttl_seconds=10)
+
     if len(data) <= 1:
         return None
+
     col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
     pid = str(player_id).strip()
 
     for i in range(2, len(data) + 1):
+
         r = data[i - 1]
+
         s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
         c = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
         p = str(r[col["player_id"]] if col["player_id"] < len(r) else "").strip()
+
         if s == season_id and c == cycle and p == pid:
             return i
+
     return None
 
-# (ADICIONADO) BLOCO 6 usa ensure_deck_row(...)
+
 def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
-    """
-    Garante que exista uma linha em Decks para (season,cycle,player).
-    Retorna a linha 1-based.
-    """
+
     rown = get_deck_row(ws_decks, season_id, cycle, player_id)
+
     if rown is not None:
         return rown
 
     nowb = now_br_str()
+
     ws_decks.append_row(
         [str(season_id), str(cycle), str(player_id).strip(), "", "", nowb, nowb],
         value_input_option="USER_ENTERED"
     )
+
     cache_invalidate(ws_decks)
 
-    # linha criada é a última
-    try:
-        return len(cached_get_all_values(ws_decks, ttl_seconds=5))
-    except Exception:
-        # fallback seguro
-        return (get_deck_row(ws_decks, season_id, cycle, player_id) or 2)
+    vals = cached_get_all_values(ws_decks, ttl_seconds=5)
+
+    return len(vals)
+
 
 def get_deck_fields(ws_decks, row: int) -> dict:
-    """
-    Lê e retorna os campos do Decks naquela linha (1-based).
-    """
+
     vals_all = cached_get_all_values(ws_decks, ttl_seconds=10)
+
     vals = vals_all[row - 1][:] if 0 < row <= len(vals_all) else []
+
     while len(vals) < len(DECKS_HEADER):
         vals.append("")
+
     return {
         "season_id": safe_int(vals[0], 0),
         "cycle": safe_int(vals[1], 0),
@@ -1034,7 +1173,7 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 
 
 # =========================================================
-# [BLOCO 2/8 termina aqui]
+# [BLOCO 2/12 termina aqui]
 # =========================================================
 
 # =================================================
@@ -1043,14 +1182,11 @@ def get_deck_fields(ws_decks, row: int) -> dict:
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 3/8
-# SUB-BLOCO: A
-# RESUMO: Cabeçalho do bloco, helpers de matches, geração de IDs, prazo de auto-confirmação,
-# round robin, varredura de auto-confirmação, heurística anti-repetição entre jogadores e
-# cálculo de prazo do ciclo com base no maior POD.
-# REVISÃO: substituição de leituras diretas por cache, redução de updates isolados
-# em auto-confirmação, integração com invalidação dos índices RAM de matches/autocomplete
-# e padronização de timestamp UTC.
+# BLOCO ORIGINAL: BLOCO 3/12
+# SUB-BLOCO: A/2
+# REVISÃO: melhora de consistência em auto-confirmação, com melhor aproveitamento
+# do índice RAM de matches sem perder segurança na localização da linha real no
+# Sheets, além de manter as mesmas regras de prazo e anti-repetição.
 # =================================================
 
 def new_match_id(season_id: int, cycle: int, pod: str) -> str:
@@ -1073,16 +1209,38 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
     """
     Auto-confirm: Matches pending com reported_by_id preenchido e auto_confirm_at <= agora (UTC)
     """
-    ws_matches = sh.worksheet("Matches")
+    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
     col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
+    # Mantém leitura do Sheets para localizar a linha real, mas aproveita
+    # o índice RAM para reduzir parte da filtragem quando possível.
+    try:
+        cycle_matches = get_matches_for_cycle_fast(
+            sh,
+            season_id=season_id,
+            cycle=cycle,
+            only_active=True
+        )
+    except Exception:
+        cycle_matches = None
+
     rows = cached_get_all_values(ws_matches, ttl_seconds=10)
     if len(rows) <= 1:
         return 0
 
+    allowed_match_ids = None
+    if cycle_matches is not None:
+        allowed_match_ids = {
+            str(r.get("match_id", "")).strip()
+            for r in cycle_matches
+            if str(r.get("confirmed_status", "")).strip().lower() == "pending"
+            and str(r.get("reported_by_id", "")).strip()
+        }
+
     nowu = utc_now_dt()
+    updated_at = now_iso_utc()
     changed = 0
     updates = []
-    updated_at = now_iso_utc()
 
     for rown in range(2, len(rows) + 1):
         r = rows[rown - 1]
@@ -1091,18 +1249,23 @@ def sweep_auto_confirm(sh, season_id: int, cycle: int) -> int:
             idx = col[name]
             return r[idx] if idx < len(r) else ""
 
+        mid = str(getc("match_id")).strip()
+        if allowed_match_ids is not None and mid not in allowed_match_ids:
+            continue
+
         r_season = safe_int(getc("season_id"), 0)
         r_cycle = safe_int(getc("cycle"), 0)
         if r_season != season_id or r_cycle != cycle:
             continue
+
         if not as_bool(getc("active") or "TRUE"):
             continue
 
-        status = (getc("confirmed_status") or "").strip().lower()
+        status = str(getc("confirmed_status") or "").strip().lower()
         if status != "pending":
             continue
 
-        reported_by = (getc("reported_by_id") or "").strip()
+        reported_by = str(getc("reported_by_id") or "").strip()
         if not reported_by:
             continue
 
@@ -1257,15 +1420,10 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 3/8
+# BLOCO ORIGINAL: BLOCO 3/12
 # SUB-BLOCO: B/2
-# RESUMO: Funções de autocomplete que devem ficar acima dos decorators dos comandos,
-# incluindo autocomplete de ciclos, ciclos abertos, match_id relevante ao usuário
-# e sugestões de placar V-D-E.
-# REVISÃO: integração com o índice RAM de MATCHES e com os índices RAM de CYCLES,
-# mantendo autocomplete instantâneo de /resultado e /rejeitar, exibindo OPONENTE
-# + status e mantendo match_id como valor interno, com debounce leve para reduzir
-# rajadas de chamadas do Discord sem alterar a UX.
+# REVISÃO: uso direto do MATCH AC INDEX no autocomplete crítico de /resultado
+# e /rejeitar, reduzindo releituras de matches/ciclos e mantendo a mesma UX.
 # =================================================
 
 # =========================
@@ -1396,67 +1554,24 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        nick_map = get_player_nick_map_fast(sh)
-        matches = get_matches_for_player_fast(
+        items = get_match_ac_choices_for_user(
             sh,
-            player_id=uid,
-            season_id=season_id,
-            cycle=None,
-            only_active=True
-        )
-
-        if not matches:
-            return []
-
-        # identifica ciclos locked da season ativa
-        locked_items = get_cycle_choices_fast(
-            sh,
-            season_id=season_id,
-            query="locked",
-            only_open=False,
+            user_id=uid,
+            query=q,
             limit=25
         )
-        locked_cycles = {
-            safe_int(item.get("value", 0), 0)
-            for item in locked_items
-            if "fechado" in str(item.get("label", "")).lower()
-        }
 
         out: list[app_commands.Choice[str]] = []
         seen = set()
 
-        def visual_status_from_match(r: dict) -> str:
-            status = str(r.get("confirmed_status", "")).strip().lower()
-            reported_by = str(r.get("reported_by_id", "")).strip()
-            return "registrado" if (status == "pending" and reported_by) or status == "confirmed" else "pendente"
-
-        for r in matches:
-            cyc = safe_int(r.get("cycle", 0), 0)
-            if cyc not in locked_cycles:
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not label or not value or value in seen:
                 continue
 
-            mid = str(r.get("match_id", "")).strip()
-            if not mid or mid in seen:
-                continue
-
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
-            opp = b if uid == a else a
-            opp_name = nick_map.get(opp, opp)
-            pod = str(r.get("pod", "")).strip()
-            visual_status = visual_status_from_match(r)
-
-            if pod:
-                label = f"{opp_name} | POD {pod} | {visual_status}"
-            else:
-                label = f"{opp_name} | {visual_status}"
-
-            search_blob = f"{mid} {opp_name} {pod} {visual_status}".lower()
-            if q and q not in search_blob:
-                continue
-
-            out.append(app_commands.Choice(name=label[:100], value=mid))
-            seen.add(mid)
+            out.append(app_commands.Choice(name=label[:100], value=value))
+            seen.add(value)
 
             if len(out) >= 25:
                 break
@@ -1502,7 +1617,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 
 
 # =========================================================
-# [BLOCO 3/8 termina aqui]
+# [BLOCO 3/12 termina aqui]
 # =========================================================
 
 # =================================================
@@ -1511,14 +1626,11 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 4/8
+# BLOCO ORIGINAL: BLOCO 4/12
 # SUB-BLOCO: ÚNICA
-# RESUMO: Função de recálculo oficial do ciclo, incluindo auto-confirmação silenciosa,
-# leitura de jogadores e matches válidos, montagem de estatísticas, cálculo de MWP, GWP,
-# OMW e OGW com piso, ordenação do ranking, reconstrução da aba Standings do zero e retorno
-# das linhas finais do ranking recalculado.
-# REVISÃO: substituição de leituras diretas por cache, padronização de acesso às abas
-# e invalidação explícita de cache após reconstrução da aba Standings.
+# REVISÃO: aproveitamento do índice RAM de Matches, filtro de inscrições ativas
+# no ciclo, reconstrução mais consistente da aba Standings e manutenção integral
+# da lógica oficial de cálculo do ranking.
 # =================================================
 
 def recalculate_cycle(sh, season_id: int, cycle: int):
@@ -1534,8 +1646,8 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
       active=TRUE e confirmed_status=confirmed e result_type != bye
     """
     ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
-    ws_matches = sh.worksheet("Matches")
-    ws_standings = sh.worksheet("Standings")
+    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+    ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
 
     # auto-confirm "silencioso" (opcional) antes do cálculo
     try:
@@ -1543,15 +1655,19 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     except Exception:
         pass
 
-    # Base de jogadores do ciclo — ranking inclui apenas inscritos no ciclo
+    # Base de jogadores do ciclo — ranking inclui apenas inscritos ATIVOS no ciclo
     ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
     enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
+
     all_player_ids = set()
     for r in enr_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
         if safe_int(r.get("cycle", 0), 0) != cycle:
             continue
+        if str(r.get("status", "")).strip().lower() != "active":
+            continue
+
         pid = str(r.get("player_id", "")).strip()
         if pid:
             all_player_ids.add(pid)
@@ -1571,14 +1687,17 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             }
             opponents[pid] = []
 
-    for pid in list(all_player_ids):
+    for pid in all_player_ids:
         ensure(pid)
 
     # Filtra matches válidos (season+cycle)
-    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-    matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-
     valid = []
+    try:
+        matches_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=cycle, only_active=True)
+    except Exception:
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
     for r in matches_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
@@ -1598,6 +1717,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         if not a or not b:
             continue
 
+        # mantém participantes do match no cálculo, mesmo se alguma inscrição estiver inconsistente
         ensure(a)
         ensure(b)
 
@@ -1641,11 +1761,11 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for pid, s in stats.items():
         mp = s["match_points"]
         mplayed = s["matches_played"]
-        mwp[pid] = (1/3) if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
+        mwp[pid] = (1 / 3) if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
 
         gplayed = s["games_played"]
         if gplayed == 0:
-            gwp[pid] = 1/3
+            gwp[pid] = 1 / 3
         else:
             gwp_raw = (s["game_wins"] + 0.5 * s["game_draws"]) / float(gplayed)
             gwp[pid] = floor_333(gwp_raw)
@@ -1657,11 +1777,11 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for pid in stats.keys():
         opps = opponents.get(pid, [])
         if not opps:
-            omw[pid] = 1/3
-            ogw[pid] = 1/3
+            omw[pid] = 1 / 3
+            ogw[pid] = 1 / 3
         else:
-            omw_vals = [mwp.get(oid, 1/3) for oid in opps]
-            ogw_vals = [gwp.get(oid, 1/3) for oid in opps]
+            omw_vals = [mwp.get(oid, 1 / 3) for oid in opps]
+            ogw_vals = [gwp.get(oid, 1 / 3) for oid in opps]
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
@@ -1686,7 +1806,13 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
     # Ordena: MWP > OMW > GW > OGW > Pontos
     out_rows.sort(
-        key=lambda r: (r["mwp_percent"], r["omw_percent"], r["gw_percent"], r["ogw_percent"], r["match_points"]),
+        key=lambda r: (
+            r["mwp_percent"],
+            r["omw_percent"],
+            r["gw_percent"],
+            r["ogw_percent"],
+            r["match_points"],
+        ),
         reverse=True
     )
 
@@ -1696,18 +1822,17 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         r["last_recalc_at"] = ts
 
     header = [
-        "season_id","cycle","player_id","matches_played","match_points","mwp_percent",
-        "game_wins","game_losses","game_draws","games_played","gw_percent",
-        "omw_percent","ogw_percent","rank_position","last_recalc_at"
+        "season_id", "cycle", "player_id", "matches_played", "match_points", "mwp_percent",
+        "game_wins", "game_losses", "game_draws", "games_played", "gw_percent",
+        "omw_percent", "ogw_percent", "rank_position", "last_recalc_at"
     ]
 
     existing = cached_get_all_values(ws_standings, ttl_seconds=10)
     kept = []
+
     if existing and len(existing) > 1:
         existing_header = existing[0]
-        if existing_header != header:
-            kept = []
-        else:
+        if existing_header == header:
             for r in existing[1:]:
                 while len(r) < len(header):
                     r.append("")
@@ -1716,12 +1841,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
                 if r_season == season_id and r_cycle == cycle:
                     continue
                 kept.append(r)
-
-    ws_standings.clear()
-    ws_standings.append_row(header)
-
-    if kept:
-        ws_standings.append_rows(kept, value_input_option="USER_ENTERED")
 
     values = []
     for r in out_rows:
@@ -1732,14 +1851,28 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             r["omw_percent"], r["ogw_percent"], r["rank_position"], r["last_recalc_at"]
         ])
 
+    # Reconstrução controlada da aba inteira, preservando outros ciclos
+    ws_standings.clear()
+    ws_standings.append_row(header)
+
+    rows_to_write = []
+    if kept:
+        rows_to_write.extend(kept)
     if values:
-        ws_standings.append_rows(values, value_input_option="USER_ENTERED")
+        rows_to_write.extend(values)
+
+    if rows_to_write:
+        for i in range(0, len(rows_to_write), 500):
+            ws_standings.append_rows(
+                rows_to_write[i:i + 500],
+                value_input_option="USER_ENTERED"
+            )
 
     cache_invalidate(ws_standings)
     return out_rows
 
 # =========================================================
-# [BLOCO 4/8 termina aqui]
+# [BLOCO 4/12 termina aqui]
 # =========================================================
 
 # =================================================
@@ -1748,14 +1881,11 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 5/8
-# SUB-BLOCO: A
-# RESUMO: Cabeçalho do bloco, import adicional de asyncio e tasks, definição do cliente
-# Discord, setup inicial do bot, configuração de onboarding, logs administrativos,
-# rotina automática de limpeza do canal de boas-vindas e preparação do before_loop.
-# REVISÃO: remoção de espera redundante no loop de limpeza, ajuste de comentário
-# para refletir o comportamento real configurado e warm cache dos índices RAM
-# no boot do bot para melhorar a performance do primeiro uso.
+# BLOCO ORIGINAL: BLOCO 5/12
+# SUB-BLOCO: A/3
+# REVISÃO: warm cache mais robusto e compatível com os índices RAM criados,
+# incluindo MATCH AC INDEX, sem alterar a lógica do bot, setup, limpeza
+# automática e utilitários já existentes.
 # =================================================
 
 import asyncio
@@ -1764,36 +1894,42 @@ from discord.ext import tasks
 # =========================================================
 # Warm cache dos índices RAM
 # =========================================================
+def _get_global_callable(name: str):
+    fn = globals().get(name)
+    return fn if callable(fn) else None
+
+
 async def warm_ram_indexes():
     """
     Pré-carrega os índices RAM no boot do bot para evitar que o primeiro
     autocomplete/comando faça leituras pesadas no Google Sheets.
+
+    Observação:
+    - faz best effort
+    - não quebra o boot se algum índice ainda não existir
+    - mantém compatibilidade com a organização atual por blocos
     """
     try:
         sh = open_sheet()
-
-        try:
-            ensure_player_ram_index(sh)
-        except Exception:
-            pass
-
-        try:
-            ensure_cycle_ram_index(sh)
-        except Exception:
-            pass
-
-        try:
-            ensure_season_ram_index(sh)
-        except Exception:
-            pass
-
-        try:
-            ensure_match_ram_index(sh)
-        except Exception:
-            pass
-
     except Exception:
-        pass
+        return
+
+    warmers = [
+        "ensure_player_ram_index",
+        "ensure_cycle_ram_index",
+        "ensure_season_ram_index",
+        "ensure_match_ram_index",
+        "ensure_match_ac_index",
+    ]
+
+    for fn_name in warmers:
+        try:
+            fn = _get_global_callable(fn_name)
+            if fn is None:
+                continue
+            fn(sh)
+        except Exception:
+            pass
 
 
 # =========================
@@ -1987,13 +2123,10 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 5/8
-# SUB-BLOCO: B
-# RESUMO: Funções auxiliares para envio de mensagens longas no Discord,
-# upsert de jogadores no Google Sheets com blindagem contra erro 429,
-# catálogo oficial de comandos da liga e implementação dos comandos
-# /comando e /tutorial.
-# REVISÃO: inclusão do /tutorial e ajuste do catálogo/listagem por nível.
+# BLOCO ORIGINAL: BLOCO 5/12
+# SUB-BLOCO: B/3
+# REVISÃO: robustez no envio em chunks, upsert de player com batch_update
+# e invalidação consistente do PLAYER RAM INDEX, mantendo a mesma lógica.
 # =================================================
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True, limit: int = 1900):
@@ -2004,13 +2137,17 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
     chunks = split_text_lines(text, limit=limit)
     if not chunks:
         return
+
     try:
         if not interaction.response.is_done():
             await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
         else:
             await interaction.followup.send(chunks[0], ephemeral=ephemeral)
     except Exception:
-        return
+        try:
+            await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+        except Exception:
+            return
 
     for c in chunks[1:]:
         try:
@@ -2021,19 +2158,21 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 
 # =========================================================
 # Players upsert (Sheets) — mínimo necessário
-# + BLINDAGEM 429: invalida cache após escrita
+# + BLINDAGEM 429: invalida cache e PLAYER RAM INDEX após escrita
 # =========================================================
 def upsert_player(ws_players, discord_id: str, nickname: str):
     did = str(discord_id).strip()
     nick = str(nickname).strip()
+
     if not did or not nick:
         return
 
     col = ensure_sheet_columns(ws_players, PLAYERS_HEADER)
-    rows = cached_get_all_values(ws_players, ttl_seconds=10)  # usa cache para reduzir 429
+    rows = cached_get_all_values(ws_players, ttl_seconds=10)
 
     did_col = col.get("discord_id", 0)
     found_row = None
+
     for i in range(2, len(rows) + 1):
         r = rows[i - 1]
         v = r[did_col] if did_col < len(r) else ""
@@ -2045,16 +2184,31 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 
     if found_row:
         try:
+            updates = []
+
             if "nick" in col:
-                ws_players.update([[nick]], range_name=f"{col_letter(col['nick'])}{found_row}")
+                updates.append({
+                    "range": f"{col_letter(col['nick'])}{found_row}",
+                    "values": [[nick]]
+                })
+
             if "updated_at" in col:
-                ws_players.update([[nowc]], range_name=f"{col_letter(col['updated_at'])}{found_row}")
-            cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
+                updates.append({
+                    "range": f"{col_letter(col['updated_at'])}{found_row}",
+                    "values": [[nowc]]
+                })
+
+            if updates:
+                ws_players.batch_update(updates)
+
+            cache_invalidate(ws_players)
+            invalidate_player_ram_index()
         except Exception:
             pass
         return
 
     row = [""] * len(PLAYERS_HEADER)
+
     if "discord_id" in col:
         row[col["discord_id"]] = did
     if "nick" in col:
@@ -2068,13 +2222,14 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 
     try:
         ws_players.append_row(row, value_input_option="USER_ENTERED")
-        cache_invalidate(ws_players)  # <<< blindagem 429 (dados mudaram)
+        cache_invalidate(ws_players)
+        invalidate_player_ram_index()
     except Exception:
         pass
 
 
 # =========================================================
-# /comando (catálogo) — CORRIGIDO (sem SyntaxError)
+# /comando (catálogo)
 # =========================================================
 # OBS: aqui é catálogo (listagem). A implementação real dos comandos fica nos BLOCOS 6/7/8.
 # A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
@@ -2117,14 +2272,16 @@ COMMANDS_CATALOG = [
     ("adm", "/inscritos", "Lista inscritos, deck/decklist e pendências do ciclo."),
     ("adm", "/cadastrar_player", "Cadastra player manualmente com season, ciclo, deck e decklist."),
 
-     # Owner (Owner)
+    # Owner
     ("owner", "/startseason", "Abre uma nova season e define como ativa (owner)."),
     ("owner", "/closeseason", "Fecha a season atual (owner)."),
 ]
 
+
 def level_allows(user_level: str, cmd_level: str) -> bool:
     order = {"jogador": 1, "adm": 2, "organizador": 3, "owner": 4}
     return order.get(user_level, 1) >= order.get(cmd_level, 1)
+
 
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
@@ -2136,7 +2293,6 @@ async def comando(interaction: discord.Interaction):
     try:
         user_level = await get_access_level(interaction)
 
-        # Lista real de slash commands registrados (evita "comandos fantasma")
         try:
             real_cmds = {f"/{c.name}" for c in client.tree.get_commands()}
         except Exception:
@@ -2155,7 +2311,6 @@ async def comando(interaction: discord.Interaction):
             if not level_allows(user_level, lvl):
                 continue
 
-            # Se conseguimos detectar os comandos reais, não mostramos os que não existem ainda
             if real_cmds and cmd not in real_cmds:
                 continue
 
@@ -2246,15 +2401,11 @@ async def meuid(interaction: discord.Interaction):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 5/8
+# BLOCO ORIGINAL: BLOCO 5/12
 # SUB-BLOCO: C/3
-# RESUMO: Implementação completa do sistema de onboarding do bot,
-# incluindo Modal para cadastro de nome/sobrenome, Views persistentes
-# com botões (start, confirmar, participar/assistir), aplicação do cargo
-# Jogador, evento on_member_join para postagem automática do onboarding
-# e comando administrativo /onboarding para repostar o fluxo.
-# REVISÃO: integração com MATCH RAM INDEX, além de blindagem do fluxo de confirmação/
-# rejeição por botão em DM para evitar "command error" / timeout de interação.
+# REVISÃO: redução de duplicação interna, blindagem extra contra timeout
+# em interações por botão/DM e melhor aproveitamento de leitura de player,
+# sem alterar a lógica funcional do onboarding e da confirmação de resultado.
 # =================================================
 
 # =========================================================
@@ -2287,7 +2438,6 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
                 pass
             return
 
-        # Salva no Sheets (Players)
         try:
             sh = open_sheet()
             ensure_all_sheets(sh)
@@ -2353,37 +2503,40 @@ class OnboardingChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # aplica cargo Jogador (se existir) e ajusta nickname para Nome Sobrenome salvo no Sheets
         try:
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+
             guild = interaction.guild
+            uid = str(interaction.user.id).strip()
             nome_salvo = ""
 
             try:
                 sh = open_sheet()
                 ensure_all_sheets(sh)
                 ws_players = sh.worksheet("Players")
-                rows = cached_get_all_records(ws_players, ttl_seconds=10)
-                uid = str(interaction.user.id).strip()
-                for r in rows:
-                    if str(r.get("discord_id", "")).strip() == uid:
-                        nome_salvo = str(r.get("nick", "")).strip()
-                        break
+                player_record = get_player_record_by_discord_id(ws_players, uid) or {}
+                nome_salvo = str(player_record.get("nick", "")).strip()
             except Exception:
                 nome_salvo = ""
 
             if not nome_salvo or len(nome_salvo.split()) != 2:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "⚠️ Seu cadastro não está com Nome e Sobrenome válidos. Refaça o onboarding ou procure um ADM.",
                     ephemeral=True
                 )
 
             if guild:
-                member = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
+                member = guild.get_member(interaction.user.id)
+                if member is None:
+                    member = await guild.fetch_member(interaction.user.id)
 
                 try:
                     await member.edit(nick=nome_salvo, reason="Onboarding Leme Holandês")
                 except Exception:
-                    return await interaction.response.send_message(
+                    return await interaction.followup.send(
                         "⚠️ Não consegui aplicar seu Nome e Sobrenome no servidor. Verifique se o bot tem permissão de gerenciar apelidos e tente novamente.",
                         ephemeral=True
                     )
@@ -2395,10 +2548,14 @@ class OnboardingChoiceView(discord.ui.View):
                     except Exception:
                         pass
 
-            await interaction.response.send_message("✅ Perfeito. Você está marcado como **Jogador**.", ephemeral=True)
+            await interaction.followup.send(
+                "✅ Perfeito. Você está marcado como **Jogador**.",
+                ephemeral=True
+            )
+
         except Exception:
             try:
-                await interaction.response.send_message("✅ Cadastro finalizado.", ephemeral=True)
+                await interaction.followup.send("✅ Cadastro finalizado.", ephemeral=True)
             except Exception:
                 pass
 
@@ -2407,7 +2564,51 @@ class OnboardingChoiceView(discord.ui.View):
         try:
             await interaction.response.send_message("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
         except Exception:
-            pass
+            try:
+                await interaction.followup.send("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
+            except Exception:
+                pass
+
+
+# =========================================================
+# RESULTADO — Helpers internos da View de confirmação por DM
+# =========================================================
+def _extract_match_id_from_interaction_message(interaction: discord.Interaction) -> str:
+    try:
+        message = interaction.message
+        if not message or not message.embeds:
+            return ""
+
+        embed = message.embeds[0]
+        if embed.footer and embed.footer.text:
+            footer = str(embed.footer.text).strip()
+            if footer.lower().startswith("match_id:"):
+                return footer.split(":", 1)[1].strip()
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _find_match_sheet_row_by_id(ws_matches, col: dict, match_id: str):
+    rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+    for idx in range(1, len(rows)):
+        r = rows[idx]
+        val = r[col["match_id"]] if col["match_id"] < len(r) else ""
+        if str(val).strip() == match_id:
+            return idx + 1, r
+
+    return None, None
+
+
+async def _disable_result_view_message(view: discord.ui.View, interaction: discord.Interaction):
+    try:
+        for child in view.children:
+            child.disabled = True
+        await interaction.message.edit(view=view)
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -2420,26 +2621,12 @@ class ResultConfirmView(discord.ui.View):
     @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success, custom_id="lhb_result_confirm")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # responde imediatamente para evitar timeout/"interaction failed"
             try:
                 await interaction.response.defer(ephemeral=True)
             except Exception:
                 pass
 
-            message = interaction.message
-            if not message or not message.embeds:
-                return await interaction.followup.send(
-                    "❌ Não consegui identificar o resultado para confirmação.",
-                    ephemeral=True
-                )
-
-            embed = message.embeds[0]
-            match_id = ""
-            if embed.footer and embed.footer.text:
-                footer = str(embed.footer.text).strip()
-                if footer.lower().startswith("match_id:"):
-                    match_id = footer.split(":", 1)[1].strip()
-
+            match_id = _extract_match_id_from_interaction_message(interaction)
             if not match_id:
                 return await interaction.followup.send(
                     "❌ Match não identificado nesta mensagem.",
@@ -2451,18 +2638,7 @@ class ResultConfirmView(discord.ui.View):
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
             match_row = get_match_by_id_fast(sh, match_id)
-
-            found = None
-            row_data = None
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-
-            for idx in range(1, len(rows)):
-                r = rows[idx]
-                val = r[col["match_id"]] if col["match_id"] < len(r) else ""
-                if str(val).strip() == match_id:
-                    found = idx + 1
-                    row_data = r
-                    break
+            found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
 
             if not found:
                 return await interaction.followup.send(
@@ -2527,17 +2703,13 @@ class ResultConfirmView(discord.ui.View):
 
             season_id = safe_int(getc("season_id"), 0)
             cycle = safe_int(getc("cycle"), 0)
+
             try:
                 recalculate_cycle(sh, season_id, cycle)
             except Exception:
                 pass
 
-            try:
-                for child in self.children:
-                    child.disabled = True
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
+            await _disable_result_view_message(self, interaction)
 
             try:
                 await interaction.followup.send(
@@ -2556,26 +2728,12 @@ class ResultConfirmView(discord.ui.View):
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="lhb_result_reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # responde imediatamente para evitar timeout/"interaction failed"
             try:
                 await interaction.response.defer(ephemeral=True)
             except Exception:
                 pass
 
-            message = interaction.message
-            if not message or not message.embeds:
-                return await interaction.followup.send(
-                    "❌ Não consegui identificar o resultado para rejeição.",
-                    ephemeral=True
-                )
-
-            embed = message.embeds[0]
-            match_id = ""
-            if embed.footer and embed.footer.text:
-                footer = str(embed.footer.text).strip()
-                if footer.lower().startswith("match_id:"):
-                    match_id = footer.split(":", 1)[1].strip()
-
+            match_id = _extract_match_id_from_interaction_message(interaction)
             if not match_id:
                 return await interaction.followup.send(
                     "❌ Match não identificado nesta mensagem.",
@@ -2587,18 +2745,7 @@ class ResultConfirmView(discord.ui.View):
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
             match_row = get_match_by_id_fast(sh, match_id)
-
-            found = None
-            row_data = None
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-
-            for idx in range(1, len(rows)):
-                r = rows[idx]
-                val = r[col["match_id"]] if col["match_id"] < len(r) else ""
-                if str(val).strip() == match_id:
-                    found = idx + 1
-                    row_data = r
-                    break
+            found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
 
             if not found:
                 return await interaction.followup.send(
@@ -2661,12 +2808,7 @@ class ResultConfirmView(discord.ui.View):
             invalidate_match_ram_index()
             invalidate_match_ac_index()
 
-            try:
-                for child in self.children:
-                    child.disabled = True
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
+            await _disable_result_view_message(self, interaction)
 
             try:
                 await interaction.followup.send(
@@ -2698,10 +2840,10 @@ async def post_onboarding_message(channel: discord.abc.Messageable, member_menti
 
 @client.event
 async def on_member_join(member: discord.Member):
-    # Ao entrar, postar onboarding no canal configurado (ou ignora se não tiver)
     try:
         guild = member.guild
         ch = None
+
         if WELCOME_CHANNEL_ID:
             ch = guild.get_channel(WELCOME_CHANNEL_ID)
             if not ch:
@@ -2709,9 +2851,11 @@ async def on_member_join(member: discord.Member):
                     ch = await guild.fetch_channel(WELCOME_CHANNEL_ID)
                 except Exception:
                     ch = None
+
         if ch:
             await post_onboarding_message(ch, member_mention=member.mention)
             await log_admin_guild(guild, f"🟢 Onboarding postado para {member} ({member.id}) em {ch.mention}")
+
     except Exception:
         pass
 
@@ -2741,7 +2885,7 @@ async def onboarding(interaction: discord.Interaction):
 
 
 # =========================================================
-# [BLOCO 5/8 termina aqui]
+# [BLOCO 5/12 termina aqui]
 # =========================================================
 
 # =================================================
@@ -2750,18 +2894,14 @@ async def onboarding(interaction: discord.Interaction):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 6/8
+# BLOCO ORIGINAL: BLOCO 6/12
 # SUB-BLOCO: A/2
-# RESUMO: Cabeçalho do bloco, regras implementadas, helpers para verificar se o jogador
-# está ativo na season ou no ciclo, helper para garantir linha na aba Decks, helpers
-# de autocomplete para /inscrever e comando /inscrever com season, ciclo, deck e decklist.
-# REVISÃO: integração com índices RAM de Seasons/Cycles/Players, redução de leituras
-# diretas no Sheets, reaproveitamento de cache e autocomplete de ciclo focado apenas
-# em ciclos abertos.
+# REVISÃO: melhor aproveitamento dos índices RAM de Players, redução de
+# leituras repetidas no fluxo de inscrição e manutenção integral das regras.
 # =================================================
 
 # =========================================================
-# [BLOCO 6/8] — INSCRIÇÃO + DROP + DECK/DECKLIST (REVISADO)
+# [BLOCO 6/12] — INSCRIÇÃO + DROP + DECK/DECKLIST (REVISADO)
 # REGRAS IMPLEMENTADAS:
 # - jogador só pode entrar em ciclo OPEN
 # - ciclo LOCKED não aceita inscrições
@@ -2811,7 +2951,6 @@ def player_active_in_cycle(ws_enr, season_id: int, cycle: int, player_id: str) -
 
 # =========================================================
 # Helper: garante linha na aba Decks (1 vez por ciclo por jogador)
-# (BUG FIX: esta função era usada no bloco e NÃO existia)
 # =========================================================
 def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
     """
@@ -2860,6 +2999,7 @@ def get_player_row_by_discord_id(ws_players, discord_id: str) -> int | None:
             return i
     return None
 
+
 def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
     did = str(discord_id).strip()
 
@@ -2873,6 +3013,7 @@ def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
             if str(r.get("discord_id", "")).strip() == did:
                 return r
         return None
+
 
 def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str) -> dict | None:
     rows = cached_get_all_records(ws_decks, ttl_seconds=10)
@@ -2888,6 +3029,7 @@ def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str
         return r
 
     return None
+
 
 async def ac_inscrever_season(interaction: discord.Interaction, current: str):
     try:
@@ -2910,6 +3052,7 @@ async def ac_inscrever_season(interaction: discord.Interaction, current: str):
         return out[:25]
     except Exception:
         return []
+
 
 async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
     try:
@@ -2978,14 +3121,13 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 
         pid = str(interaction.user.id).strip()
 
-        player_row = get_player_row_by_discord_id(ws_players, pid)
-        if player_row is None:
+        player_record = get_player_record_by_discord_id(ws_players, pid)
+        if not player_record:
             return await interaction.followup.send(
                 "❌ Seu cadastro não foi encontrado. Entre em contato com um ADM.",
                 ephemeral=True
             )
 
-        player_record = get_player_record_by_discord_id(ws_players, pid) or {}
         nick_atual = str(player_record.get("nick", "")).strip()
         if not nick_atual:
             return await interaction.followup.send(
@@ -3081,16 +3223,11 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 6/8
+# BLOCO ORIGINAL: BLOCO 6/12
 # SUB-BLOCO: B/2
-# RESUMO: Comandos /drop, /deck e /decklist, incluindo validações de inscrição
-# ativa no ciclo, controle administrativo de alteração de deck e decklist,
-# seleção de jogador por nickname do banco Players, validação de URL de
-# decklist, atualização das abas no Google Sheets e invalidação de cache
-# após escrita.
-# REVISÃO: integração com índice RAM de Players para autocomplete e resolução
-# rápida de jogador, redução de updates isolados, debounce leve no autocomplete
-# e alinhamento com a estratégia geral de cache/performance.
+# REVISÃO: otimização de /drop, /deck e /decklist com melhor integração
+# aos índices RAM de Players, invalidação mais consistente e redução de
+# leituras repetidas, sem alterar regras de negócio.
 # =================================================
 
 # =========================================================
@@ -3111,6 +3248,7 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
         rows = cached_get_all_values(ws_enr, ttl_seconds=10)
         pid = str(interaction.user.id).strip()
+        nowb = now_br_str()
 
         for idx in range(1, len(rows)):
             r = rows[idx]
@@ -3126,6 +3264,10 @@ async def drop(interaction: discord.Interaction, cycle: int):
             ):
                 rown = idx + 1
 
+                current_status = str(getc("status")).strip().lower()
+                if current_status == "dropped":
+                    return await interaction.followup.send("⚠️ Você já saiu deste ciclo.", ephemeral=True)
+
                 ws_enr.batch_update([
                     {
                         "range": f"{col_letter(col['status'])}{rown}",
@@ -3133,7 +3275,7 @@ async def drop(interaction: discord.Interaction, cycle: int):
                     },
                     {
                         "range": f"{col_letter(col['updated_at'])}{rown}",
-                        "values": [[now_br_str()]]
+                        "values": [[nowb]]
                     },
                 ])
                 cache_invalidate(ws_enr)
@@ -3250,12 +3392,13 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
 
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
         rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
-
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
         nome = str(nome).strip()
         if not nome or len(nome) > 80:
             return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
+
+        nowb = now_br_str()
 
         ws_decks.batch_update([
             {
@@ -3264,7 +3407,7 @@ async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador:
             },
             {
                 "range": f"{col_letter(col['updated_at'])}{rown}",
-                "values": [[now_br_str()]]
+                "values": [[nowb]]
             },
         ])
         cache_invalidate(ws_decks)
@@ -3319,8 +3462,9 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
         rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
-
         col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+        nowb = now_br_str()
 
         ws_decks.batch_update([
             {
@@ -3329,7 +3473,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
             },
             {
                 "range": f"{col_letter(col['updated_at'])}{rown}",
-                "values": [[now_br_str()]]
+                "values": [[nowb]]
             },
         ])
         cache_invalidate(ws_decks)
@@ -3342,7 +3486,7 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 
 
 # =========================================================
-# [BLOCO 6/8] — Termina aqui
+# [BLOCO 6/12] — Termina aqui
 # =========================================================
 
 # =================================================
@@ -3351,18 +3495,14 @@ async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogad
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 7/8
+# BLOCO ORIGINAL: BLOCO 7/12
 # SUB-BLOCO: A/2
-# RESUMO: Cabeçalho do bloco, constante de auto-confirmação, helpers de visualização,
-# parser de placar V-D-E, autocomplete de /pods_ver e comandos /pods_ver e /meus_matches
-# para visualização de PODs e matches do jogador.
-# REVISÃO: integração com índices RAM de Seasons/Cycles/Players/Matches, redução de leituras
-# indiretas no Sheets e melhor aproveitamento dos dados já carregados em memória
-# para Players/Decks/Matches.
+# REVISÃO: debounce nos autocompletes de /pods_ver, melhor montagem dos
+# chunks e menor custo de leitura/organização sem alterar a lógica funcional.
 # =================================================
 
 # =========================================================
-# [BLOCO 7/8] — RESULTADOS + PODS/MATCHES DO JOGADOR
+# [BLOCO 7/12] — RESULTADOS + PODS/MATCHES DO JOGADOR
 # =========================================================
 
 AUTO_CONFIRM_HOURS = 48
@@ -3374,6 +3514,7 @@ AUTO_CONFIRM_HOURS = 48
 def _player_display_name(nick_map: dict[str, str], pid: str) -> str:
     return nick_map.get(str(pid).strip(), str(pid).strip())
 
+
 def _match_status_label(status: str) -> str:
     st = str(status or "").strip().lower()
     if st == "confirmed":
@@ -3383,6 +3524,7 @@ def _match_status_label(status: str) -> str:
     if st == "rejected":
         return "rejeitado"
     return "aberto"
+
 
 def _build_nick_map_from_records(rows: list[dict]) -> dict[str, str]:
     m: dict[str, str] = {}
@@ -3426,6 +3568,9 @@ def parse_vde(score: str):
 # =========================================================
 async def ac_pods_ver_season(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_pods_ver_season"):
+            return []
+
         sh = open_sheet()
         q = str(current or "").strip().lower()
 
@@ -3446,6 +3591,9 @@ async def ac_pods_ver_season(interaction: discord.Interaction, current: str):
 
 async def ac_pods_ver_cycle(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_pods_ver_cycle"):
+            return []
+
         sh = open_sheet()
 
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
@@ -3503,6 +3651,7 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
             pid = str(r.get("player_id", "")).strip()
             if not pid:
                 continue
+
             deck_map[(sid, cyc, pid)] = {
                 "deck": str(r.get("deck", "")).strip(),
                 "decklist_url": str(r.get("decklist_url", "")).strip(),
@@ -3517,6 +3666,7 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
 
             pod = str(r.get("pod", "")).strip()
             pid = str(r.get("player_id", "")).strip()
+
             if not pod or not pid:
                 continue
 
@@ -3531,47 +3681,31 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
         def pod_sort_key(x: str):
             return safe_int(x, 999999)
 
-        chunks = []
-        current_chunk = f"📦 **PODs da Season {season} / Ciclo {cycle}**"
-        limit = 1900
+        lines = [f"📦 **PODs da Season {season} / Ciclo {cycle}**"]
 
         for pod in sorted(pods.keys(), key=pod_sort_key):
             players = list(dict.fromkeys(pods[pod]))
+            lines.append("")
+            lines.append(f"**POD {pod}**")
 
-            pod_block_lines = [f"\n**POD {pod}**"]
             for i, pid in enumerate(players, start=1):
                 deck_info = deck_map.get((season, cycle, pid), {})
                 deck_name = deck_info.get("deck", "") or "PENDENTE"
                 decklist_url = deck_info.get("decklist_url", "") or "PENDENTE"
 
-                player_block = [
-                    f"{i}. **{_player_display_name(nick_map, pid)}**",
-                    f"   Deck: {deck_name}",
-                    f"   Decklist: <{decklist_url}>",
-                ]
-                pod_block_lines.extend(player_block)
+                lines.append(f"{i}. **{_player_display_name(nick_map, pid)}**")
+                lines.append(f"   Deck: {deck_name}")
+                lines.append(f"   Decklist: <{decklist_url}>")
 
-            pod_block = "\n".join(pod_block_lines)
+        text = "\n".join(lines).strip()
 
-            if len(current_chunk) + len(pod_block) + 2 > limit:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                current_chunk = f"📦 **PODs da Season {season} / Ciclo {cycle}**\n{pod_block}".strip()
-            else:
-                current_chunk = f"{current_chunk}\n{pod_block}".strip()
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        if not chunks:
+        if not text:
             return await interaction.followup.send(
                 f"❌ Não consegui montar a visualização dos PODs da **Season {season} / Ciclo {cycle}**.",
                 ephemeral=True
             )
 
-        await interaction.followup.send(chunks[0], ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(chunk, ephemeral=True)
+        await send_followup_chunks(interaction, text, ephemeral=True, limit=1900)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /pods_ver: {e}", ephemeral=True)
@@ -3641,15 +3775,26 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 7/8
+# BLOCO ORIGINAL: BLOCO 7/12
 # SUB-BLOCO: B/2
-# RESUMO: Comandos de interação com resultados de partidas: /resultado para reportar
-# placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
-# Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
-# com botões de confirmar/rejeitar e invalidação de cache.
-# REVISÃO: integração com MATCH RAM INDEX, mantendo UX com "oponente" no comando,
-# batch_update, invalidação correta do índice RAM e mesma lógica funcional.
+# REVISÃO: redução de duplicação na resolução do match, invalidação
+# consistente dos índices RAM/autocomplete e manutenção integral da lógica.
 # =================================================
+
+# =========================================================
+# Helpers internos — resultado / rejeitar
+# =========================================================
+def _find_match_sheet_row_by_match_id(ws_matches, col: dict, match_id: str):
+    rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+    for idx in range(1, len(rows)):
+        r = rows[idx]
+        val = r[col["match_id"]] if col["match_id"] < len(r) else ""
+        if str(val).strip() == str(match_id).strip():
+            return idx + 1, r
+
+    return None, None
+
 
 # =========================================================
 # /resultado
@@ -3658,7 +3803,6 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 @app_commands.describe(oponente="Selecione seu oponente", placar="Formato V-D-E (ex: 2-1-0)")
 @app_commands.autocomplete(oponente=ac_match_id_user_pending, placar=ac_score_vde)
 async def resultado(interaction: discord.Interaction, oponente: str, placar: str):
-
     await interaction.response.defer(ephemeral=True)
 
     match_id = str(oponente).strip()
@@ -3677,47 +3821,22 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        # usa índice RAM primeiro
-        match_row = get_match_by_id_fast(sh, match_id)
-
-        if not match_row:
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-        else:
-            rows = None
-
         pid = str(interaction.user.id).strip()
-
-        found_row = None
-
-        if rows is not None:
-            for idx in range(1, len(rows)):
-                r = rows[idx]
-
-                def getc(name):
-                    ci = col[name]
-                    return r[ci] if ci < len(r) else ""
-
-                if str(getc("match_id")).strip() == match_id:
-                    found_row = idx + 1
-                    player_a = str(getc("player_a_id")).strip()
-                    player_b = str(getc("player_b_id")).strip()
-                    status = str(getc("confirmed_status")).strip().lower()
-                    break
-        else:
-            player_a = match_row["player_a_id"]
-            player_b = match_row["player_b_id"]
-            status = match_row["confirmed_status"]
-
-            # precisa achar linha real no sheet
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-            for idx in range(1, len(rows)):
-                r = rows[idx]
-                if str(r[col["match_id"]]).strip() == match_id:
-                    found_row = idx + 1
-                    break
+        match_row = get_match_by_id_fast(sh, match_id)
+        found_row, row_data = _find_match_sheet_row_by_match_id(ws_matches, col, match_id)
 
         if not found_row:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+
+        def getc(name: str) -> str:
+            if match_row is not None and name in match_row:
+                return str(match_row.get(name, ""))
+            ci = col[name]
+            return row_data[ci] if row_data is not None and ci < len(row_data) else ""
+
+        player_a = str(getc("player_a_id")).strip()
+        player_b = str(getc("player_b_id")).strip()
+        status = str(getc("confirmed_status")).strip().lower()
 
         if pid not in (player_a, player_b):
             return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
@@ -3757,6 +3876,7 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
 
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
+        invalidate_match_ac_index()
 
         dm_status = ""
 
@@ -3809,7 +3929,6 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
 @app_commands.describe(oponente="Selecione seu oponente")
 @app_commands.autocomplete(oponente=ac_match_id_user_pending)
 async def rejeitar(interaction: discord.Interaction, oponente: str):
-
     await interaction.response.defer(ephemeral=True)
 
     match_id = str(oponente).strip()
@@ -3819,40 +3938,23 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        match_row = get_match_by_id_fast(sh, match_id)
-
-        if not match_row:
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-        else:
-            rows = None
-
         pid = str(interaction.user.id).strip()
-        found_row = None
-
-        if rows is not None:
-            for idx in range(1, len(rows)):
-                r = rows[idx]
-                if str(r[col["match_id"]]).strip() == match_id:
-                    found_row = idx + 1
-                    player_a = str(r[col["player_a_id"]]).strip()
-                    player_b = str(r[col["player_b_id"]]).strip()
-                    status = str(r[col["confirmed_status"]]).strip().lower()
-                    reported_by = str(r[col["reported_by_id"]]).strip()
-                    break
-        else:
-            player_a = match_row["player_a_id"]
-            player_b = match_row["player_b_id"]
-            status = match_row["confirmed_status"]
-            reported_by = match_row["reported_by_id"]
-
-            rows = cached_get_all_values(ws_matches, ttl_seconds=10)
-            for idx in range(1, len(rows)):
-                if str(rows[idx][col["match_id"]]).strip() == match_id:
-                    found_row = idx + 1
-                    break
+        match_row = get_match_by_id_fast(sh, match_id)
+        found_row, row_data = _find_match_sheet_row_by_match_id(ws_matches, col, match_id)
 
         if not found_row:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+
+        def getc(name: str) -> str:
+            if match_row is not None and name in match_row:
+                return str(match_row.get(name, ""))
+            ci = col[name]
+            return row_data[ci] if row_data is not None and ci < len(row_data) else ""
+
+        player_a = str(getc("player_a_id")).strip()
+        player_b = str(getc("player_b_id")).strip()
+        status = str(getc("confirmed_status")).strip().lower()
+        reported_by = str(getc("reported_by_id")).strip()
 
         if pid not in (player_a, player_b):
             return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
@@ -3880,6 +3982,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
+        invalidate_match_ac_index()
 
         await interaction.followup.send(
             "⚠️ Resultado rejeitado. Reporte novamente.",
@@ -3893,7 +3996,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 
 
 # =========================================================
-# [BLOCO 7/8 termina aqui]
+# [BLOCO 7/12 termina aqui]
 # =================================================
 
 # =================================================
@@ -3902,7 +4005,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: A/7
 # RESUMO: Cabeçalho do bloco, helper para exigir season ativa, helpers de standings/ranking
 # e comandos administrativos iniciais: /forcesync, /ciclo_abrir, /ciclo_fechar e /ciclo_encerrar.
@@ -3911,7 +4014,7 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 # =================================================
 
 # =========================================================
-# [BLOCO 8/8] — ADMIN FINAL + PRAZO + RANKINGS + EXPORT + START
+# [BLOCO 8/12] — ADMIN FINAL + PRAZO + RANKINGS + EXPORT + START
 # =========================================================
 
 def require_current_season(sh) -> int:
@@ -4084,12 +4187,11 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: B/7
-# RESUMO: Comandos relacionados a prazo, pendências e ranking do ciclo, incluindo
-# /prazo, /deadline, /recalcular, /ranking e /standings_publicar.
-# REVISÃO: melhor aproveitamento de cache, redução de releitura indireta de Players
-# e pequeno ajuste de TTL para diminuir pressão no Google Sheets.
+# REVISÃO: uso de índices RAM para Players e Matches, redução de releituras
+# em /ranking, /standings_publicar e /deadline, mantendo a mesma lógica
+# funcional dos comandos de prazo, pendências e ranking do ciclo.
 # =================================================
 
 # =========================================================
@@ -4120,7 +4222,6 @@ async def prazo(interaction: discord.Interaction, cycle: int):
         cf = get_cycle_fields(ws_cycles, season_id, cycle)
         if (not (cf.get("start_at_br") or "").strip()) or (not (cf.get("deadline_at_br") or "").strip()):
             set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
-            cache_invalidate(ws_cycles)
 
         msg = (
             f"⏳ **Prazo do Ciclo {cycle}** (Season {season_id})\n"
@@ -4151,23 +4252,20 @@ async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
-        ensure_sheet_columns(ws, MATCHES_REQUIRED_COLS)
-
         nowu = utc_now_dt()
         limit = nowu + timedelta(hours=max(1, min(horas, 48)))
 
-        rows = cached_get_all_records(ws, ttl_seconds=10)
+        rows = get_matches_for_cycle_fast(
+            sh,
+            season_id=season_id,
+            cycle=cycle,
+            only_active=True
+        )
+
         items = []
 
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
             if str(r.get("confirmed_status", "")).strip().lower() != "pending":
-                continue
-            if not as_bool(r.get("active", "TRUE")):
                 continue
 
             ac = parse_iso_dt(r.get("auto_confirm_at", "") or "")
@@ -4230,7 +4328,6 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
         season_id = require_current_season(sh)
 
         ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
 
         rows = _read_cycle_standings(ws_standings, season_id, cycle)
         if not rows:
@@ -4239,8 +4336,7 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        nick_map = _build_nick_map_from_records(player_rows)
+        nick_map = get_player_nick_map_fast(sh)
 
         text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
         await send_followup_chunks(interaction, text, ephemeral=False)
@@ -4266,14 +4362,12 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
         season_id = require_current_season(sh)
 
         ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
 
         rows = _read_cycle_standings(ws_standings, season_id, cycle)
         if not rows:
             return await interaction.followup.send("⚠️ Não há standings para este ciclo ainda.", ephemeral=True)
 
-        player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        nick_map = _build_nick_map_from_records(player_rows)
+        nick_map = get_player_nick_map_fast(sh)
 
         text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
 
@@ -4305,13 +4399,12 @@ async def standings_publicar(interaction: discord.Interaction, cycle: int, top: 
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
-# SUB-BLOCO: C
-# RESUMO: Comandos administrativos de encerramento de resultados e gestão de matches:
-# /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo e /ranking_geral.
-# REVISÃO: integração com os índices RAM de matches/autocomplete, redução de escritas
-# isoladas no Sheets, melhor aproveitamento dos dados já carregados e eliminação
-# de releituras desnecessárias da aba Cycles/Players.
+# BLOCO ORIGINAL: BLOCO 8/12
+# SUB-BLOCO: C/7
+# REVISÃO: integração mais consistente com índices RAM de matches e cycles,
+# redução de releituras desnecessárias e manutenção da mesma lógica funcional
+# em /final, /admin_resultado_editar, /admin_resultado_cancelar, /status_ciclo
+# e /ranking_geral.
 # =================================================
 
 # =========================================================
@@ -4435,9 +4528,11 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         sh = open_sheet()
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
         found = None
+        match_row = get_match_by_id_fast(sh, match_id)
+
+        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
         for idx in range(1, len(rows)):
             r = rows[idx]
             val = r[col["match_id"]] if col["match_id"] < len(r) else ""
@@ -4447,6 +4542,8 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
 
         if not found:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+
+        updated_at = now_iso_utc()
 
         ws_matches.batch_update([
             {
@@ -4475,7 +4572,7 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
             },
             {
                 "range": f"{col_letter(col['updated_at'])}{found}",
-                "values": [[now_iso_utc()]]
+                "values": [[updated_at]]
             },
         ])
         cache_invalidate(ws_matches)
@@ -4504,9 +4601,11 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
         sh = open_sheet()
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
-        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
         found = None
+        match_row = get_match_by_id_fast(sh, match_id)
+
+        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
         for idx in range(1, len(rows)):
             r = rows[idx]
             val = r[col["match_id"]] if col["match_id"] < len(r) else ""
@@ -4516,6 +4615,8 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
 
         if not found:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
+
+        updated_at = now_iso_utc()
 
         ws_matches.batch_update([
             {
@@ -4552,7 +4653,7 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
             },
             {
                 "range": f"{col_letter(col['updated_at'])}{found}",
-                "values": [[now_iso_utc()]]
+                "values": [[updated_at]]
             },
         ])
         cache_invalidate(ws_matches)
@@ -4579,13 +4680,21 @@ async def status_ciclo(interaction: discord.Interaction):
     try:
         sh = open_sheet()
         season_id = require_current_season(sh)
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
 
-        items = list_cycles(ws_cycles, season_id)
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_id,
+            query="",
+            only_open=False,
+            limit=25
+        )
+
         if not items:
             return await interaction.followup.send("⚠️ Não há ciclos cadastrados nesta season.", ephemeral=True)
 
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
         cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
         cycle_fields_map: dict[int, dict] = {}
         for r in cycle_rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -4596,13 +4705,16 @@ async def status_ciclo(interaction: discord.Interaction):
             cycle_fields_map[cyc] = {
                 "start_at_br": str(r.get("start_at_br", "")).strip(),
                 "deadline_at_br": str(r.get("deadline_at_br", "")).strip(),
+                "status": str(r.get("status", "")).strip().lower(),
             }
 
+        ordered_cycles = sorted(cycle_fields_map.keys())
+
         lines = [f"📘 **Status dos ciclos** | Season {season_id}"]
-        for c, st in items:
+        for c in ordered_cycles:
             cf = cycle_fields_map.get(c, {})
             lines.append(
-                f"• Ciclo {c} | status: **{st}** | "
+                f"• Ciclo {c} | status: **{cf.get('status', '')}** | "
                 f"início: `{cf.get('start_at_br', '') or '-'}` | "
                 f"prazo: `{cf.get('deadline_at_br', '') or '-'}`"
             )
@@ -4625,10 +4737,9 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=None, only_active=False) if False else None
-        # ranking geral agrega toda a season, então mantém leitura da season inteira
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
         stats: dict[str, dict] = {}
@@ -4745,14 +4856,10 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: D/7
-# RESUMO: Comandos administrativos de temporada e cadastro manual de jogadores.
-# Ajustado para permitir uso de /cadastrar_player por ADM, Organizador e Owner.
-# Nenhuma outra lógica foi alterada.
-# REVISÃO: adoção de cache em leitura de Seasons, integração com índices RAM de
-# Seasons/Cycles/Players, debounce leve nos autocompletes e redução de updates
-# isolados no bloco Players e Decks do /cadastrar_player.
+# REVISÃO: redução de leituras repetidas em cadastro manual, invalidação
+# consistente de índices RAM e manutenção integral das regras administrativas.
 # =================================================
 
 # =========================================================
@@ -4761,9 +4868,11 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 def _next_season_id(sh) -> int:
     ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
     rows = cached_get_all_records(ws, ttl_seconds=10)
+
     mx = 0
     for r in rows:
         mx = max(mx, safe_int(r.get("season_id", 0), 0))
+
     return mx + 1 if mx > 0 else 1
 
 
@@ -4785,7 +4894,10 @@ async def startseason(interaction: discord.Interaction, nome: str = ""):
         set_season_status(sh, new_id, "open", name=season_name)
         close_all_other_seasons(sh, keep_open_id=new_id)
         set_current_season_id(sh, new_id)
+
         invalidate_season_ram_index()
+        invalidate_cycle_ram_index()
+        invalidate_match_ac_index()
 
         await interaction.followup.send(
             f"✅ Season aberta e ativa: **{season_name}** (ID {new_id}).",
@@ -4812,7 +4924,10 @@ async def closeseason(interaction: discord.Interaction):
 
         set_season_status(sh, sid, "closed")
         set_current_season_id(sh, 0)
+
         invalidate_season_ram_index()
+        invalidate_cycle_ram_index()
+        invalidate_match_ac_index()
 
         await interaction.followup.send(f"✅ Season **{sid}** fechada.", ephemeral=True)
         await log_admin(interaction, f"OWNER closeseason: closed S{sid}")
@@ -4924,21 +5039,31 @@ async def cadastrar_player(
         if cf.get("status") is None:
             return await interaction.followup.send(f"❌ O ciclo {ciclo} não existe na season {season}.", ephemeral=True)
 
-        did = str(membro.id)
+        nm = str(deck or "").strip()
+        if not nm:
+            return await interaction.followup.send("❌ Informe o deck.", ephemeral=True)
+        if len(nm) > 80:
+            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
+
+        ok, val = validate_decklist_url(decklist)
+        if not ok:
+            return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
+
+        did = str(membro.id).strip()
         nowc = now_br_str()
 
         # =========================
         # PLAYERS
         # =========================
-        ws_players = sh.worksheet("Players")
+        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
         col_players = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
         rows_players = cached_get_all_values(ws_players, ttl_seconds=10)
 
         found_row = None
         for i in range(2, len(rows_players) + 1):
             r = rows_players[i - 1]
-            val = r[col_players["discord_id"]] if col_players["discord_id"] < len(r) else ""
-            if str(val).strip() == did:
+            val_player = r[col_players["discord_id"]] if col_players["discord_id"] < len(r) else ""
+            if str(val_player).strip() == did:
                 found_row = i
                 break
 
@@ -5021,16 +5146,6 @@ async def cadastrar_player(
         rown = ensure_deck_row(ws_decks, season, ciclo, did)
         col_deck = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        nm = str(deck or "").strip()
-        if not nm:
-            return await interaction.followup.send("❌ Informe o deck.", ephemeral=True)
-        if len(nm) > 80:
-            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
-
-        ok, val = validate_decklist_url(decklist)
-        if not ok:
-            return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
-
         ws_decks.batch_update([
             {
                 "range": f"{col_letter(col_deck['deck'])}{rown}",
@@ -5064,13 +5179,10 @@ async def cadastrar_player(
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: E/7
-# RESUMO: Finalização do comando /cadastrar_player (Enrollments e Decks)
-# e início das regras do sistema de geração de pods e layout de pods
-# utilizadas posteriormente pelo comando /start_cycle.
-# REVISÃO: redução de updates isolados no trecho final de Decks do
-# /cadastrar_player, mantendo a mesma lógica funcional.
+# REVISÃO: consolidação de updates em batch no fechamento do /cadastrar_player,
+# mantendo a mesma lógica funcional e as mesmas regras de layout dos pods.
 # =================================================
 
         # =========================
@@ -5097,8 +5209,16 @@ async def cadastrar_player(
             )
             msg_parts.append(f"- Inscrição criada na **Season {season} / Ciclo {ciclo}**.")
         else:
-            ws_enr.update([["active"]], range_name=f"{col_letter(col_enr['status'])}{enr_row}")
-            ws_enr.update([[nowc]], range_name=f"{col_letter(col_enr['updated_at'])}{enr_row}")
+            ws_enr.batch_update([
+                {
+                    "range": f"{col_letter(col_enr['status'])}{enr_row}",
+                    "values": [["active"]]
+                },
+                {
+                    "range": f"{col_letter(col_enr['updated_at'])}{enr_row}",
+                    "values": [[nowc]]
+                },
+            ])
             msg_parts.append(f"- Inscrição reativada/confirmada na **Season {season} / Ciclo {ciclo}**.")
 
         cache_invalidate(ws_enr)
@@ -5232,15 +5352,11 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: F/7
-# RESUMO: Algoritmo anti-repetição de pods, gravação em lote para reduzir 429,
-# normalização automática de ciclo parcialmente gerado e comando /start_cycle
-# com match_id curto por pod no formato Sx-Cy-Pz-01.
-# REVISÃO: integração com o índice RAM de autocomplete de matches via
-# invalidate_match_ac_index(), mantendo o melhor aproveitamento de cache em Matches,
-# eliminação de releitura desnecessária do histórico de confrontos e consolidação
-# de invalidação de cache.
+# REVISÃO: melhor aproveitamento do índice RAM de matches, consolidação
+# de timestamps na criação em lote, invalidação consistente dos índices
+# RAM após geração e manutenção da mesma lógica funcional do /start_cycle.
 # =================================================
 
 def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
@@ -5333,6 +5449,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                 set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
 
             cache_invalidate(ws_cycles)
+            invalidate_match_ram_index()
             invalidate_match_ac_index()
 
             return await interaction.followup.send(
@@ -5366,8 +5483,32 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
         layout = _choose_pod_layout(len(players), preferred_size=pod_size)
 
-        matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
-        past_pairs = _past_confirmed_pairs_from_records(matches_rows)
+        matches_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=cycle, only_active=False)
+        if matches_rows:
+            # segurança extra: se por qualquer motivo já existem matches deste ciclo,
+            # normaliza o status e evita geração duplicada
+            start_br, end_br, max_pod, days = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
+
+            set_cycle_status(ws_cycles, season_id, cycle, "locked")
+
+            if start_br and end_br:
+                set_cycle_times(ws_cycles, season_id, cycle, start_br, end_br)
+
+            cache_invalidate(ws_cycles)
+            invalidate_match_ram_index()
+            invalidate_match_ac_index()
+
+            return await interaction.followup.send(
+                "⚠️ Este ciclo já possui matches gerados.\n"
+                "Não vou gerar novamente.\n"
+                f"- Status normalizado para: **locked**\n"
+                f"- Prazo: **{start_br or '-'}** → **{end_br or '-'}** (BR)\n"
+                f"- Regra aplicada: **{days} dias** (maior pod = **{max_pod}** jogador(es))",
+                ephemeral=True
+            )
+
+        all_match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+        past_pairs = _past_confirmed_pairs_from_records(all_match_rows)
 
         pods, score = _best_layout_shuffle_min_repeats(
             players,
@@ -5378,6 +5519,8 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
         nowb = now_br_str()
         nowu = utc_now_dt()
+        created_iso = now_iso_utc()
+        auto_confirm_iso = auto_confirm_deadline_iso(nowu)
 
         pod_labels = []
         pods_rows = []
@@ -5409,13 +5552,14 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                     "normal", "open",
                     "", "", "",
                     "TRUE",
-                    now_iso_utc(), now_iso_utc(),
-                    auto_confirm_deadline_iso(nowu)
+                    created_iso, created_iso,
+                    auto_confirm_iso
                 ])
                 created += 1
 
         _chunked_append_rows(ws_matches, matches_rows_to_append, chunk_size=200)
         cache_invalidate(ws_matches)
+        invalidate_match_ram_index()
         invalidate_match_ac_index()
 
         set_cycle_status(ws_cycles, season_id, cycle, "locked")
@@ -5448,14 +5592,11 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 8/8
+# BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: G/7
-# RESUMO: Comandos administrativos finais do sistema incluindo exportação,
-# fechamento automático de resultados, substituição de jogadores, histórico
-# de confrontos, estatísticas da liga e novo comando /inscritos para consulta
-# administrativa de inscritos por season/ciclo.
-# REVISÃO: otimização de loops pesados, redução de updates isolados no Sheets
-# e melhor aproveitamento dos dados já carregados em memória.
+# REVISÃO: otimização de loops pesados com melhor aproveitamento dos índices RAM
+# de Players e Matches, invalidação consistente após substituição e remoção do
+# START deste sub-bloco, que deve permanecer apenas no BLOCO 12 final.
 # =================================================
 
 
@@ -5475,8 +5616,12 @@ async def exportar_ciclo(interaction: discord.Interaction, cycle: int):
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+        rows = get_matches_for_cycle_fast(
+            sh,
+            season_id=season_id,
+            cycle=cycle,
+            only_active=False
+        )
 
         output = io.StringIO()
         writer = csv.writer(output)
@@ -5484,10 +5629,6 @@ async def exportar_ciclo(interaction: discord.Interaction, cycle: int):
 
         count = 0
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
             writer.writerow([r.get(h, "") for h in MATCHES_HEADER])
             count += 1
 
@@ -5541,22 +5682,18 @@ async def inscritos(interaction: discord.Interaction, season: int, cycle: int):
     await interaction.response.defer(ephemeral=True)
 
     try:
-
         sh = open_sheet()
 
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
         ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
 
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
         ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
         ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        players_rows = cached_get_all_records(ws_players, ttl_seconds=10)
         enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
         decks_rows = cached_get_all_records(ws_decks, ttl_seconds=10)
 
-        nick_map = _build_nick_map_from_records(players_rows)
+        nick_map = get_player_nick_map_fast(sh)
 
         deck_status_map: dict[str, dict[str, bool]] = {}
         for d in decks_rows:
@@ -5575,51 +5712,39 @@ async def inscritos(interaction: discord.Interaction, season: int, cycle: int):
             if str(d.get("decklist_url", "")).strip():
                 entry["decklist_ok"] = True
 
-        inscritos = []
+        inscritos_linhas = []
         inscritos_ids = set()
 
         for r in enr_rows:
-
             if safe_int(r.get("season_id", 0), 0) != season:
                 continue
-
             if safe_int(r.get("cycle", 0), 0) != cycle:
                 continue
-
             if str(r.get("status", "")).strip().lower() != "active":
                 continue
 
             pid = str(r.get("player_id", "")).strip()
-            inscritos_ids.add(pid)
-
-            st = deck_status_map.get(pid, {"deck_ok": False, "decklist_ok": False})
-
-            inscritos.append(
-                f"{nick_map.get(pid, pid)} | Deck: {'OK' if st['deck_ok'] else 'PENDENTE'} | Decklist: {'OK' if st['decklist_ok'] else 'PENDENTE'}"
-            )
-
-        nao_inscritos = []
-
-        for p in players_rows:
-
-            pid = str(p.get("discord_id", "")).strip()
-
             if not pid:
                 continue
 
-            if pid in inscritos_ids:
-                continue
+            inscritos_ids.add(pid)
+            st = deck_status_map.get(pid, {"deck_ok": False, "decklist_ok": False})
 
-            nao_inscritos.append(nick_map.get(pid, pid))
+            inscritos_linhas.append(
+                f"{nick_map.get(pid, pid)} | Deck: {'OK' if st['deck_ok'] else 'PENDENTE'} | Decklist: {'OK' if st['decklist_ok'] else 'PENDENTE'}"
+            )
+
+        all_player_ids = sorted(nick_map.keys(), key=lambda x: nick_map.get(x, x).lower())
+        nao_inscritos = [nick_map.get(pid, pid) for pid in all_player_ids if pid not in inscritos_ids]
 
         lines = [
             f"📋 **Inscritos Season {season} / Ciclo {cycle}**",
             ""
         ]
 
-        if inscritos:
+        if inscritos_linhas:
             lines.append("**Jogadores inscritos:**")
-            lines.extend(inscritos)
+            lines.extend(inscritos_linhas)
         else:
             lines.append("Nenhum inscrito.")
 
@@ -5651,7 +5776,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
     await interaction.response.defer(ephemeral=True)
 
     try:
-
         sh = open_sheet()
         season_id = require_current_season(sh)
         ensure_all_sheets(sh)
@@ -5678,7 +5802,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         enr_updates = []
 
         for rown in range(2, len(vals_enr) + 1):
-
             r = vals_enr[rown - 1]
 
             s = safe_int(r[col_enr["season_id"]] if col_enr["season_id"] < len(r) else 0, 0)
@@ -5686,7 +5809,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
             p = str(r[col_enr["player_id"]] if col_enr["player_id"] < len(r) else "").strip()
 
             if s == season_id and c == cycle and p == old_id:
-
                 enr_updates.append({
                     "range": f"{col_letter(col_enr['player_id'])}{rown}",
                     "values": [[new_id]]
@@ -5705,7 +5827,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         pods_updates = []
 
         for rown in range(2, len(vals_pods) + 1):
-
             r = vals_pods[rown - 1]
 
             s = safe_int(r[col_pods["season_id"]] if col_pods["season_id"] < len(r) else 0, 0)
@@ -5713,7 +5834,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
             p = str(r[col_pods["player_id"]] if col_pods["player_id"] < len(r) else "").strip()
 
             if s == season_id and c == cycle and p == old_id:
-
                 pods_updates.append({
                     "range": f"{col_letter(col_pods['player_id'])}{rown}",
                     "values": [[new_id]]
@@ -5728,7 +5848,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         matches_updates = []
 
         for rown in range(2, len(vals_m) + 1):
-
             r = vals_m[rown - 1]
 
             s = safe_int(r[col_m["season_id"]] if col_m["season_id"] < len(r) else 0, 0)
@@ -5741,7 +5860,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
             b = str(r[col_m["player_b_id"]] if col_m["player_b_id"] < len(r) else "").strip()
 
             if a == old_id:
-
                 matches_updates.append({
                     "range": f"{col_letter(col_m['player_a_id'])}{rown}",
                     "values": [[new_id]]
@@ -5749,7 +5867,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
                 changed += 1
 
             if b == old_id:
-
                 matches_updates.append({
                     "range": f"{col_letter(col_m['player_b_id'])}{rown}",
                     "values": [[new_id]]
@@ -5764,7 +5881,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         deck_updates = []
 
         for rown in range(2, len(vals_d) + 1):
-
             r = vals_d[rown - 1]
 
             s = safe_int(r[col_d["season_id"]] if col_d["season_id"] < len(r) else 0, 0)
@@ -5772,7 +5888,6 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
             p = str(r[col_d["player_id"]] if col_d["player_id"] < len(r) else "").strip()
 
             if s == season_id and c == cycle and p == old_id:
-
                 deck_updates.append({
                     "range": f"{col_letter(col_d['player_id'])}{rown}",
                     "values": [[new_id]]
@@ -5790,6 +5905,10 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
         cache_invalidate(ws_pods)
         cache_invalidate(ws_matches)
         cache_invalidate(ws_decks)
+
+        invalidate_player_ram_index()
+        invalidate_match_ram_index()
+        invalidate_match_ac_index()
 
         await interaction.followup.send(
             f"✅ Substituição concluída.\n"
@@ -5818,12 +5937,12 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
     await interaction.response.defer(ephemeral=True)
 
     try:
-
         sh = open_sheet()
 
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-
-        rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+        rows = cached_get_all_records(
+            ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30),
+            ttl_seconds=10
+        )
 
         a_id = str(jogador_a.id)
         b_id = str(jogador_b.id)
@@ -5835,22 +5954,17 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
         details = []
 
         for r in rows:
-
             if not as_bool(r.get("active", "TRUE")):
                 continue
-
             if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
                 continue
-
             if str(r.get("result_type", "")).strip().lower() == "bye":
                 continue
 
             pa = str(r.get("player_a_id", "")).strip()
             pb = str(r.get("player_b_id", "")).strip()
 
-            pair = {pa, pb}
-
-            if pair != {a_id, b_id}:
+            if {pa, pb} != {a_id, b_id}:
                 continue
 
             total += 1
@@ -5860,25 +5974,20 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
             d_g = safe_int(r.get("draw_games", 0), 0)
 
             if pa == a_id:
-
                 if a_gw > b_gw:
                     a_wins += 1
                 elif b_gw > a_gw:
                     b_wins += 1
                 else:
                     draws += 1
-
                 score = f"{a_gw}-{b_gw}-{d_g}"
-
             else:
-
                 if b_gw > a_gw:
                     a_wins += 1
                 elif a_gw > b_gw:
                     b_wins += 1
                 else:
                     draws += 1
-
                 score = f"{b_gw}-{a_gw}-{d_g}"
 
             details.append(
@@ -5922,22 +6031,29 @@ async def estatisticas(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     try:
-
         sh = open_sheet()
-
         season_id = require_current_season(sh)
 
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
-        ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
-
-        players_all = cached_get_all_records(ws_players, ttl_seconds=10)
-        cycles_all = cached_get_all_records(ws_cycles, ttl_seconds=10)
-        enr_all = cached_get_all_records(ws_enr, ttl_seconds=10)
-        matches_all = cached_get_all_records(ws_matches, ttl_seconds=10)
-        pods_all = cached_get_all_records(ws_pods, ttl_seconds=10)
+        players_all = cached_get_all_records(
+            ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25),
+            ttl_seconds=10
+        )
+        cycles_all = cached_get_all_records(
+            ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25),
+            ttl_seconds=10
+        )
+        enr_all = cached_get_all_records(
+            ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25),
+            ttl_seconds=10
+        )
+        matches_all = cached_get_all_records(
+            ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30),
+            ttl_seconds=10
+        )
+        pods_all = cached_get_all_records(
+            ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25),
+            ttl_seconds=10
+        )
 
         season_cycles = [r for r in cycles_all if safe_int(r.get("season_id", 0), 0) == season_id]
         season_enr = [r for r in enr_all if safe_int(r.get("season_id", 0), 0) == season_id]
@@ -5969,16 +6085,7 @@ async def estatisticas(interaction: discord.Interaction):
 
 
 # =========================================================
-# START
-# =========================================================
-if not DISCORD_TOKEN:
-    raise RuntimeError("DISCORD_TOKEN não configurado.")
-
-keep_alive()
-client.run(DISCORD_TOKEN)
-
-# =========================================================
-# [BLOCO 8/8 termina aqui]
+# [BLOCO 8/12 termina aqui]
 # =========================================================
 
 
@@ -5988,11 +6095,10 @@ client.run(DISCORD_TOKEN)
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 9/9
+# BLOCO ORIGINAL: BLOCO 9/12
 # SUB-BLOCO: ÚNICO
-# RESUMO: Índice em memória para autocomplete de matches do /resultado e /rejeitar,
-# com rebuild automático por tempo, invalidação manual por evento e leitura rápida
-# por usuário sem consultar Google Sheets a cada digitação.
+# REVISÃO: blindagem contra rebuild concorrente do índice de autocomplete,
+# com melhor aproveitamento do MATCH RAM INDEX sem alterar a lógica funcional.
 # =================================================
 
 # =========================================================
@@ -6005,6 +6111,7 @@ _MATCH_AC_INDEX = {
     "by_user": {},   # user_id -> list[{"label","value","search"}]
 }
 _MATCH_AC_INDEX_LOCK = threading.Lock()
+_MATCH_AC_INDEX_BUILD_LOCK = threading.Lock()
 _MATCH_AC_INDEX_TTL_SECONDS = 60
 
 
@@ -6049,15 +6156,12 @@ def _build_match_ac_index(sh):
 
     ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
     ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
 
     ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
     ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
     cycle_rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
     player_rows = cached_get_all_records(ws_players, ttl_seconds=10)
-    match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
     locked_cycles = set()
     for r in cycle_rows:
@@ -6084,6 +6188,18 @@ def _build_match_ac_index(sh):
             nick_map[pid] = nick or pid
 
     by_user: dict[str, list[dict]] = {}
+
+    try:
+        match_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=None, only_active=True) if False else None
+    except Exception:
+        match_rows = None
+
+    if match_rows is None:
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+    else:
+        match_rows = list(match_rows)
 
     for r in match_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -6165,13 +6281,21 @@ def ensure_match_ac_index(sh, max_age_seconds: int = _MATCH_AC_INDEX_TTL_SECONDS
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    built = _build_match_ac_index(sh)
+    with _MATCH_AC_INDEX_BUILD_LOCK:
+        now = _cache_now()
 
-    with _MATCH_AC_INDEX_LOCK:
-        _MATCH_AC_INDEX["ts"] = built["ts"]
-        _MATCH_AC_INDEX["season_id"] = built["season_id"]
-        _MATCH_AC_INDEX["locked_cycles"] = built["locked_cycles"]
-        _MATCH_AC_INDEX["by_user"] = built["by_user"]
+        with _MATCH_AC_INDEX_LOCK:
+            ts = float(_MATCH_AC_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_match_ac_index(sh)
+
+        with _MATCH_AC_INDEX_LOCK:
+            _MATCH_AC_INDEX["ts"] = built["ts"]
+            _MATCH_AC_INDEX["season_id"] = built["season_id"]
+            _MATCH_AC_INDEX["locked_cycles"] = built["locked_cycles"]
+            _MATCH_AC_INDEX["by_user"] = built["by_user"]
 
 
 def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int = 25) -> list[dict]:
@@ -6192,12 +6316,12 @@ def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int 
         items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
 
     if not q:
-        return items[:limit]
+        return [dict(item) for item in items[:limit]]
 
     out = []
     for item in items:
         if q in str(item.get("search", "")):
-            out.append(item)
+            out.append(dict(item))
             if len(out) >= limit:
                 break
     return out
@@ -6217,16 +6341,15 @@ def get_match_ac_index_snapshot() -> dict:
 
 
 # =================================================
-# FIM DO SUB-BLOCO
+# FIM DO SUB-BLOCO 9/12
 # =================================================
 
 
 # =================================================
-# BLOCO ORIGINAL: BLOCO 10/10
+# BLOCO ORIGINAL: BLOCO 10/12
 # SUB-BLOCO: ÚNICO
-# RESUMO: Índice RAM de MATCHES para acelerar autocomplete, leitura por jogador,
-# leitura por match_id e consultas por season/cycle, com rebuild automático por
-# tempo e invalidação manual por evento.
+# REVISÃO: blindagem contra rebuild concorrente do índice RAM de matches,
+# mantendo a mesma interface e a mesma lógica funcional.
 # =================================================
 
 # =========================================================
@@ -6240,6 +6363,7 @@ _MATCH_RAM_INDEX = {
     "season_id_active": 0,
 }
 _MATCH_RAM_INDEX_LOCK = threading.Lock()
+_MATCH_RAM_INDEX_BUILD_LOCK = threading.Lock()
 _MATCH_RAM_INDEX_TTL_SECONDS = 60
 
 
@@ -6304,11 +6428,13 @@ def _build_match_ram_index(sh):
 
         season_id = r["season_id"]
         cycle = r["cycle"]
+
         if season_id > 0 and cycle > 0:
             by_cycle.setdefault((season_id, cycle), []).append(r)
 
         a = r["player_a_id"]
         b = r["player_b_id"]
+
         if a:
             by_player.setdefault(a, []).append(r)
         if b:
@@ -6339,18 +6465,27 @@ def ensure_match_ram_index(sh, max_age_seconds: int = _MATCH_RAM_INDEX_TTL_SECON
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    built = _build_match_ram_index(sh)
+    with _MATCH_RAM_INDEX_BUILD_LOCK:
+        now = _cache_now()
 
-    with _MATCH_RAM_INDEX_LOCK:
-        _MATCH_RAM_INDEX["ts"] = built["ts"]
-        _MATCH_RAM_INDEX["by_match_id"] = built["by_match_id"]
-        _MATCH_RAM_INDEX["by_player"] = built["by_player"]
-        _MATCH_RAM_INDEX["by_cycle"] = built["by_cycle"]
-        _MATCH_RAM_INDEX["season_id_active"] = built["season_id_active"]
+        with _MATCH_RAM_INDEX_LOCK:
+            ts = float(_MATCH_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_match_ram_index(sh)
+
+        with _MATCH_RAM_INDEX_LOCK:
+            _MATCH_RAM_INDEX["ts"] = built["ts"]
+            _MATCH_RAM_INDEX["by_match_id"] = built["by_match_id"]
+            _MATCH_RAM_INDEX["by_player"] = built["by_player"]
+            _MATCH_RAM_INDEX["by_cycle"] = built["by_cycle"]
+            _MATCH_RAM_INDEX["season_id_active"] = built["season_id_active"]
 
 
 def get_match_by_id_fast(sh, match_id: str) -> dict | None:
     ensure_match_ram_index(sh)
+
     mid = str(match_id or "").strip()
     if not mid:
         return None
@@ -6368,6 +6503,7 @@ def get_matches_for_player_fast(
     only_active: bool = False
 ) -> list[dict]:
     ensure_match_ram_index(sh)
+
     pid = str(player_id or "").strip()
     if not pid:
         return []
@@ -6376,6 +6512,7 @@ def get_matches_for_player_fast(
         rows = list(_MATCH_RAM_INDEX.get("by_player", {}).get(pid, []))
 
     out = []
+
     for r in rows:
         if season_id is not None and safe_int(r.get("season_id", 0), 0) != safe_int(season_id, 0):
             continue
@@ -6383,12 +6520,15 @@ def get_matches_for_player_fast(
             continue
         if only_active and not as_bool(r.get("active", True)):
             continue
+
         out.append(dict(r))
+
     return out
 
 
 def get_matches_for_cycle_fast(sh, season_id: int, cycle: int, only_active: bool = False) -> list[dict]:
     ensure_match_ram_index(sh)
+
     key = (safe_int(season_id, 0), safe_int(cycle, 0))
 
     with _MATCH_RAM_INDEX_LOCK:
@@ -6398,9 +6538,11 @@ def get_matches_for_cycle_fast(sh, season_id: int, cycle: int, only_active: bool
         return [dict(r) for r in rows]
 
     out = []
+
     for r in rows:
         if as_bool(r.get("active", True)):
             out.append(dict(r))
+
     return out
 
 
@@ -6416,5 +6558,575 @@ def get_match_ram_index_snapshot() -> dict:
 
 
 # =================================================
-# FIM DO SUB-BLOCO
+# FIM DO SUB-BLOCO 10/12
 # =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 11/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Índices RAM de PLAYERS, CYCLES e SEASONS, com helpers *_fast
+# para autocomplete, resolução rápida de jogador, leitura rápida de nicknames,
+# seasons e ciclos sem consultar Google Sheets a cada uso.
+# NOVO BLOCO: criado para suprir dependências já usadas pelos BLOCOS 5, 6, 7 e 8.
+# =================================================
+
+# =========================================================
+# CACHE DE ÍNDICE — PLAYERS
+# =========================================================
+_PLAYER_RAM_INDEX_TTL_SECONDS = 60
+
+# Estrutura reaproveita os globais declarados no BLOCO 1:
+# _PLAYER_RAM_INDEX
+# _PLAYER_RAM_LOCK
+#
+# Formato:
+# {
+#   "ts": float,
+#   "by_id": {player_id: row_dict},
+#   "nick_map": {player_id: nick},
+#   "choices": [{"label","value","search"}],
+# }
+
+def _normalize_player_row(raw: dict) -> dict:
+    pid = str(raw.get("discord_id", "")).strip()
+    nick = str(raw.get("nick", "")).strip()
+    name = str(raw.get("name", "")).strip()
+    notes = str(raw.get("notes", "")).strip()
+    status = str(raw.get("status", "")).strip().lower()
+    rating = str(raw.get("rating", "")).strip()
+    created_at = str(raw.get("created_at", "")).strip()
+    updated_at = str(raw.get("updated_at", "")).strip()
+
+    return {
+        "discord_id": pid,
+        "nick": nick,
+        "name": name,
+        "notes": notes,
+        "status": status,
+        "rating": rating,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _build_player_ram_index(sh) -> dict:
+    ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
+    ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
+
+    rows = cached_get_all_records(ws_players, ttl_seconds=10)
+
+    by_id: dict[str, dict] = {}
+    nick_map: dict[str, str] = {}
+    choices: list[dict] = []
+
+    for raw in rows:
+        r = _normalize_player_row(raw)
+        pid = r["discord_id"]
+        if not pid:
+            continue
+
+        by_id[pid] = r
+        nick = r["nick"] or pid
+        nick_map[pid] = nick
+
+        label = nick
+        search = f"{pid} {nick} {r['name']} {r['status']}".lower()
+
+        choices.append({
+            "label": label[:100],
+            "value": pid,
+            "search": search,
+        })
+
+    choices.sort(key=lambda x: str(x.get("label", "")).lower())
+
+    return {
+        "ts": _cache_now(),
+        "by_id": by_id,
+        "nick_map": nick_map,
+        "choices": choices,
+    }
+
+
+def ensure_player_ram_index(sh, max_age_seconds: int = _PLAYER_RAM_INDEX_TTL_SECONDS):
+    global _PLAYER_RAM_INDEX
+
+    now = _cache_now()
+
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX
+        if isinstance(data, dict):
+            ts = float(data.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+    built = _build_player_ram_index(sh)
+
+    with _PLAYER_RAM_LOCK:
+        _PLAYER_RAM_INDEX = built
+
+
+def get_player_ram_index_snapshot() -> dict:
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
+        return {
+            "ts": data.get("ts", 0.0),
+            "players_indexed": len(data.get("by_id", {})),
+            "choices_indexed": len(data.get("choices", [])),
+        }
+
+
+def get_player_nick_map_fast(sh) -> dict[str, str]:
+    ensure_player_ram_index(sh)
+
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
+        return dict(data.get("nick_map", {}))
+
+
+def get_player_row_fast(sh, discord_id: str) -> dict | None:
+    ensure_player_ram_index(sh)
+    pid = str(discord_id or "").strip()
+    if not pid:
+        return None
+
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
+        row = data.get("by_id", {}).get(pid)
+        return dict(row) if row else None
+
+
+def resolve_player_id_fast(sh, raw_value: str) -> str:
+    ensure_player_ram_index(sh)
+
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return ""
+
+    raw_lower = raw.lower()
+
+    # aceita mention <@123> ou <@!123>
+    if raw.startswith("<@") and raw.endswith(">"):
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        raw = digits
+        raw_lower = raw.lower()
+
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
+        by_id = data.get("by_id", {})
+
+        # match direto por ID
+        if raw in by_id:
+            return raw
+
+        # match direto por nick
+        for pid, r in by_id.items():
+            nick = str(r.get("nick", "")).strip()
+            if nick and nick.lower() == raw_lower:
+                return pid
+
+        # match por name
+        for pid, r in by_id.items():
+            name = str(r.get("name", "")).strip()
+            if name and name.lower() == raw_lower:
+                return pid
+
+    return ""
+
+
+def get_player_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
+    ensure_player_ram_index(sh)
+
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _PLAYER_RAM_LOCK:
+        data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
+        items = list(data.get("choices", []))
+
+    if not q:
+        return items[:limit]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
+# =========================================================
+# CACHE DE ÍNDICE — CYCLES
+# =========================================================
+_CYCLE_RAM_INDEX_TTL_SECONDS = 60
+
+# Estrutura reaproveita os globais declarados no BLOCO 1:
+# _CYCLE_RAM_INDEX
+# _CYCLE_RAM_LOCK
+#
+# Formato:
+# {
+#   "ts": float,
+#   "by_season": {
+#       season_id: {
+#           "rows": [row_dict],
+#           "choices": [choice_dict]
+#       }
+#   }
+# }
+
+def _cycle_status_label_pt(status: str) -> str:
+    st = str(status or "").strip().lower()
+    if st == "open":
+        return "aberto"
+    if st == "locked":
+        return "fechado"
+    if st == "completed":
+        return "encerrado"
+    return st or "desconhecido"
+
+
+def _normalize_cycle_row(raw: dict) -> dict:
+    season_id = safe_int(raw.get("season_id", 0), 0)
+    cycle = safe_int(raw.get("cycle", 0), 0)
+    status = str(raw.get("status", "")).strip().lower()
+    start_at_br = str(raw.get("start_at_br", "")).strip()
+    deadline_at_br = str(raw.get("deadline_at_br", "")).strip()
+    created_at = str(raw.get("created_at", "")).strip()
+    updated_at = str(raw.get("updated_at", "")).strip()
+
+    return {
+        "season_id": season_id,
+        "cycle": cycle,
+        "status": status,
+        "start_at_br": start_at_br,
+        "deadline_at_br": deadline_at_br,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _build_cycle_ram_index(sh) -> dict:
+    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
+
+    rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
+    by_season: dict[int, dict] = {}
+
+    for raw in rows:
+        r = _normalize_cycle_row(raw)
+        sid = r["season_id"]
+        cyc = r["cycle"]
+        if sid <= 0 or cyc <= 0:
+            continue
+
+        bucket = by_season.setdefault(sid, {
+            "rows": [],
+            "choices": [],
+        })
+        bucket["rows"].append(r)
+
+    for sid, bucket in by_season.items():
+        bucket["rows"].sort(key=lambda x: safe_int(x.get("cycle", 0), 0))
+
+        choices = []
+        for r in bucket["rows"]:
+            cyc = safe_int(r.get("cycle", 0), 0)
+            status = str(r.get("status", "")).strip().lower()
+            pt = _cycle_status_label_pt(status)
+
+            label = f"Ciclo {cyc} | {pt}"
+            search = f"ciclo {cyc} {status} {pt} season {sid}".lower()
+
+            if r.get("start_at_br"):
+                search += f" {r['start_at_br'].lower()}"
+            if r.get("deadline_at_br"):
+                search += f" {r['deadline_at_br'].lower()}"
+
+            choices.append({
+                "label": label[:100],
+                "value": cyc,
+                "search": search,
+                "status": status,
+                "season_id": sid,
+            })
+
+        bucket["choices"] = choices
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+    }
+
+
+def ensure_cycle_ram_index(sh, max_age_seconds: int = _CYCLE_RAM_INDEX_TTL_SECONDS):
+    global _CYCLE_RAM_INDEX
+
+    now = _cache_now()
+
+    with _CYCLE_RAM_LOCK:
+        data = _CYCLE_RAM_INDEX
+        if isinstance(data, dict):
+            ts = float(data.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+    built = _build_cycle_ram_index(sh)
+
+    with _CYCLE_RAM_LOCK:
+        _CYCLE_RAM_INDEX = built
+
+
+def get_cycle_ram_index_snapshot() -> dict:
+    with _CYCLE_RAM_LOCK:
+        data = _CYCLE_RAM_INDEX if isinstance(_CYCLE_RAM_INDEX, dict) else {}
+        by_season = data.get("by_season", {})
+        total_rows = sum(len(v.get("rows", [])) for v in by_season.values())
+        return {
+            "ts": data.get("ts", 0.0),
+            "seasons_indexed": len(by_season),
+            "cycles_indexed": total_rows,
+        }
+
+
+def get_cycle_choices_fast(
+    sh,
+    season_id: int,
+    query: str = "",
+    only_open: bool = False,
+    limit: int = 25
+) -> list[dict]:
+    ensure_cycle_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _CYCLE_RAM_LOCK:
+        data = _CYCLE_RAM_INDEX if isinstance(_CYCLE_RAM_INDEX, dict) else {}
+        items = list(data.get("by_season", {}).get(sid, {}).get("choices", []))
+
+    out = []
+    for item in items:
+        status = str(item.get("status", "")).strip().lower()
+
+        if only_open and status != "open":
+            continue
+
+        if q and q not in str(item.get("search", "")):
+            continue
+
+        out.append(dict(item))
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+# =========================================================
+# CACHE DE ÍNDICE — SEASONS
+# =========================================================
+_SEASON_RAM_INDEX = {
+    "ts": 0.0,
+    "current_season_id": 0,
+    "rows": [],
+    "choices": [],
+}
+_SEASON_RAM_INDEX_LOCK = threading.Lock()
+_SEASON_RAM_INDEX_TTL_SECONDS = 60
+
+
+def invalidate_season_ram_index():
+    with _SEASON_RAM_INDEX_LOCK:
+        _SEASON_RAM_INDEX["ts"] = 0.0
+        _SEASON_RAM_INDEX["current_season_id"] = 0
+        _SEASON_RAM_INDEX["rows"] = []
+        _SEASON_RAM_INDEX["choices"] = []
+
+
+def _season_status_label_pt(status: str) -> str:
+    st = str(status or "").strip().lower()
+    if st == "open":
+        return "aberta"
+    if st == "closed":
+        return "fechada"
+    return st or "desconhecida"
+
+
+def _normalize_season_row(raw: dict) -> dict:
+    sid = safe_int(raw.get("season_id", 0), 0)
+    status = str(raw.get("status", "")).strip().lower()
+    name = str(raw.get("name", "")).strip()
+    created_at = str(raw.get("created_at", "")).strip()
+    updated_at = str(raw.get("updated_at", "")).strip()
+
+    return {
+        "season_id": sid,
+        "status": status,
+        "name": name,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _build_season_ram_index(sh) -> dict:
+    ws_seasons = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
+    ensure_sheet_columns(ws_seasons, SEASONS_REQUIRED)
+
+    rows = cached_get_all_records(ws_seasons, ttl_seconds=10)
+
+    out_rows = []
+    choices = []
+
+    for raw in rows:
+        r = _normalize_season_row(raw)
+        sid = r["season_id"]
+        if sid <= 0:
+            continue
+
+        out_rows.append(r)
+
+    out_rows.sort(key=lambda x: safe_int(x.get("season_id", 0), 0), reverse=True)
+
+    for r in out_rows:
+        sid = r["season_id"]
+        status = str(r.get("status", "")).strip().lower()
+        pt = _season_status_label_pt(status)
+        name = str(r.get("name", "")).strip() or f"Temporada {sid}"
+
+        label = f"Season {sid} | {name} | {pt}"
+        search = f"season {sid} {name} {status} {pt}".lower()
+
+        choices.append({
+            "season_id": sid,
+            "label": label[:100],
+            "value": sid,
+            "search": search,
+            "status": status,
+            "name_text": name,
+        })
+
+    return {
+        "ts": _cache_now(),
+        "current_season_id": get_current_season_id(sh),
+        "rows": out_rows,
+        "choices": choices,
+    }
+
+
+def ensure_season_ram_index(sh, max_age_seconds: int = _SEASON_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _SEASON_RAM_INDEX_LOCK:
+        ts = float(_SEASON_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    built = _build_season_ram_index(sh)
+
+    with _SEASON_RAM_INDEX_LOCK:
+        _SEASON_RAM_INDEX["ts"] = built["ts"]
+        _SEASON_RAM_INDEX["current_season_id"] = built["current_season_id"]
+        _SEASON_RAM_INDEX["rows"] = built["rows"]
+        _SEASON_RAM_INDEX["choices"] = built["choices"]
+
+
+def get_season_ram_index_snapshot() -> dict:
+    with _SEASON_RAM_INDEX_LOCK:
+        return {
+            "ts": _SEASON_RAM_INDEX.get("ts", 0.0),
+            "current_season_id": _SEASON_RAM_INDEX.get("current_season_id", 0),
+            "seasons_indexed": len(_SEASON_RAM_INDEX.get("rows", [])),
+        }
+
+
+def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
+    ensure_season_ram_index(sh)
+
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    with _SEASON_RAM_INDEX_LOCK:
+        items = list(_SEASON_RAM_INDEX.get("choices", []))
+
+    if not q:
+        return items[:limit]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(dict(item))
+            if len(out) >= limit:
+                break
+
+    return out
+
+
+# =================================================
+# FIM DO BLOCO 11/12
+# =================================================
+
+
+=================================================
+BLOCO ORIGINAL: BLOCO 12/12
+SUB-BLOCO: ÚNICO
+RESUMO: Inicialização final do bot Discord.
+Deve ficar no FINAL ABSOLUTO do main.py.
+Mantém keep_alive e client.run após todos os blocos,
+garantindo que índices RAM, comandos e caches
+estejam carregados antes do bot iniciar.
+=================================================
+=========================================================
+START FINAL
+=========================================================
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN não configurado.")
+
+
+def _final_warmup():
+    """
+    Warmup opcional antes do start.
+    Não falha se algo não existir ainda.
+    """
+    try:
+        sh = open_sheet()
+    except Exception:
+        return
+
+    warmers = [
+        "ensure_player_ram_index",
+        "ensure_cycle_ram_index",
+        "ensure_season_ram_index",
+        "ensure_match_ram_index",
+        "ensure_match_ac_index",
+    ]
+
+    for name in warmers:
+        try:
+            fn = globals().get(name)
+            if callable(fn):
+                fn(sh)
+        except Exception:
+            pass
+
+
+try:
+    _final_warmup()
+except Exception:
+    pass
+
+
+keep_alive()
+
+client.run(DISCORD_TOKEN)
+
+
+=================================================
+FIM DO BLOCO 12/12
+=================================================
