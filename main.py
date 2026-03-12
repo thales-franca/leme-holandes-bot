@@ -7132,8 +7132,9 @@ def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
 # =================================================
 # BLOCO ORIGINAL: BLOCO EXTRA
 # SUB-BLOCO: ÚNICO
-# RESUMO: Comando administrativo para listar todas as matches por season/ciclo,
-# separando partidas já registradas e pendentes, com uso prioritário do índice RAM.
+# REVISÃO: comando administrativo para listar matches por season/ciclo,
+# com separação entre registradas e pendentes, placar mais claro e
+# compatibilidade integral com os índices RAM e helpers atuais.
 # =================================================
 
 # =========================================================
@@ -7154,6 +7155,10 @@ def _admin_match_score_text(r: dict) -> str:
     a_w = safe_int(r.get("a_games_won", 0), 0)
     b_w = safe_int(r.get("b_games_won", 0), 0)
     d_g = safe_int(r.get("draw_games", 0), 0)
+
+    if a_w == 0 and b_w == 0 and d_g == 0:
+        return "—"
+
     return f"{a_w}-{b_w}-{d_g}"
 
 
@@ -7198,7 +7203,10 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(f"❌ A season {season} não existe.", ephemeral=True)
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
 
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
         cf = get_cycle_fields(ws_cycles, season, cycle)
@@ -7209,7 +7217,12 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
             )
 
         nick_map = get_player_nick_map_fast(sh)
-        rows = get_matches_for_cycle_fast(sh, season_id=season, cycle=cycle, only_active=False)
+        rows = get_matches_for_cycle_fast(
+            sh,
+            season_id=season,
+            cycle=cycle,
+            only_active=False
+        )
 
         if not rows:
             return await interaction.followup.send(
@@ -7264,7 +7277,12 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
         else:
             lines.append("Nenhuma match pendente.")
 
-        await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True, limit=1800)
+        await send_followup_chunks(
+            interaction,
+            "\n".join(lines),
+            ephemeral=True,
+            limit=1800
+        )
         await log_admin(interaction, f"matches_ciclo season={season} cycle={cycle}")
 
     except Exception as e:
