@@ -6011,380 +6011,195 @@ def get_match_ac_index_snapshot() -> dict:
 # =================================================
 # BLOCO ORIGINAL: BLOCO 10/10
 # SUB-BLOCO: ÚNICO
-# RESUMO: Índices RAM para Players, Cycles e Seasons, com rebuild automático
-# por tempo, invalidação manual por evento e helpers rápidos para autocomplete
-# e resolução em memória sem tocar no Google Sheets a cada uso.
+# RESUMO: Índice RAM de MATCHES para acelerar autocomplete, leitura por jogador,
+# leitura por match_id e consultas por season/cycle, com rebuild automático por
+# tempo e invalidação manual por evento.
 # =================================================
 
 # =========================================================
-# CACHE DE ÍNDICE — PLAYERS
+# CACHE DE ÍNDICE — MATCHES
 # =========================================================
-_PLAYER_RAM_INDEX = {
+_MATCH_RAM_INDEX = {
     "ts": 0.0,
-    "by_id": {},          # pid -> row dict
-    "nick_map": {},       # pid -> nick
-    "choices": [],        # [{"label","value","search"}]
+    "by_match_id": {},          # match_id -> row dict
+    "by_player": {},            # player_id -> list[row dict]
+    "by_cycle": {},             # (season_id, cycle) -> list[row dict]
+    "season_id_active": 0,
 }
-_PLAYER_RAM_INDEX_LOCK = threading.Lock()
-_PLAYER_RAM_INDEX_TTL_SECONDS = 120
+_MATCH_RAM_INDEX_LOCK = threading.Lock()
+_MATCH_RAM_INDEX_TTL_SECONDS = 60
 
 
-def invalidate_player_ram_index():
-    with _PLAYER_RAM_INDEX_LOCK:
-        _PLAYER_RAM_INDEX["ts"] = 0.0
-        _PLAYER_RAM_INDEX["by_id"] = {}
-        _PLAYER_RAM_INDEX["nick_map"] = {}
-        _PLAYER_RAM_INDEX["choices"] = []
+def invalidate_match_ram_index():
+    with _MATCH_RAM_INDEX_LOCK:
+        _MATCH_RAM_INDEX["ts"] = 0.0
+        _MATCH_RAM_INDEX["by_match_id"] = {}
+        _MATCH_RAM_INDEX["by_player"] = {}
+        _MATCH_RAM_INDEX["by_cycle"] = {}
+        _MATCH_RAM_INDEX["season_id_active"] = 0
 
 
-def _build_player_ram_index(sh):
-    ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
-    ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-
-    rows = cached_get_all_records(ws_players, ttl_seconds=10)
-
-    by_id: dict[str, dict] = {}
-    nick_map: dict[str, str] = {}
-    choices: list[dict] = []
-
-    for r in rows:
-        pid = str(r.get("discord_id", "")).strip()
-        if not pid:
-            continue
-
-        nick = str(r.get("nick", "")).strip() or pid
-        by_id[pid] = r
-        nick_map[pid] = nick
-
-        choices.append({
-            "label": nick[:100],
-            "value": pid,
-            "search": f"{pid} {nick}".lower(),
-        })
-
-    choices.sort(key=lambda x: x["label"].lower())
-
+def _copy_match_row_dict(r: dict) -> dict:
     return {
-        "ts": _cache_now(),
-        "by_id": by_id,
-        "nick_map": nick_map,
-        "choices": choices,
+        "match_id": str(r.get("match_id", "")).strip(),
+        "season_id": safe_int(r.get("season_id", 0), 0),
+        "cycle": safe_int(r.get("cycle", 0), 0),
+        "pod": str(r.get("pod", "")).strip(),
+        "player_a_id": str(r.get("player_a_id", "")).strip(),
+        "player_b_id": str(r.get("player_b_id", "")).strip(),
+        "a_games_won": safe_int(r.get("a_games_won", 0), 0),
+        "b_games_won": safe_int(r.get("b_games_won", 0), 0),
+        "draw_games": safe_int(r.get("draw_games", 0), 0),
+        "result_type": str(r.get("result_type", "")).strip().lower(),
+        "confirmed_status": str(r.get("confirmed_status", "")).strip().lower(),
+        "reported_by_id": str(r.get("reported_by_id", "")).strip(),
+        "confirmed_by_id": str(r.get("confirmed_by_id", "")).strip(),
+        "message_id": str(r.get("message_id", "")).strip(),
+        "active": as_bool(r.get("active", "TRUE")),
+        "created_at": str(r.get("created_at", "")).strip(),
+        "updated_at": str(r.get("updated_at", "")).strip(),
+        "auto_confirm_at": str(r.get("auto_confirm_at", "")).strip(),
     }
 
 
-def ensure_player_ram_index(sh, max_age_seconds: int = _PLAYER_RAM_INDEX_TTL_SECONDS):
-    now = _cache_now()
-
-    with _PLAYER_RAM_INDEX_LOCK:
-        ts = float(_PLAYER_RAM_INDEX.get("ts", 0.0) or 0.0)
-        if ts > 0 and (now - ts) <= max_age_seconds:
-            return
-
-    built = _build_player_ram_index(sh)
-
-    with _PLAYER_RAM_INDEX_LOCK:
-        _PLAYER_RAM_INDEX["ts"] = built["ts"]
-        _PLAYER_RAM_INDEX["by_id"] = built["by_id"]
-        _PLAYER_RAM_INDEX["nick_map"] = built["nick_map"]
-        _PLAYER_RAM_INDEX["choices"] = built["choices"]
+def _match_sort_key(r: dict):
+    return (
+        safe_int(r.get("season_id", 0), 0),
+        safe_int(r.get("cycle", 0), 0),
+        safe_int(r.get("pod", 0), 999999),
+        str(r.get("match_id", "")).lower(),
+    )
 
 
-def get_player_nick_map_fast(sh) -> dict[str, str]:
-    ensure_player_ram_index(sh)
-    with _PLAYER_RAM_INDEX_LOCK:
-        return dict(_PLAYER_RAM_INDEX.get("nick_map", {}))
+def _build_match_ram_index(sh):
+    ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
+    ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
+    rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
-def get_player_row_fast(sh, player_id: str) -> dict | None:
-    ensure_player_ram_index(sh)
-    pid = str(player_id).strip()
-    with _PLAYER_RAM_INDEX_LOCK:
-        row = _PLAYER_RAM_INDEX.get("by_id", {}).get(pid)
-        return dict(row) if row else None
+    by_match_id: dict[str, dict] = {}
+    by_player: dict[str, list[dict]] = {}
+    by_cycle: dict[tuple[int, int], list[dict]] = {}
 
-
-def resolve_player_id_fast(sh, raw_value: str) -> str:
-    ensure_player_ram_index(sh)
-    raw = str(raw_value or "").strip()
-    if not raw:
-        return ""
-
-    raw_norm = raw.lower()
-
-    with _PLAYER_RAM_INDEX_LOCK:
-        by_id = _PLAYER_RAM_INDEX.get("by_id", {})
-        nick_map = _PLAYER_RAM_INDEX.get("nick_map", {})
-
-        if raw in by_id:
-            return raw
-
-        for pid, nick in nick_map.items():
-            if str(nick).strip().lower() == raw_norm:
-                return pid
-
-    return ""
-
-
-def get_player_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
-    ensure_player_ram_index(sh)
-    q = str(query or "").strip().lower()
-    limit = max(1, min(limit, 25))
-
-    with _PLAYER_RAM_INDEX_LOCK:
-        items = list(_PLAYER_RAM_INDEX.get("choices", []))
-
-    if not q:
-        return items[:limit]
-
-    out = []
-    for item in items:
-        if q in str(item.get("search", "")):
-            out.append(item)
-            if len(out) >= limit:
-                break
-    return out
-
-
-# =========================================================
-# CACHE DE ÍNDICE — CYCLES
-# =========================================================
-_CYCLE_RAM_INDEX = {
-    "ts": 0.0,
-    "by_season": {},      # season_id -> list[{"cycle","status","label_all","label_open","search"}]
-}
-_CYCLE_RAM_INDEX_LOCK = threading.Lock()
-_CYCLE_RAM_INDEX_TTL_SECONDS = 60
-
-
-def invalidate_cycle_ram_index():
-    with _CYCLE_RAM_INDEX_LOCK:
-        _CYCLE_RAM_INDEX["ts"] = 0.0
-        _CYCLE_RAM_INDEX["by_season"] = {}
-
-
-def _label_cycle_status(st: str) -> str:
-    st = str(st or "").strip().lower()
-    if st == "open":
-        return "aberto"
-    if st in ("locked", "closed"):
-        return "fechado"
-    if st == "completed":
-        return "concluído"
-    return st or "indefinido"
-
-
-def _build_cycle_ram_index(sh):
-    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
-    ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
-
-    rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
-    by_season: dict[int, list[dict]] = {}
-
-    seen_pairs = set()
-
-    for r in rows:
-        season_id = safe_int(r.get("season_id", 0), 0)
-        cycle = safe_int(r.get("cycle", 0), 0)
-        if season_id <= 0 or cycle <= 0:
+    for raw in rows:
+        r = _copy_match_row_dict(raw)
+        mid = r["match_id"]
+        if not mid:
             continue
 
-        key = (season_id, cycle)
-        if key in seen_pairs:
-            continue
-        seen_pairs.add(key)
+        by_match_id[mid] = r
 
-        st = str(r.get("status", "")).strip().lower()
-        label_all = f"Ciclo {cycle} / {_label_cycle_status(st)}"
-        label_open = f"Ciclo {cycle} / aberto"
+        season_id = r["season_id"]
+        cycle = r["cycle"]
+        if season_id > 0 and cycle > 0:
+            by_cycle.setdefault((season_id, cycle), []).append(r)
 
-        by_season.setdefault(season_id, []).append({
-            "cycle": cycle,
-            "status": st,
-            "label_all": label_all[:100],
-            "label_open": label_open[:100],
-            "search": f"{cycle} {st} {label_all}".lower(),
-        })
+        a = r["player_a_id"]
+        b = r["player_b_id"]
+        if a:
+            by_player.setdefault(a, []).append(r)
+        if b:
+            by_player.setdefault(b, []).append(r)
 
-    for season_id in by_season:
-        by_season[season_id].sort(key=lambda x: safe_int(x.get("cycle", 0), 0))
+    for key in by_cycle:
+        by_cycle[key].sort(key=_match_sort_key)
+
+    for pid in by_player:
+        by_player[pid].sort(key=_match_sort_key)
+
+    season_id_active = get_current_season_id(sh)
 
     return {
         "ts": _cache_now(),
-        "by_season": by_season,
+        "by_match_id": by_match_id,
+        "by_player": by_player,
+        "by_cycle": by_cycle,
+        "season_id_active": season_id_active,
     }
 
 
-def ensure_cycle_ram_index(sh, max_age_seconds: int = _CYCLE_RAM_INDEX_TTL_SECONDS):
+def ensure_match_ram_index(sh, max_age_seconds: int = _MATCH_RAM_INDEX_TTL_SECONDS):
     now = _cache_now()
 
-    with _CYCLE_RAM_INDEX_LOCK:
-        ts = float(_CYCLE_RAM_INDEX.get("ts", 0.0) or 0.0)
+    with _MATCH_RAM_INDEX_LOCK:
+        ts = float(_MATCH_RAM_INDEX.get("ts", 0.0) or 0.0)
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    built = _build_cycle_ram_index(sh)
+    built = _build_match_ram_index(sh)
 
-    with _CYCLE_RAM_INDEX_LOCK:
-        _CYCLE_RAM_INDEX["ts"] = built["ts"]
-        _CYCLE_RAM_INDEX["by_season"] = built["by_season"]
+    with _MATCH_RAM_INDEX_LOCK:
+        _MATCH_RAM_INDEX["ts"] = built["ts"]
+        _MATCH_RAM_INDEX["by_match_id"] = built["by_match_id"]
+        _MATCH_RAM_INDEX["by_player"] = built["by_player"]
+        _MATCH_RAM_INDEX["by_cycle"] = built["by_cycle"]
+        _MATCH_RAM_INDEX["season_id_active"] = built["season_id_active"]
 
 
-def get_cycle_choices_fast(sh, season_id: int, query: str = "", only_open: bool = False, limit: int = 25) -> list[dict]:
-    ensure_cycle_ram_index(sh)
+def get_match_by_id_fast(sh, match_id: str) -> dict | None:
+    ensure_match_ram_index(sh)
+    mid = str(match_id or "").strip()
+    if not mid:
+        return None
 
-    sid = safe_int(season_id, 0)
-    if sid <= 0:
+    with _MATCH_RAM_INDEX_LOCK:
+        r = _MATCH_RAM_INDEX.get("by_match_id", {}).get(mid)
+        return dict(r) if r else None
+
+
+def get_matches_for_player_fast(
+    sh,
+    player_id: str,
+    season_id: int | None = None,
+    cycle: int | None = None,
+    only_active: bool = False
+) -> list[dict]:
+    ensure_match_ram_index(sh)
+    pid = str(player_id or "").strip()
+    if not pid:
         return []
 
-    q = str(query or "").strip().lower()
-    limit = max(1, min(limit, 25))
-
-    with _CYCLE_RAM_INDEX_LOCK:
-        items = list(_CYCLE_RAM_INDEX.get("by_season", {}).get(sid, []))
+    with _MATCH_RAM_INDEX_LOCK:
+        rows = list(_MATCH_RAM_INDEX.get("by_player", {}).get(pid, []))
 
     out = []
-    for item in items:
-        if only_open and str(item.get("status", "")).strip().lower() != "open":
-            continue
-        if q and q not in str(item.get("search", "")):
-            continue
-
-        out.append({
-            "label": item["label_open"] if only_open else item["label_all"],
-            "value": str(item["cycle"]),
-        })
-
-        if len(out) >= limit:
-            break
-
-    return out
-
-
-# =========================================================
-# CACHE DE ÍNDICE — SEASONS
-# =========================================================
-_SEASON_RAM_INDEX = {
-    "ts": 0.0,
-    "items": [],   # [{"season_id","status","name","label","search"}]
-}
-_SEASON_RAM_INDEX_LOCK = threading.Lock()
-_SEASON_RAM_INDEX_TTL_SECONDS = 120
-
-
-def invalidate_season_ram_index():
-    with _SEASON_RAM_INDEX_LOCK:
-        _SEASON_RAM_INDEX["ts"] = 0.0
-        _SEASON_RAM_INDEX["items"] = []
-
-
-def _build_season_ram_index(sh):
-    ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
-    ensure_sheet_columns(ws, SEASONS_REQUIRED)
-
-    rows = cached_get_all_records(ws, ttl_seconds=10)
-    items = []
-
     for r in rows:
-        sid = safe_int(r.get("season_id", 0), 0)
-        if sid <= 0:
+        if season_id is not None and safe_int(r.get("season_id", 0), 0) != safe_int(season_id, 0):
             continue
-
-        st = str(r.get("status", "")).strip().lower()
-        nm = str(r.get("name", "")).strip()
-
-        label = f"Season {sid} / {st or 'indefinido'}"
-        if nm:
-            label += f" / {nm}"
-
-        items.append({
-            "season_id": sid,
-            "status": st,
-            "name": nm,
-            "label": label[:100],
-            "search": f"{sid} {st} {nm} {label}".lower(),
-        })
-
-    items.sort(key=lambda x: safe_int(x.get("season_id", 0), 0), reverse=True)
-
-    return {
-        "ts": _cache_now(),
-        "items": items,
-    }
-
-
-def ensure_season_ram_index(sh, max_age_seconds: int = _SEASON_RAM_INDEX_TTL_SECONDS):
-    now = _cache_now()
-
-    with _SEASON_RAM_INDEX_LOCK:
-        ts = float(_SEASON_RAM_INDEX.get("ts", 0.0) or 0.0)
-        if ts > 0 and (now - ts) <= max_age_seconds:
-            return
-
-    built = _build_season_ram_index(sh)
-
-    with _SEASON_RAM_INDEX_LOCK:
-        _SEASON_RAM_INDEX["ts"] = built["ts"]
-        _SEASON_RAM_INDEX["items"] = built["items"]
-
-
-def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
-    ensure_season_ram_index(sh)
-    q = str(query or "").strip().lower()
-    limit = max(1, min(limit, 25))
-
-    with _SEASON_RAM_INDEX_LOCK:
-        items = list(_SEASON_RAM_INDEX.get("items", []))
-
-    if not q:
-        return items[:limit]
-
-    out = []
-    for item in items:
-        if q in str(item.get("search", "")):
-            out.append(item)
-            if len(out) >= limit:
-                break
+        if cycle is not None and safe_int(r.get("cycle", 0), 0) != safe_int(cycle, 0):
+            continue
+        if only_active and not as_bool(r.get("active", True)):
+            continue
+        out.append(dict(r))
     return out
 
 
-# =========================================================
-# INVALIDAÇÃO GERAL OPCIONAL
-# =========================================================
-def invalidate_all_ram_indexes():
-    invalidate_match_ac_index()
-    invalidate_player_ram_index()
-    invalidate_cycle_ram_index()
-    invalidate_season_ram_index()
+def get_matches_for_cycle_fast(sh, season_id: int, cycle: int, only_active: bool = False) -> list[dict]:
+    ensure_match_ram_index(sh)
+    key = (safe_int(season_id, 0), safe_int(cycle, 0))
+
+    with _MATCH_RAM_INDEX_LOCK:
+        rows = list(_MATCH_RAM_INDEX.get("by_cycle", {}).get(key, []))
+
+    if not only_active:
+        return [dict(r) for r in rows]
+
+    out = []
+    for r in rows:
+        if as_bool(r.get("active", True)):
+            out.append(dict(r))
+    return out
 
 
-# =========================================================
-# SNAPSHOT OPCIONAL DE DIAGNÓSTICO
-# =========================================================
-def get_ram_indexes_snapshot() -> dict:
-    with _PLAYER_RAM_INDEX_LOCK:
-        player_snapshot = {
-            "ts": _PLAYER_RAM_INDEX.get("ts", 0.0),
-            "players_indexed": len(_PLAYER_RAM_INDEX.get("by_id", {})),
+def get_match_ram_index_snapshot() -> dict:
+    with _MATCH_RAM_INDEX_LOCK:
+        return {
+            "ts": _MATCH_RAM_INDEX.get("ts", 0.0),
+            "season_id_active": _MATCH_RAM_INDEX.get("season_id_active", 0),
+            "matches_indexed": len(_MATCH_RAM_INDEX.get("by_match_id", {})),
+            "players_indexed": len(_MATCH_RAM_INDEX.get("by_player", {})),
+            "cycles_indexed": len(_MATCH_RAM_INDEX.get("by_cycle", {})),
         }
-
-    with _CYCLE_RAM_INDEX_LOCK:
-        cycle_snapshot = {
-            "ts": _CYCLE_RAM_INDEX.get("ts", 0.0),
-            "seasons_indexed": len(_CYCLE_RAM_INDEX.get("by_season", {})),
-        }
-
-    with _SEASON_RAM_INDEX_LOCK:
-        season_snapshot = {
-            "ts": _SEASON_RAM_INDEX.get("ts", 0.0),
-            "seasons_loaded": len(_SEASON_RAM_INDEX.get("items", [])),
-        }
-
-    return {
-        "players": player_snapshot,
-        "cycles": cycle_snapshot,
-        "seasons": season_snapshot,
-        "matches": get_match_ac_index_snapshot(),
-    }
 
 
 # =================================================
