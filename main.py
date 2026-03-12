@@ -7073,18 +7073,21 @@ def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
 # =================================================
 
 
-=================================================
-BLOCO ORIGINAL: BLOCO 12/12
-SUB-BLOCO: ÚNICO
-RESUMO: Inicialização final do bot Discord.
-Deve ficar no FINAL ABSOLUTO do main.py.
-Mantém keep_alive e client.run após todos os blocos,
-garantindo que índices RAM, comandos e caches
-estejam carregados antes do bot iniciar.
-=================================================
-=========================================================
-START FINAL
-=========================================================
+# =================================================
+# BLOCO ORIGINAL: BLOCO 12/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Inicialização final do bot Discord.
+# Deve ficar no FINAL ABSOLUTO do main.py.
+# Mantém keep_alive e client.run após todos os blocos,
+# garantindo que índices RAM, comandos e caches
+# estejam carregados antes do bot iniciar.
+# =================================================
+
+
+# =========================================================
+# START FINAL
+# =========================================================
+
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN não configurado.")
 
@@ -7127,6 +7130,6 @@ keep_alive()
 client.run(DISCORD_TOKEN)
 
 
-=================================================
-FIM DO BLOCO 12/12
-=================================================
+# =================================================
+# FIM DO BLOCO 12/12
+# =================================================
