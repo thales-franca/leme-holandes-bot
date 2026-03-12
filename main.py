@@ -3613,20 +3613,22 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # placar V-D-E e /rejeitar para contestar resultados pendentes dentro da janela de 48h.
 # Inclui atualização de dados no Sheets, auto-confirm timer, envio de DM ao oponente
 # com botões de confirmar/rejeitar e invalidação de cache.
-# REVISÃO: redução de escritas isoladas no Sheets com batch_update, padronização
-# de timestamp UTC e manutenção da mesma lógica funcional.
+# REVISÃO: ajuste de UX para exibir "oponente" no lugar de "match_id" no comando,
+# mantendo o match_id como valor interno do autocomplete, além de preservar batch_update
+# e a mesma lógica funcional.
 # =================================================
 
 # =========================================================
 # /resultado
 # =========================================================
 @client.tree.command(name="resultado", description="Reporta resultado de um match (V-D-E).")
-@app_commands.describe(match_id="ID do match", placar="Formato V-D-E (ex: 2-1-0)")
-@app_commands.autocomplete(match_id=ac_match_id_user_pending, placar=ac_score_vde)
-async def resultado(interaction: discord.Interaction, match_id: str, placar: str):
+@app_commands.describe(oponente="Selecione seu oponente", placar="Formato V-D-E (ex: 2-1-0)")
+@app_commands.autocomplete(oponente=ac_match_id_user_pending, placar=ac_score_vde)
+async def resultado(interaction: discord.Interaction, oponente: str, placar: str):
 
     await interaction.response.defer(ephemeral=True)
 
+    match_id = str(oponente).strip()
     parsed = parse_vde(placar)
 
     if not parsed:
@@ -3770,11 +3772,13 @@ async def resultado(interaction: discord.Interaction, match_id: str, placar: str
 # /rejeitar
 # =========================================================
 @client.tree.command(name="rejeitar", description="Rejeita um resultado pendente.")
-@app_commands.describe(match_id="ID do match")
-@app_commands.autocomplete(match_id=ac_match_id_user_pending)
-async def rejeitar(interaction: discord.Interaction, match_id: str):
+@app_commands.describe(oponente="Selecione seu oponente")
+@app_commands.autocomplete(oponente=ac_match_id_user_pending)
+async def rejeitar(interaction: discord.Interaction, oponente: str):
 
     await interaction.response.defer(ephemeral=True)
+
+    match_id = str(oponente).strip()
 
     try:
         sh = open_sheet()
