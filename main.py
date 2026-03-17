@@ -3275,6 +3275,79 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # =================================================
 
 # =========================================================
+# Helper: resolve matches de player que dropou
+# =========================================================
+def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
+    try:
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
+        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED)
+
+        rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+        updates = []
+        resolved = 0
+
+        for idx in range(1, len(rows)):
+            r = rows[idx]
+
+            def getc(name: str) -> str:
+                ci = col[name]
+                return r[ci] if ci < len(r) else ""
+
+            if safe_int(getc("season_id"), 0) != season_id:
+                continue
+
+            if safe_int(getc("cycle"), 0) != cycle:
+                continue
+
+            if str(getc("active")).strip().lower() != "true":
+                continue
+
+            pa = str(getc("player_a_id")).strip()
+            pb = str(getc("player_b_id")).strip()
+
+            if player_id not in (pa, pb):
+                continue
+
+            rown = idx + 1
+
+            if pa == player_id:
+                a_w = 0
+                b_w = 2
+            else:
+                a_w = 2
+                b_w = 0
+
+            updates.append({
+                "range": f"{col_letter(col['a_games_won'])}{rown}:{col_letter(col['confirmed_by_id'])}{rown}",
+                "values": [[
+                    a_w,
+                    b_w,
+                    0,
+                    "AUTO_FORFEIT",
+                    "CONFIRMED",
+                    "SYSTEM",
+                    "SYSTEM"
+                ]]
+            })
+
+            updates.append({
+                "range": f"{col_letter(col['active'])}{rown}",
+                "values": [[False]]
+            })
+
+            resolved += 1
+
+        if updates:
+            ws_matches.batch_update(updates)
+            cache_invalidate(ws_matches)
+
+        return resolved
+
+    except Exception:
+        return 0
+
+
+# =========================================================
 # /drop
 # =========================================================
 @client.tree.command(name="drop", description="Sai do ciclo.")
@@ -3324,7 +3397,13 @@ async def drop(interaction: discord.Interaction, cycle: int):
                 ])
                 cache_invalidate(ws_enr)
 
-                return await interaction.followup.send("✅ Você saiu do ciclo.", ephemeral=True)
+                resolved = resolve_drop_matches(sh, season_id, cycle, pid)
+
+                return await interaction.followup.send(
+                    f"✅ Bunda mole, você saiu do ciclo. Igual sua ex fez com você.\n"
+                    f"⚙️ {resolved} matches foram resolvidas automaticamente como **2-0** para os oponentes.",
+                    ephemeral=True
+                )
 
         await interaction.followup.send("❌ Você não está inscrito neste ciclo.", ephemeral=True)
 
