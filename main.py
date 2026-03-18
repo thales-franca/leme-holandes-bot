@@ -1568,6 +1568,32 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
         return []
 
 
+async def ac_season_open(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
+        rows = cached_get_all_records(ws, ttl_seconds=30)
+
+        out = []
+        q = str(current or "").lower()
+
+        for r in rows:
+            sid = str(r.get("season_id", "")).strip()
+            status = str(r.get("status", "")).strip().lower()
+
+            if status != "active":
+                continue
+
+            if q and q not in sid:
+                continue
+
+            out.append(app_commands.Choice(name=f"Season {sid}", value=int(sid)))
+
+        return out[:25]
+
+    except Exception:
+        return []
+
 async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
     """
     Sugere matches relevantes ao usuário:
