@@ -3386,10 +3386,9 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
                 resolved = resolve_drop_matches(sh, season_id, cycle, pid)
 
-
 await log_admin(
     interaction,
-    f"drop: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
+    f"drop: {interaction.user.display_name} ({pid}) season={season_id} ciclo={cycle} resolved={resolved}"
 )
 
 return await interaction.followup.send(
@@ -3447,19 +3446,19 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
                 ])
                 cache_invalidate(ws_enr)
 
-                resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
+    resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
 
-nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
+    nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
 
-await log_admin(
-    interaction,
-    f"drop_adm: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
-)
+    await log_admin(
+        interaction,
+        f"drop_adm: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
+    )
 
-                return await interaction.followup.send(
-                    f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
-                    ephemeral=True
-                )
+    return await interaction.followup.send(
+        f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
+        ephemeral=True
+    )
 
         return await interaction.followup.send("❌ Jogador não encontrado.", ephemeral=True)
 
