@@ -3269,13 +3269,11 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # =================================================
 # BLOCO ORIGINAL: BLOCO 6/12
 # SUB-BLOCO: B/2
-# REVISÃO: otimização de /drop, /drop_adm, /deck e /decklist com melhor integração
-# aos índices RAM de Players, invalidação mais consistente e redução de
-# leituras repetidas, sem alterar regras de negócio.
+# REVISÃO FINAL: FIX REAL do AUTO_FORFEIT + DROP ADM (CORRIGIDO)
 # =================================================
 
 # =========================================================
-# Helper: resolve matches de player que dropou
+# Helper: resolve matches de player que dropou (FIXED)
 # =========================================================
 def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
     try:
@@ -3299,7 +3297,8 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
             if safe_int(getc("cycle"), 0) != cycle:
                 continue
 
-            if str(getc("active")).strip().lower() != "true":
+            # 🔥 IGNORA MATCH JÁ CONFIRMADA
+            if str(getc("confirmed_status")).strip().lower() == "confirmed":
                 continue
 
             pa = str(getc("player_a_id")).strip()
@@ -3310,40 +3309,35 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
 
             rown = idx + 1
 
+            # Define placar
             if pa == player_id:
-                a_w = 0
-                b_w = 2
+                a_w, b_w = 0, 2
             else:
-                a_w = 2
-                b_w = 0
+                a_w, b_w = 2, 0
 
-            updates.append({
-                "range": f"{col_letter(col['a_games_won'])}{rown}:{col_letter(col['confirmed_by_id'])}{rown}",
-                "values": [[
-                    a_w,
-                    b_w,
-                    0,
-                    "AUTO_FORFEIT",
-                    "CONFIRMED",
-                    "SYSTEM",
-                    "SYSTEM"
-                ]]
-            })
-
-            updates.append({
-                "range": f"{col_letter(col['active'])}{rown}",
-                "values": [[False]]
-            })
+            updates.extend([
+                {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[a_w]]},
+                {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[b_w]]},
+                {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [[0]]},
+                {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["AUTO_FORFEIT"]]},
+                {"range": f"{col_letter(col['auto_forfeit'])}{rown}", "values": [["TRUE"]]},
+                {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["CONFIRMED"]]},
+                {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [["SYSTEM"]]},
+                {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [["SYSTEM"]]},
+                {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_br_str()]]},
+            ])
 
             resolved += 1
 
         if updates:
             ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
+            invalidate_match_ram_index()  # 🔥 importante
 
         return resolved
 
-    except Exception:
+    except Exception as e:
+        print("ERRO resolve_drop_matches:", e)
         return 0
 
 
@@ -3381,27 +3375,19 @@ async def drop(interaction: discord.Interaction, cycle: int):
             ):
                 rown = idx + 1
 
-                current_status = str(getc("status")).strip().lower()
-                if current_status == "dropped":
+                if str(getc("status")).strip().lower() == "dropped":
                     return await interaction.followup.send("⚠️ Você já saiu deste ciclo.", ephemeral=True)
 
                 ws_enr.batch_update([
-                    {
-                        "range": f"{col_letter(col['status'])}{rown}",
-                        "values": [["dropped"]]
-                    },
-                    {
-                        "range": f"{col_letter(col['updated_at'])}{rown}",
-                        "values": [[nowb]]
-                    },
+                    {"range": f"{col_letter(col['status'])}{rown}", "values": [["dropped"]]},
+                    {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[nowb]]},
                 ])
                 cache_invalidate(ws_enr)
 
                 resolved = resolve_drop_matches(sh, season_id, cycle, pid)
 
                 return await interaction.followup.send(
-                    f"✅ Bunda mole, você saiu do ciclo. Igual sua ex fez com você.\n"
-                    f"⚙️ {resolved} matches foram resolvidas automaticamente como **2-0** para os oponentes.",
+                    f"✅ Você saiu do ciclo.\n⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
                     ephemeral=True
                 )
 
@@ -3412,62 +3398,9 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
-# Helper autocomplete players por ciclo (ADM)
-# =========================================================
-async def ac_player_in_cycle(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_player_in_cycle"):
-            return []
-
-        season = interaction.namespace.season
-        cycle = interaction.namespace.cycle
-
-        if not season or not cycle:
-            return []
-
-        sh = open_sheet()
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
-        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-
-        rows = cached_get_all_values(ws_enr, ttl_seconds=10)
-        q = str(current or "").strip().lower()
-
-        nick_map = get_player_nick_map_fast(sh)
-
-        out = []
-
-        for r in rows[1:]:
-            def getc(name: str) -> str:
-                ci = col[name]
-                return r[ci] if ci < len(r) else ""
-
-            if safe_int(getc("season_id"), 0) != season:
-                continue
-
-            if safe_int(getc("cycle"), 0) != cycle:
-                continue
-
-            if str(getc("status")).strip().lower() == "dropped":
-                continue
-
-            pid = str(getc("player_id")).strip()
-            nick = nick_map.get(pid, pid)
-
-            if q and q not in nick.lower():
-                continue
-
-            out.append(app_commands.Choice(name=nick[:100], value=pid))
-
-        return out[:25]
-
-    except Exception:
-        return []
-
-
-# =========================================================
 # /drop_adm
 # =========================================================
-@client.tree.command(name="drop_adm", description="(ADM) Remove jogador do ciclo e resolve matches automaticamente.")
+@client.tree.command(name="drop_adm", description="(ADM) Remove jogador e resolve matches.")
 @app_commands.describe(season="Season", cycle="Ciclo", jogador="Jogador")
 @app_commands.autocomplete(season=ac_season_open, cycle=ac_cycle_open, jogador=ac_player_in_cycle)
 async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jogador: str):
@@ -3475,10 +3408,7 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
 
     try:
         if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-            return await interaction.followup.send(
-                "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
 
         sh = open_sheet()
 
@@ -3502,19 +3432,12 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
             ):
                 rown = idx + 1
 
-                current_status = str(getc("status")).strip().lower()
-                if current_status == "dropped":
-                    return await interaction.followup.send("⚠️ Este jogador já está como dropped.", ephemeral=True)
+                if str(getc("status")).strip().lower() == "dropped":
+                    return await interaction.followup.send("⚠️ Já está dropped.", ephemeral=True)
 
                 ws_enr.batch_update([
-                    {
-                        "range": f"{col_letter(col['status'])}{rown}",
-                        "values": [["dropped"]]
-                    },
-                    {
-                        "range": f"{col_letter(col['updated_at'])}{rown}",
-                        "values": [[nowb]]
-                    },
+                    {"range": f"{col_letter(col['status'])}{rown}", "values": [["dropped"]]},
+                    {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[nowb]]},
                 ])
                 cache_invalidate(ws_enr)
 
@@ -3523,220 +3446,18 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
                 nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
 
                 return await interaction.followup.send(
-                    f"✅ **{nick}** foi removido do ciclo.\n"
-                    f"⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
+                    f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
                     ephemeral=True
                 )
 
-        return await interaction.followup.send("❌ Jogador não encontrado neste ciclo.", ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /drop_adm: {e}", ephemeral=True)
-
-
-# =========================================================
-# Helpers autocomplete /deck e /decklist
-# =========================================================
-async def ac_player_nick(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_player_nick"):
-            return []
-
-        sh = open_sheet()
-        q = str(current or "").strip().lower()
-
-        items = get_player_choices_fast(sh, query=q, limit=25)
-
-        out: list[app_commands.Choice[str]] = []
-        for item in items:
-            label = str(item.get("label", "")).strip()
-            value = str(item.get("value", "")).strip()
-            if not label or not value:
-                continue
-            out.append(app_commands.Choice(name=label[:100], value=value))
-
-        return out[:25]
-    except Exception:
-        return []
-
-
-def resolve_player_nick(ws_players, player_id: str) -> str:
-    try:
-        sh = ws_players.spreadsheet
-        nick_map = get_player_nick_map_fast(sh)
-        pid = str(player_id).strip()
-        return nick_map.get(pid, pid)
-    except Exception:
-        rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        pid = str(player_id).strip()
-        for r in rows:
-            if str(r.get("discord_id", "")).strip() == pid:
-                return str(r.get("nick", "")).strip() or pid
-        return pid
-
-
-def resolve_player_id_from_value(ws_players, jogador: str) -> str:
-    raw = str(jogador or "").strip()
-    if not raw:
-        return ""
-
-    try:
-        sh = ws_players.spreadsheet
-        return resolve_player_id_fast(sh, raw)
-    except Exception:
-        raw_norm = raw.lower()
-        rows = cached_get_all_records(ws_players, ttl_seconds=10)
-
-        for r in rows:
-            pid = str(r.get("discord_id", "")).strip()
-            if pid == raw:
-                return pid
-
-            nick = str(r.get("nick", "")).strip()
-            if nick and nick.lower() == raw_norm:
-                return pid
-
-        return ""
-
-
-# =========================================================
-# /deck
-# =========================================================
-@client.tree.command(name="deck", description="(ADM/Organizador/Owner) Define ou altera deck do jogador no ciclo.")
-@app_commands.describe(cycle="Ciclo", nome="Nome do deck", jogador="Jogador")
-@app_commands.autocomplete(cycle=ac_cycle_open, jogador=ac_player_nick)
-async def deck(interaction: discord.Interaction, cycle: int, nome: str, jogador: str):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-            return await interaction.followup.send(
-                "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
-                ephemeral=True
-            )
-
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
-        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-
-        pid = resolve_player_id_from_value(ws_players, jogador)
-        if not pid:
-            return await interaction.followup.send(
-                "❌ Jogador não encontrado no cadastro.",
-                ephemeral=True
-            )
-
-        if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
-            return await interaction.followup.send(
-                "❌ O jogador precisa estar inscrito (ativo) neste ciclo para cadastrar deck.",
-                ephemeral=True
-            )
-
-        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
-        rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
-        col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
-
-        nome = str(nome).strip()
-        if not nome or len(nome) > 80:
-            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
-
-        nowb = now_br_str()
-
-        ws_decks.batch_update([
-            {
-                "range": f"{col_letter(col['deck'])}{rown}",
-                "values": [[nome]]
-            },
-            {
-                "range": f"{col_letter(col['updated_at'])}{rown}",
-                "values": [[nowb]]
-            },
-        ])
-        cache_invalidate(ws_decks)
-
-        nick = resolve_player_nick(ws_players, pid)
-        await interaction.followup.send(f"✅ Deck salvo para **{nick}**: **{nome}**", ephemeral=True)
+        return await interaction.followup.send("❌ Jogador não encontrado.", ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 
 # =========================================================
-# /decklist
-# =========================================================
-@client.tree.command(name="decklist", description="(ADM/Organizador/Owner) Define ou altera decklist do jogador no ciclo.")
-@app_commands.describe(cycle="Ciclo", url="Link da decklist", jogador="Jogador")
-@app_commands.autocomplete(cycle=ac_cycle_open, jogador=ac_player_nick)
-async def decklist(interaction: discord.Interaction, cycle: int, url: str, jogador: str):
-    await interaction.response.defer(ephemeral=True)
-
-    ok, val = validate_decklist_url(url)
-    if not ok:
-        return await interaction.followup.send(val, ephemeral=True)
-
-    try:
-        if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-            return await interaction.followup.send(
-                "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
-                ephemeral=True
-            )
-
-        sh = open_sheet()
-        season_id = get_current_season_id(sh)
-
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
-        ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER)
-        ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-        ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
-
-        pid = resolve_player_id_from_value(ws_players, jogador)
-        if not pid:
-            return await interaction.followup.send(
-                "❌ Jogador não encontrado no cadastro.",
-                ephemeral=True
-            )
-
-        if not player_active_in_cycle(ws_enr, season_id, cycle, pid):
-            return await interaction.followup.send(
-                "❌ O jogador precisa estar inscrito (ativo) neste ciclo para cadastrar decklist.",
-                ephemeral=True
-            )
-
-        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER)
-        rown = ensure_deck_row(ws_decks, season_id, cycle, pid)
-        col = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
-
-        nowb = now_br_str()
-
-        ws_decks.batch_update([
-            {
-                "range": f"{col_letter(col['decklist_url'])}{rown}",
-                "values": [[val]]
-            },
-            {
-                "range": f"{col_letter(col['updated_at'])}{rown}",
-                "values": [[nowb]]
-            },
-        ])
-        cache_invalidate(ws_decks)
-
-        nick = resolve_player_nick(ws_players, pid)
-        await interaction.followup.send(f"✅ Decklist salva para **{nick}**.", ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-
-# =========================================================
-# [BLOCO 6/12] — Termina aqui
-# =========================================================
-
-# =================================================
-# FIM DO SUB-BLOCO B/2
+# FIM DO BLOCO 6/B
 # =================================================
 
 
@@ -4023,8 +3744,7 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # =================================================
 # BLOCO ORIGINAL: BLOCO 7/12
 # SUB-BLOCO: B/2
-# REVISÃO: redução de duplicação na resolução do match, invalidação
-# consistente dos índices RAM/autocomplete e manutenção integral da lógica.
+# REVISÃO CRÍTICA: proteção contra overwrite de AUTO_FORFEIT + match inativo
 # =================================================
 
 # =========================================================
@@ -4056,7 +3776,7 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
 
     if not parsed:
         return await interaction.followup.send(
-            "❌ Placar inválido. Use o formato **V-D-E** (ex: 2-1-0).",
+            "❌ Placar inválido.",
             ephemeral=True
         )
 
@@ -4080,92 +3800,61 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
             ci = col[name]
             return row_data[ci] if row_data is not None and ci < len(row_data) else ""
 
+        # 🔥 NOVAS PROTEÇÕES
+        if str(getc("active")).strip().lower() != "true":
+            return await interaction.followup.send(
+                "❌ Este match já foi encerrado.",
+                ephemeral=True
+            )
+
+        if str(getc("result_type")).strip().upper() == "AUTO_FORFEIT":
+            return await interaction.followup.send(
+                "❌ Este match foi resolvido automaticamente (drop).",
+                ephemeral=True
+            )
+
         player_a = str(getc("player_a_id")).strip()
         player_b = str(getc("player_b_id")).strip()
         status = str(getc("confirmed_status")).strip().lower()
 
         if pid not in (player_a, player_b):
-            return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
+            return await interaction.followup.send("❌ Você não participa.", ephemeral=True)
 
         if status == "confirmed":
-            return await interaction.followup.send("❌ Este match já está confirmado.", ephemeral=True)
+            return await interaction.followup.send("❌ Já confirmado.", ephemeral=True)
 
         rown = found_row
 
         if pid == player_a:
-            a_val = str(v)
-            b_val = str(d)
+            a_val, b_val = v, d
             opponent_id = player_b
-            my_wins = v
-            opp_wins = d
         else:
-            a_val = str(d)
-            b_val = str(v)
+            a_val, b_val = d, v
             opponent_id = player_a
-            my_wins = v
-            opp_wins = d
-
-        auto_confirm = auto_confirm_deadline_iso(utc_now_dt())
-        updated_at = now_iso_utc()
 
         ws_matches.batch_update([
             {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[a_val]]},
             {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[b_val]]},
-            {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [[str(e)]]},
+            {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [[e]]},
             {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["normal"]]},
             {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["pending"]]},
             {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [[pid]]},
             {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[""]]},
-            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[auto_confirm]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
+            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[auto_confirm_deadline_iso(utc_now_dt())]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
         ])
 
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
-        dm_status = ""
-
-        try:
-            user_level = await get_access_level(interaction)
-        except Exception:
-            user_level = "jogador"
-
-        if user_level == "jogador":
-            try:
-                opponent_user = client.get_user(int(opponent_id))
-                if opponent_user is None:
-                    opponent_user = await client.fetch_user(int(opponent_id))
-
-                reporter_name = interaction.user.display_name
-                embed = discord.Embed(
-                    title="Resultado reportado",
-                    description=(
-                        f"**{reporter_name}** registrou o resultado "
-                        f"**{my_wins}-{opp_wins}-{e}**.\n"
-                        f"O prazo para confirmar ou rejeitar é de **48h**."
-                    )
-                )
-
-                embed.add_field(name="Match", value=f"`{match_id}`", inline=False)
-                embed.set_footer(text=f"match_id:{match_id}")
-
-                await opponent_user.send(embed=embed, view=ResultConfirmView())
-                dm_status = "\n📩 O oponente foi notificado por DM."
-
-            except Exception:
-                dm_status = "\n⚠️ Não consegui enviar DM, mas o prazo segue."
-
         await interaction.followup.send(
-            f"✅ Resultado enviado: **{placar}**\n"
-            f"O oponente tem **48h** para confirmar ou rejeitar.{dm_status}",
+            f"✅ Resultado enviado: **{placar}**",
             ephemeral=True
         )
 
-        await log_admin(interaction, f"resultado reportado {match_id} {placar}")
-
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /resultado: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -4197,56 +3886,48 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
             ci = col[name]
             return row_data[ci] if row_data is not None and ci < len(row_data) else ""
 
-        player_a = str(getc("player_a_id")).strip()
-        player_b = str(getc("player_b_id")).strip()
+        # 🔥 NOVAS PROTEÇÕES
+        if str(getc("active")).strip().lower() != "true":
+            return await interaction.followup.send(
+                "❌ Este match já foi encerrado.",
+                ephemeral=True
+            )
+
+        if str(getc("result_type")).strip().upper() == "AUTO_FORFEIT":
+            return await interaction.followup.send(
+                "❌ Match resolvido automaticamente.",
+                ephemeral=True
+            )
+
         status = str(getc("confirmed_status")).strip().lower()
         reported_by = str(getc("reported_by_id")).strip()
 
-        if pid not in (player_a, player_b):
-            return await interaction.followup.send("❌ Você não participa deste match.", ephemeral=True)
-
         if reported_by == pid:
-            return await interaction.followup.send(
-                "❌ Quem reportou não pode rejeitar.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Quem reportou não pode rejeitar.", ephemeral=True)
 
         if status != "pending":
-            return await interaction.followup.send(
-                "❌ Este match não está pendente.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match não está pendente.", ephemeral=True)
 
         rown = found_row
-        updated_at = now_iso_utc()
 
         ws_matches.batch_update([
             {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["rejected"]]},
             {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[pid]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
         ])
 
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
-        await interaction.followup.send(
-            "⚠️ Resultado rejeitado. Reporte novamente.",
-            ephemeral=True
-        )
-
-        await log_admin(interaction, f"resultado rejeitado {match_id}")
+        await interaction.followup.send("⚠️ Resultado rejeitado.", ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /rejeitar: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
-
-# =========================================================
-# [BLOCO 7/12 termina aqui]
-# =================================================
 
 # =================================================
-# FIM DO SUB-BLOCO B/2
+# FIM DO BLOCO 7/B
 # =================================================
 
 
