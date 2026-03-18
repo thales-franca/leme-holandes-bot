@@ -2294,6 +2294,7 @@ COMMANDS_CATALOG = [
     # Administrativo (ADM/Organizador)
     ("adm", "/deck", "Define ou altera deck do jogador no ciclo."),
     ("adm", "/decklist", "Define ou altera decklist do jogador no ciclo."),
+    ("adm", "/drop_adm", "Dropa um jogador do ciclo escolhido (marca dropped)."),
     ("adm", "/forcesync", "Sincroniza comandos no servidor."),
     ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
     ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
@@ -3269,7 +3270,7 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 # =================================================
 # BLOCO ORIGINAL: BLOCO 6/12
 # SUB-BLOCO: B/2
-# REVISÃO: otimização de /drop, /deck e /decklist com melhor integração
+# REVISÃO: otimização de /drop, /drop_adm, /deck e /decklist com melhor integração
 # aos índices RAM de Players, invalidação mais consistente e redução de
 # leituras repetidas, sem alterar regras de negócio.
 # =================================================
@@ -3409,6 +3410,129 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /drop: {e}", ephemeral=True)
+
+
+# =========================================================
+# Helper autocomplete players por ciclo (ADM)
+# =========================================================
+async def ac_player_in_cycle(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_player_in_cycle"):
+            return []
+
+        season = interaction.namespace.season
+        cycle = interaction.namespace.cycle
+
+        if not season or not cycle:
+            return []
+
+        sh = open_sheet()
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+
+        rows = cached_get_all_values(ws_enr, ttl_seconds=10)
+        q = str(current or "").strip().lower()
+
+        nick_map = get_player_nick_map_fast(sh)
+
+        out = []
+
+        for r in rows[1:]:
+            def getc(name: str) -> str:
+                ci = col[name]
+                return r[ci] if ci < len(r) else ""
+
+            if safe_int(getc("season_id"), 0) != season:
+                continue
+
+            if safe_int(getc("cycle"), 0) != cycle:
+                continue
+
+            if str(getc("status")).strip().lower() == "dropped":
+                continue
+
+            pid = str(getc("player_id")).strip()
+            nick = nick_map.get(pid, pid)
+
+            if q and q not in nick.lower():
+                continue
+
+            out.append(app_commands.Choice(name=nick[:100], value=pid))
+
+        return out[:25]
+
+    except Exception:
+        return []
+
+
+# =========================================================
+# /drop_adm
+# =========================================================
+@client.tree.command(name="drop_adm", description="(ADM) Remove jogador do ciclo e resolve matches automaticamente.")
+@app_commands.describe(season="Season", cycle="Ciclo", jogador="Jogador")
+@app_commands.autocomplete(season=ac_season_open, cycle=ac_cycle_open, jogador=ac_player_in_cycle)
+async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jogador: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+            return await interaction.followup.send(
+                "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
+                ephemeral=True
+            )
+
+        sh = open_sheet()
+
+        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        col = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
+
+        rows = cached_get_all_values(ws_enr, ttl_seconds=10)
+        nowb = now_br_str()
+
+        for idx in range(1, len(rows)):
+            r = rows[idx]
+
+            def getc(name: str) -> str:
+                ci = col[name]
+                return r[ci] if ci < len(r) else ""
+
+            if (
+                safe_int(getc("season_id"), 0) == season
+                and safe_int(getc("cycle"), 0) == cycle
+                and str(getc("player_id")).strip() == str(jogador)
+            ):
+                rown = idx + 1
+
+                current_status = str(getc("status")).strip().lower()
+                if current_status == "dropped":
+                    return await interaction.followup.send("⚠️ Este jogador já está como dropped.", ephemeral=True)
+
+                ws_enr.batch_update([
+                    {
+                        "range": f"{col_letter(col['status'])}{rown}",
+                        "values": [["dropped"]]
+                    },
+                    {
+                        "range": f"{col_letter(col['updated_at'])}{rown}",
+                        "values": [[nowb]]
+                    },
+                ])
+                cache_invalidate(ws_enr)
+
+                resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
+
+                nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
+
+                return await interaction.followup.send(
+                    f"✅ **{nick}** foi removido do ciclo.\n"
+                    f"⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
+                    ephemeral=True
+                )
+
+        return await interaction.followup.send("❌ Jogador não encontrado neste ciclo.", ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro no /drop_adm: {e}", ephemeral=True)
 
 
 # =========================================================
