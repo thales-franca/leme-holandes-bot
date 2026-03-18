@@ -3297,7 +3297,6 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
             if safe_int(getc("cycle"), 0) != cycle:
                 continue
 
-            # 🔥 IGNORA MATCH JÁ CONFIRMADA
             if str(getc("confirmed_status")).strip().lower() == "confirmed":
                 continue
 
@@ -3309,7 +3308,6 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
 
             rown = idx + 1
 
-            # Define placar
             if pa == player_id:
                 a_w, b_w = 0, 2
             else:
@@ -3332,7 +3330,7 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
         if updates:
             ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
-            invalidate_match_ram_index()  # 🔥 importante
+            invalidate_match_ram_index()
 
         return resolved
 
@@ -3386,12 +3384,12 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
                 resolved = resolve_drop_matches(sh, season_id, cycle, pid)
 
-await log_admin(
-    interaction,
-    f"drop: {interaction.user.display_name} ({pid}) season={season_id} ciclo={cycle} resolved={resolved}"
-)
+                await log_admin(
+                    interaction,
+                    f"drop: {interaction.user.display_name} ({pid}) season={season_id} ciclo={cycle} resolved={resolved}"
+                )
 
-return await interaction.followup.send(
+                return await interaction.followup.send(
                     f"✅ Viadinho, cagão. Você saiu do ciclo, desista da sua vida!.\n⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
                     ephemeral=True
                 )
@@ -3446,19 +3444,19 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
                 ])
                 cache_invalidate(ws_enr)
 
-    resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
+                resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
 
-    nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
+                nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
 
-    await log_admin(
-        interaction,
-        f"drop_adm: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
-    )
+                await log_admin(
+                    interaction,
+                    f"drop_adm: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
+                )
 
-    return await interaction.followup.send(
-        f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
-        ephemeral=True
-    )
+                return await interaction.followup.send(
+                    f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
+                    ephemeral=True
+                )
 
         return await interaction.followup.send("❌ Jogador não encontrado.", ephemeral=True)
 
