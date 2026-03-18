@@ -1434,10 +1434,6 @@ _AC_DEBOUNCE_LOCK = threading.Lock()
 _AC_DEBOUNCE_WINDOW_SECONDS = 0.08
 
 def _ac_should_skip(interaction: discord.Interaction, ac_name: str, window_seconds: float = _AC_DEBOUNCE_WINDOW_SECONDS) -> bool:
-    """
-    Throttle leve por usuário + autocomplete.
-    Reduz rajadas muito próximas disparadas pelo Discord/mobile.
-    """
     try:
         uid = str(interaction.user.id)
     except Exception:
@@ -1461,10 +1457,6 @@ def _ac_should_skip(interaction: discord.Interaction, ac_name: str, window_secon
 # Helpers rápidos — snapshot do autocomplete index
 # =========================
 def _get_match_ac_choices_snapshot_for_user(user_id: str, query: str = "", limit: int = 25) -> list[dict]:
-    """
-    Lê somente o snapshot atual do índice de autocomplete, sem rebuild.
-    Ideal para responder rápido ao Discord.
-    """
     uid = str(user_id or "").strip()
     q = str(query or "").strip().lower()
     limit = max(1, min(limit, 25))
@@ -1494,13 +1486,9 @@ def _get_match_ac_choices_snapshot_for_user(user_id: str, query: str = "", limit
 
 
 # =========================
-# AUTOCOMPLETE FUNCTIONS (DEVEM FICAR ANTES DOS COMMANDS)
+# AUTOCOMPLETE FUNCTIONS
 # =========================
 async def ac_cycle_open(interaction: discord.Interaction, current: str):
-    """
-    Lista ciclos existentes na aba Cycles (season ativa),
-    com label mostrando status.
-    """
     try:
         if _ac_should_skip(interaction, "ac_cycle_open"):
             return []
@@ -1533,10 +1521,6 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
 
 
 async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
-    """
-    Lista SOMENTE ciclos com status OPEN.
-    Uso principal: /inscrever
-    """
     try:
         if _ac_should_skip(interaction, "ac_cycle_only_open"):
             return []
@@ -1568,41 +1552,44 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
         return []
 
 
+# ✅ CORRIGIDO (mesmo padrão dos outros autocompletes)
 async def ac_season_open(interaction: discord.Interaction, current: str):
     try:
+        if _ac_should_skip(interaction, "ac_season_open"):
+            return []
+
         sh = open_sheet()
         ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
         rows = cached_get_all_records(ws, ttl_seconds=30)
 
-        out = []
-        q = str(current or "").lower()
+        q = str(current or "").strip().lower()
+        out: list[app_commands.Choice[int]] = []
 
         for r in rows:
             sid = str(r.get("season_id", "")).strip()
             status = str(r.get("status", "")).strip().lower()
 
-            if status != "active":
+            if not sid or status != "active":
                 continue
 
             if q and q not in sid:
                 continue
 
-            out.append(app_commands.Choice(name=f"Season {sid}", value=int(sid)))
+            try:
+                out.append(app_commands.Choice(
+                    name=f"Season {sid}",
+                    value=int(sid)
+                ))
+            except Exception:
+                continue
 
         return out[:25]
 
     except Exception:
         return []
 
+
 async def ac_match_id_user_pending(interaction: discord.Interaction, current: str):
-    """
-    Sugere matches relevantes ao usuário:
-    - Mostra apenas matches do usuário na season ativa e active=TRUE
-    - Considera apenas ciclos LOCKED
-    - Exibe no formato "Oponente | POD X | pendente/registrado"
-    - Mantém o match_id como valor interno da escolha
-    - Prioriza resposta imediata usando snapshot do índice em memória
-    """
     try:
         if _ac_should_skip(interaction, "ac_match_id_user_pending"):
             return []
@@ -1610,14 +1597,12 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
-        # 1) caminho ultra-rápido: usa snapshot atual, sem rebuild
         items = _get_match_ac_choices_snapshot_for_user(
             user_id=uid,
             query=q,
             limit=25
         )
 
-        # 2) fallback: se ainda não houver snapshot pronto, tenta o helper normal
         if not items:
             sh = open_sheet()
             items = get_match_ac_choices_for_user(
@@ -1650,10 +1635,6 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
 
 
 async def ac_score_vde(interaction: discord.Interaction, current: str):
-    """
-    Autocomplete de placar V-D-E (padrão estilo Melee).
-    Mantém liberdade do usuário digitar manualmente.
-    """
     try:
         if _ac_should_skip(interaction, "ac_score_vde"):
             return []
@@ -1661,17 +1642,9 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
         q = str(current or "").strip().replace(" ", "")
 
         options = [
-            "2-0-0",
-            "2-1-0",
-            "0-2-0",
-            "1-2-0",
-            "0-1-0",
-            "0-0-1",
-            "1-0-0",
-            "1-0-1",
-            "1-1-0",
-            "1-1-1",
-            "0-0-3",
+            "2-0-0","2-1-0","0-2-0","1-2-0",
+            "0-1-0","0-0-1","1-0-0","1-0-1",
+            "1-1-0","1-1-1","0-0-3",
         ]
 
         out = []
