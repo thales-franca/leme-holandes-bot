@@ -3386,8 +3386,14 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
                 resolved = resolve_drop_matches(sh, season_id, cycle, pid)
 
-                return await interaction.followup.send(
-                    f"✅ Você saiu do ciclo.\n⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
+
+await log_admin(
+    interaction,
+    f"drop: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
+)
+
+return await interaction.followup.send(
+                    f"✅ Viadinho, cagão. Você saiu do ciclo, desista da sua vida!.\n⚙️ {resolved} matches resolvidas como **2-0 AUTO_FORFEIT**.",
                     ephemeral=True
                 )
 
@@ -3443,7 +3449,12 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
 
                 resolved = resolve_drop_matches(sh, season, cycle, str(jogador))
 
-                nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
+nick = get_player_nick_map_fast(sh).get(str(jogador), str(jogador))
+
+await log_admin(
+    interaction,
+    f"drop_adm: executor={interaction.user.display_name} target={nick} ({jogador}) S{season} C{cycle} resolved={resolved}"
+)
 
                 return await interaction.followup.send(
                     f"✅ {nick} removido.\n⚙️ {resolved} matches = AUTO_FORFEIT",
