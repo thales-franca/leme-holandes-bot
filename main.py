@@ -3401,6 +3401,58 @@ async def drop(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
+# AUTOCOMPLETE — PLAYER POR SEASON + CICLO (COM NICK)
+# =========================================================
+async def ac_player_in_cycle(interaction: discord.Interaction, current: str):
+    try:
+        sh = open_sheet()
+
+        season = interaction.namespace.season
+        cycle = interaction.namespace.cycle
+
+        if not season or not cycle:
+            return []
+
+        ws = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
+        col = ensure_sheet_columns(ws, ENROLLMENTS_REQUIRED)
+        rows = cached_get_all_values(ws, ttl_seconds=10)
+
+        nick_map = get_player_nick_map_fast(sh)
+
+        choices = []
+
+        for r in rows[1:]:
+            def getc(name: str) -> str:
+                ci = col[name]
+                return r[ci] if ci < len(r) else ""
+
+            if (
+                safe_int(getc("season_id"), 0) == season
+                and safe_int(getc("cycle"), 0) == cycle
+            ):
+                pid = str(getc("player_id")).strip()
+                if not pid:
+                    continue
+
+                nick = nick_map.get(pid, pid)
+
+                # filtro pelo texto digitado (nick ou id)
+                if current.lower() in nick.lower() or current in pid:
+                    choices.append(
+                        app_commands.Choice(
+                            name=f"{nick}",
+                            value=pid
+                        )
+                    )
+
+        return choices[:25]
+
+    except Exception as e:
+        print("ERRO ac_player_in_cycle:", e)
+        return []
+
+
+# =========================================================
 # /drop_adm
 # =========================================================
 @client.tree.command(name="drop_adm", description="(ADM) Remove jogador e resolve matches.")
