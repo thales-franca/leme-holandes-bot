@@ -4375,48 +4375,24 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
 # =========================================================
 # FORMATADOR DE STANDINGS (ALINHADO E ROBUSTO)
 # =========================================================
-def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
-    top = max(10, min(top, 60))
+def _format_standings_text(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
+    top = max(1, min(top, 100))
+    lines = [f"🏆 **Ranking do Ciclo {cycle}** | Season {season_id}"]
+    lines.append("pos | jogador | pts | OMW | GW | OGW | J")
+    lines.append("--- | ------ | --- | --- | --- | --- | ---")
 
-    out = []
-    out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
-
-    out.append(
-        f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}"
-    )
-    out.append("-" * 60)
-
-    for i, r in enumerate(rows[:top], 1):
-        p = r.get("player_id", "")
-        nome = nick_map.get(p, p)
-
-        j = safe_int(r.get("matches", 0), 0)
-        pts = safe_int(r.get("points", 0), 0)
-
-        mwp = r.get("mwp", 0) or 0
-        ppm = r.get("ppm", 0) or 0
-
-        # 🔥 GARANTE NUMÉRICO
-        try:
-            mwp = float(mwp)
-        except:
-            mwp = 0
-
-        try:
-            ppm = float(ppm)
-        except:
-            ppm = 0
-
-        out.append(
-            f"{i:>3} | "
-            f"{nome[:23]:<23} | "
-            f"{j:>2} | "
-            f"{pts:>4} | "
-            f"{mwp*100:>5.1f} | "
-            f"{ppm:>5.2f}"
+    for r in rows[:top]:
+        pid = str(r.get("player_id", "")).strip()
+        lines.append(
+            f"{safe_int(r.get('rank_position', 0), 0)} | "
+            f"{nick_map.get(pid, pid)} | "
+            f"{safe_int(r.get('points', 0), 0)} | "
+            f"{r.get('omw', 0)} | "
+            f"{r.get('gw', 0)} | "
+            f"{r.get('ogw', 0)} | "
+            f"{safe_int(r.get('matches', 0), 0)}"
         )
-
-    return "```" + "\n".join(out) + "```"
+    return "\n".join(lines)
     
 # =========================================================
 # /standings_publicar
