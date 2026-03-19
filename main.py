@@ -4312,8 +4312,6 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
             ephemeral=True
         )
 
-        await log_admin(interaction, f"recalcular: S{season_id} C{cycle} | auto={auto} | standings={len(rows)}")
-
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
