@@ -4309,7 +4309,7 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
-# /ranking
+# /ranking (REVISADO E BLINDADO)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(cycle="Número do ciclo", top="Quantidade de jogadores")
@@ -4321,71 +4321,102 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
+        ws_standings = ensure_worksheet(
+            sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30
+        )
 
         rows = _read_cycle_standings(ws_standings, season_id, cycle)
+
         if not rows:
             return await interaction.followup.send(
                 "⚠️ Não há standings para este ciclo ainda. Use `/recalcular` primeiro.",
                 ephemeral=False
             )
 
+        # 🔥 SANITIZAÇÃO FORTE DOS DADOS
+        clean_rows = []
+        for r in rows:
+            try:
+                clean_rows.append({
+                    "player_id": str(r.get("player_id", "")).strip(),
+                    "matches": safe_int(r.get("matches", 0), 0),
+                    "points": safe_int(r.get("points", 0), 0),
+                    "mwp": float(r.get("mwp", 0) or 0),
+                    "ppm": float(r.get("ppm", 0) or 0),
+                })
+            except:
+                continue
+
+        # 🔥 ORDENAÇÃO GARANTIDA (CASO SHEETS VENHA BAGUNÇADO)
+        clean_rows.sort(
+            key=lambda x: (x["points"], x["ppm"], x["mwp"]),
+            reverse=True
+        )
+
         nick_map = get_player_nick_map_fast(sh)
 
-        text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
+        text = _format_standings_text(
+            clean_rows,
+            nick_map,
+            season_id,
+            cycle,
+            top=top
+        )
+
         await send_followup_chunks(interaction, text, ephemeral=False)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /ranking: {e}", ephemeral=False)
+        await interaction.followup.send(
+            f"❌ Erro no /ranking: {e}",
+            ephemeral=False
+        )
 
 
 # =========================================================
-# /standings_publicar
+# FORMATADOR DE STANDINGS (ALINHADO E ROBUSTO)
 # =========================================================
-@client.tree.command(name="standings_publicar", description="(ADM) Publica standings no canal configurado.")
-@app_commands.describe(cycle="Número do ciclo", top="Quantidade de jogadores")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def standings_publicar(interaction: discord.Interaction, cycle: int, top: int = 30):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
+    top = max(10, min(top, 60))
 
-    await interaction.response.defer(ephemeral=True)
+    out = []
+    out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
 
-    try:
-        sh = open_sheet()
-        season_id = require_current_season(sh)
+    out.append(
+        f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}"
+    )
+    out.append("-" * 60)
 
-        ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
+    for i, r in enumerate(rows[:top], 1):
+        p = r.get("player_id", "")
+        nome = nick_map.get(p, p)
 
-        rows = _read_cycle_standings(ws_standings, season_id, cycle)
-        if not rows:
-            return await interaction.followup.send("⚠️ Não há standings para este ciclo ainda.", ephemeral=True)
+        j = safe_int(r.get("matches", 0), 0)
+        pts = safe_int(r.get("points", 0), 0)
 
-        nick_map = get_player_nick_map_fast(sh)
+        mwp = r.get("mwp", 0) or 0
+        ppm = r.get("ppm", 0) or 0
 
-        text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
+        # 🔥 GARANTE NUMÉRICO
+        try:
+            mwp = float(mwp)
+        except:
+            mwp = 0
 
-        target_channel = None
-        if RANKING_CHANNEL_ID and interaction.guild:
-            target_channel = interaction.guild.get_channel(RANKING_CHANNEL_ID)
-            if not target_channel:
-                try:
-                    target_channel = await interaction.guild.fetch_channel(RANKING_CHANNEL_ID)
-                except Exception:
-                    target_channel = None
+        try:
+            ppm = float(ppm)
+        except:
+            ppm = 0
 
-        if not target_channel:
-            target_channel = interaction.channel
+        out.append(
+            f"{i:>3} | "
+            f"{nome[:23]:<23} | "
+            f"{j:>2} | "
+            f"{pts:>4} | "
+            f"{mwp*100:>5.1f} | "
+            f"{ppm:>5.2f}"
+        )
 
-        chunks = split_text_lines(text, limit=1900)
-        for c in chunks:
-            await target_channel.send(c)
-
-        await interaction.followup.send("✅ Standings publicados.", ephemeral=True)
-        await log_admin(interaction, f"standings_publicar S{season_id} C{cycle}")
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /standings_publicar: {e}", ephemeral=True)
+    return "```" + "\n".join(out) + "```"
 
 # =================================================
 # FIM DO SUB-BLOCO B/7
@@ -4648,17 +4679,20 @@ async def status_ciclo(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Erro no /status_ciclo: {e}", ephemeral=True)
 
 # =========================================================
-# /ranking_geral (REVISADO)
+# /ranking_geral (REVISADO + PADRÃO VISUAL DO /ranking)
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
-async def ranking_geral(interaction: discord.Interaction):
+@app_commands.describe(top="Quantidade de jogadores (10..60)")
+async def ranking_geral(interaction: discord.Interaction, top: int = 30):
     await interaction.response.defer()
 
     try:
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+        ws_matches = ensure_worksheet(
+            sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30
+        )
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
@@ -4666,6 +4700,9 @@ async def ranking_geral(interaction: discord.Interaction):
         stats = {}
         opps = {}
 
+        # =========================================================
+        # COLETA DE DADOS
+        # =========================================================
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
                 continue
@@ -4674,10 +4711,13 @@ async def ranking_geral(interaction: discord.Interaction):
             if r.get("confirmed_status") != "confirmed":
                 continue
 
-            a = r.get("player_a_id")
-            b = r.get("player_b_id")
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
 
-            for p in [a, b]:
+            if not a or not b:
+                continue
+
+            for p in (a, b):
                 if p not in stats:
                     stats[p] = {"pts": 0, "m": 0, "gw": 0, "gl": 0, "gd": 0}
                     opps[p] = []
@@ -4708,25 +4748,49 @@ async def ranking_geral(interaction: discord.Interaction):
             opps[a].append(b)
             opps[b].append(a)
 
-        K = 3
+        if not stats:
+            return await interaction.followup.send("Sem matches confirmados.")
+
+        # =========================================================
+        # CÁLCULOS
+        # =========================================================
+        K = 3  # regressão
 
         table = []
+
         for p, s in stats.items():
             m = s["m"]
             pts = s["pts"]
 
-            mwp = (pts + K*1.5) / (3*(m + K)) if m else 0
+            # 🔥 MWP com mínimo 33.3%
+            raw_mwp = (pts / (3 * m)) if m else 0
+            mwp = max(raw_mwp, 0.333)
+
+            # 🔥 PPM suavizado
             ppm = (pts + K) / (m + K) if m else 0
 
+            # 🔥 GW com mínimo
             games = s["gw"] + s["gl"] + s["gd"]
-            gw = (s["gw"] + 0.5*s["gd"]) / games if games else 0
+            raw_gw = (s["gw"] + 0.5 * s["gd"]) / games if games else 0
+            gw = max(raw_gw, 0.333)
 
-            omw = sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in opps[p] if stats[o]["m"]) / len(opps[p]) if opps[p] else 0
+            # 🔥 OMW com mínimo por oponente
+            omw_list = []
+            for o in opps[p]:
+                om = stats[o]["m"]
+                if om == 0:
+                    omw_list.append(0.333)
+                else:
+                    val = stats[o]["pts"] / (3 * om)
+                    omw_list.append(max(val, 0.333))
 
-            peso_pts = m/(m+K)
-            peso_ppm = K/(m+K)
+            omw = sum(omw_list) / len(omw_list) if omw_list else 0
 
-            score = pts*peso_pts + ppm*peso_ppm
+            # 🔥 SCORE HÍBRIDO (mantém PTS dominante)
+            peso_pts = m / (m + K)
+            peso_ppm = K / (m + K)
+
+            score = pts * peso_pts + ppm * peso_ppm
 
             table.append({
                 "p": p,
@@ -4739,22 +4803,45 @@ async def ranking_geral(interaction: discord.Interaction):
                 "j": m
             })
 
-        table.sort(key=lambda x: (x["score"], x["ppm"], x["mwp"]), reverse=True)
+        # =========================================================
+        # ORDENAÇÃO
+        # =========================================================
+        table.sort(
+            key=lambda x: (x["score"], x["ppm"], x["mwp"]),
+            reverse=True
+        )
 
-        nick = get_player_nick_map_fast(sh)
+        nick_map = get_player_nick_map_fast(sh)
 
+        top = max(10, min(top, 60))
+
+        # =========================================================
+        # FORMATAÇÃO (PADRÃO EXATO DO /ranking)
+        # =========================================================
         out = []
-        out.append(f"🏆 Ranking Geral — Season {season_id}")
-        out.append("pos | jogador | J | SCORE | PTS | MWP | PPM | OMW | GW")
-        out.append("--- | ------- | - | ----- | --- | --- | --- | --- | ---")
+        out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
 
-        for i, r in enumerate(table[:20], 1):
+        out.append(
+            f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}"
+        )
+        out.append("-" * 75)
+
+        for i, r in enumerate(table[:top], 1):
+            nome = nick_map.get(str(r["p"]), str(r["p"]))
+
             out.append(
-                f"{i} | {nick.get(r['p'], r['p'])} | {r['j']} | {r['score']:.2f} | {r['pts']} | "
-                f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
+                f"{i:>3} | "
+                f"{nome[:23]:<23} | "
+                f"{r['j']:>2} | "
+                f"{r['score']:>6.2f} | "
+                f"{r['pts']:>4} | "
+                f"{r['mwp']*100:>5.1f} | "
+                f"{r['ppm']:>5.2f}"
             )
 
-        await interaction.followup.send("\n".join(out))
+        msg = "```" + "\n".join(out) + "```"
+
+        await send_followup_chunks(interaction, msg, ephemeral=False)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
