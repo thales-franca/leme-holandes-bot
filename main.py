@@ -5026,7 +5026,7 @@ async def cadastrar_player(
     await interaction.response.defer(ephemeral=True)
 
     try:
-        raw = " ".join(str(nick or "").strip().split())
+        raw = " ".join(str(membro.name or "").strip().split())
         if len(raw.split()) < 2:
             return await interaction.followup.send("❌ Informe Nome e Sobrenome (ex: João Silva).", ephemeral=True)
 
