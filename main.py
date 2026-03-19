@@ -4490,7 +4490,7 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
 
     parsed = parse_score_3parts(placar)
     if not parsed:
-        return await interaction.followup.send("❌ Placar inválido. Use V-D-E, ex: 2-1-0.", ephemeral=True)
+        return await interaction.followup.send("❌ Placar inválido.", ephemeral=True)
 
     v, d, e = parsed
     ok, msg = validate_3parts_rules(v, d, e)
@@ -4502,10 +4502,9 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
-        found = None
-        match_row = get_match_by_id_fast(sh, match_id)
-
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+        found = None
         for idx in range(1, len(rows)):
             r = rows[idx]
             val = r[col["match_id"]] if col["match_id"] < len(r) else ""
@@ -4527,16 +4526,15 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
             {"range": f"{col_letter(col['confirmed_by_id'])}{found}", "values": [[str(interaction.user.id)]]},
             {"range": f"{col_letter(col['updated_at'])}{found}", "values": [[updated_at]]},
         ])
+
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
-        await interaction.followup.send(f"✅ Resultado editado e confirmado: **{placar}**", ephemeral=True)
-        await log_admin(interaction, f"admin_resultado_editar {match_id} {placar}")
+        await interaction.followup.send(f"✅ Resultado editado: **{placar}**", ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /admin_resultado_editar: {e}", ephemeral=True)
-
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 # =========================================================
 # /admin_resultado_cancelar
@@ -4649,14 +4647,12 @@ async def status_ciclo(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /status_ciclo: {e}", ephemeral=True)
 
-
 # =========================================================
-# /ranking_geral
+# /ranking_geral (REVISADO)
 # =========================================================
-@client.tree.command(name="ranking_geral", description="Mostra ranking geral (agregado) da season atual.")
-@app_commands.describe(top="Quantidade de jogadores (10..60)")
-async def ranking_geral(interaction: discord.Interaction, top: int = 30):
-    await interaction.response.defer(ephemeral=False)
+@client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
+async def ranking_geral(interaction: discord.Interaction):
+    await interaction.response.defer()
 
     try:
         sh = open_sheet()
@@ -4667,47 +4663,39 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
         rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
-        stats: dict[str, dict] = {}
-        opps_map: dict[str, list[str]] = {}
-
-        def ensure_player(pid: str):
-            if pid not in stats:
-                stats[pid] = {"pts": 0, "matches": 0, "gw": 0, "gl": 0, "gd": 0}
-            if pid not in opps_map:
-                opps_map[pid] = []
+        stats = {}
+        opps = {}
 
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season_id:
                 continue
             if not as_bool(r.get("active", "TRUE")):
                 continue
-            if str(r.get("result_type", "")).strip().lower() == "bye":
-                continue
-            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
+            if r.get("confirmed_status") != "confirmed":
                 continue
 
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
-            if not a or not b:
-                continue
+            a = r.get("player_a_id")
+            b = r.get("player_b_id")
 
-            ensure_player(a)
-            ensure_player(b)
+            for p in [a, b]:
+                if p not in stats:
+                    stats[p] = {"pts": 0, "m": 0, "gw": 0, "gl": 0, "gd": 0}
+                    opps[p] = []
 
-            a_w = safe_int(r.get("a_games_won", 0), 0)
-            b_w = safe_int(r.get("b_games_won", 0), 0)
-            d_g = safe_int(r.get("draw_games", 0), 0)
+            a_w = safe_int(r.get("a_games_won", 0))
+            b_w = safe_int(r.get("b_games_won", 0))
+            d = safe_int(r.get("draw_games", 0))
 
             stats[a]["gw"] += a_w
             stats[a]["gl"] += b_w
-            stats[a]["gd"] += d_g
+            stats[a]["gd"] += d
 
             stats[b]["gw"] += b_w
             stats[b]["gl"] += a_w
-            stats[b]["gd"] += d_g
+            stats[b]["gd"] += d
 
-            stats[a]["matches"] += 1
-            stats[b]["matches"] += 1
+            stats[a]["m"] += 1
+            stats[b]["m"] += 1
 
             if a_w > b_w:
                 stats[a]["pts"] += 3
@@ -4717,80 +4705,59 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 stats[a]["pts"] += 1
                 stats[b]["pts"] += 1
 
-            opps_map[a].append(b)
-            opps_map[b].append(a)
+            opps[a].append(b)
+            opps[b].append(a)
 
-        if not stats:
-            return await interaction.followup.send("Sem matches confirmados.", ephemeral=False)
+        K = 3
 
-        # ----------------------------
-        # Cálculos MWP, GW%, OMW%, OGW%, PPM ajustado
-        # ----------------------------
-        K = 3  # constante para ajuste de PPM
-        MIN_MATCHES = 5
-
-        mwp_adj = {}
-        gwp = {}
-        for pid, s in stats.items():
-            m = s["matches"]
-            mwp_adj[pid] = (s["pts"] / (3 * m)) if m > 0 else 0
-            games = s["gw"] + s["gl"] + s["gd"]
-            gwp[pid] = (s["gw"] + 0.5 * s["gd"]) / games if games > 0 else 0
-
-        omw = {}
-        ogw = {}
-        ppm_adj = {}
-        for pid, s in stats.items():
-            opps = opps_map.get(pid, [])
-            omw[pid] = sum(mwp_adj.get(o, 1/3) for o in opps) / len(opps) if opps else 1/3
-            ogw[pid] = sum(gwp.get(o, 1/3) for o in opps) / len(opps) if opps else 1/3
-            ppm_adj[pid] = (s["pts"] + K*1.0) / (s["matches"] + K)
-
-        # ----------------------------
-        # Monta tabela
-        # ----------------------------
         table = []
-        for pid, s in stats.items():
+        for p, s in stats.items():
+            m = s["m"]
+            pts = s["pts"]
+
+            mwp = (pts + K*1.5) / (3*(m + K)) if m else 0
+            ppm = (pts + K) / (m + K) if m else 0
+
+            games = s["gw"] + s["gl"] + s["gd"]
+            gw = (s["gw"] + 0.5*s["gd"]) / games if games else 0
+
+            omw = sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in opps[p] if stats[o]["m"]) / len(opps[p]) if opps[p] else 0
+
+            peso_pts = m/(m+K)
+            peso_ppm = K/(m+K)
+
+            score = pts*peso_pts + ppm*peso_ppm
+
             table.append({
-                "pid": pid,
-                "pts": s["pts"],
-                "mwp_val": mwp_adj[pid],
-                "ppm_val": ppm_adj[pid],
-                "omw_val": omw[pid],
-                "gw_val": gwp[pid],
-                "ogw_val": ogw[pid],
-                "j": s["matches"],
+                "p": p,
+                "score": score,
+                "pts": pts,
+                "mwp": mwp,
+                "ppm": ppm,
+                "omw": omw,
+                "gw": gw,
+                "j": m
             })
 
-        table.sort(
-            key=lambda r: (
-                r["mwp_val"],
-                r["ppm_val"],
-                r["omw_val"],
-                r["gw_val"],
-                r["ogw_val"],
-                r["pts"]
-            ),
-            reverse=True
-        )
+        table.sort(key=lambda x: (x["score"], x["ppm"], x["mwp"]), reverse=True)
 
-        top = max(10, min(top, 60))
-        out = [f"🏆 Ranking Geral — Season {season_id} (Top {top})"]
-        out.append("pos | jogador | MWP | PPM | pts | OMW | GW | OGW | J")
-        out.append("--- | ------ | --- | --- | --- | --- | --- | --- | ---")
+        nick = get_player_nick_map_fast(sh)
 
-        nick_map = get_player_nick_map_fast(sh)
+        out = []
+        out.append(f"🏆 Ranking Geral — Season {season_id}")
+        out.append("pos | jogador | J | SCORE | PTS | MWP | PPM | OMW | GW")
+        out.append("--- | ------- | - | ----- | --- | --- | --- | --- | ---")
 
-        for i, r in enumerate(table[:top], 1):
+        for i, r in enumerate(table[:20], 1):
             out.append(
-                f"{i} | {nick_map.get(r['pid'], r['pid'])} | {pct1(r['mwp_val'])} | {r['ppm_val']:.2f} | {r['pts']} | {pct1(r['omw_val'])} | {pct1(r['gw_val'])} | {pct1(r['ogw_val'])} | {r['j']}"
+                f"{i} | {nick.get(r['p'], r['p'])} | {r['j']} | {r['score']:.2f} | {r['pts']} | "
+                f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
             )
 
-        await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
+        await interaction.followup.send("\n".join(out))
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=False)
-
+        await interaction.followup.send(f"❌ Erro: {e}")
 
 # =================================================
 # FIM DO SUB-BLOCO C/7
