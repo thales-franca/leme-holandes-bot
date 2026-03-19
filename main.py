@@ -4648,10 +4648,11 @@ async def status_ciclo(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Erro no /status_ciclo: {e}", ephemeral=True)
 
 # =========================================================
-# /ranking_geral (REVISADO)
+# /ranking_geral (CORRIGIDO)
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
-async def ranking_geral(interaction: discord.Interaction):
+@app_commands.describe(top="Quantidade de jogadores (10..60)")
+async def ranking_geral(interaction: discord.Interaction, top: int = 30):
     await interaction.response.defer()
 
     try:
@@ -4674,8 +4675,11 @@ async def ranking_geral(interaction: discord.Interaction):
             if r.get("confirmed_status") != "confirmed":
                 continue
 
-            a = r.get("player_a_id")
-            b = r.get("player_b_id")
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+
+            if not a or not b:
+                continue
 
             for p in [a, b]:
                 if p not in stats:
@@ -4708,6 +4712,9 @@ async def ranking_geral(interaction: discord.Interaction):
             opps[a].append(b)
             opps[b].append(a)
 
+        if not stats:
+            return await interaction.followup.send("Sem matches confirmados.")
+
         K = 3
 
         table = []
@@ -4721,12 +4728,15 @@ async def ranking_geral(interaction: discord.Interaction):
             games = s["gw"] + s["gl"] + s["gd"]
             gw = (s["gw"] + 0.5*s["gd"]) / games if games else 0
 
-            omw = sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in opps[p] if stats[o]["m"]) / len(opps[p]) if opps[p] else 0
+            omw = sum(
+                (stats[o]["pts"] / (3*stats[o]["m"]))
+                for o in opps[p] if stats[o]["m"]
+            ) / len(opps[p]) if opps[p] else 0
 
-            peso_pts = m/(m+K)
-            peso_ppm = K/(m+K)
+            peso_pts = m / (m + K)
+            peso_ppm = K / (m + K)
 
-            score = pts*peso_pts + ppm*peso_ppm
+            score = pts * peso_pts + ppm * peso_ppm
 
             table.append({
                 "p": p,
@@ -4739,25 +4749,34 @@ async def ranking_geral(interaction: discord.Interaction):
                 "j": m
             })
 
-        table.sort(key=lambda x: (x["score"], x["ppm"], x["mwp"]), reverse=True)
+        table.sort(
+            key=lambda x: (x["score"], x["ppm"], x["mwp"]),
+            reverse=True
+        )
 
-        nick = get_player_nick_map_fast(sh)
+        # 🔥 CORREÇÃO DO NOME
+        nick_map = get_player_nick_map_fast(sh)
+
+        top = max(10, min(top, 60))
 
         out = []
-        out.append(f"🏆 Ranking Geral — Season {season_id}")
+        out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
         out.append("pos | jogador | J | SCORE | PTS | MWP | PPM | OMW | GW")
         out.append("--- | ------- | - | ----- | --- | --- | --- | --- | ---")
 
-        for i, r in enumerate(table[:20], 1):
+        for i, r in enumerate(table[:top], 1):
+            nome = nick_map.get(str(r["p"]), str(r["p"]))  # 🔥 FIX PRINCIPAL
+
             out.append(
-                f"{i} | {nick.get(r['p'], r['p'])} | {r['j']} | {r['score']:.2f} | {r['pts']} | "
+                f"{i} | {nome} | {r['j']} | {r['score']:.2f} | {r['pts']} | "
                 f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
             )
 
-        await interaction.followup.send("\n".join(out))
+        await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
+
 
 # =================================================
 # FIM DO SUB-BLOCO C/7
