@@ -3153,6 +3153,7 @@ async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
 async def inscrever(interaction: discord.Interaction, season: int, cycle: int, deck: str, decklist: str):
     await interaction.response.defer(ephemeral=True)
 
+    # valida decklist
     ok, val = validate_decklist_url(decklist)
     if not ok:
         return await interaction.followup.send(val, ephemeral=True)
@@ -3205,12 +3206,7 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
                 ephemeral=True
             )
 
-        if player_active_in_season(ws_enr, season, pid):
-            return await interaction.followup.send(
-                "❌ Você já possui inscrição ativa nesta season. Entre em contato com um ADM.",
-                ephemeral=True
-            )
-
+        # permite múltiplos ciclos na mesma season, então não checamos inscrição ativa na season
         if player_active_in_cycle(ws_enr, season, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você já está inscrito neste ciclo. Entre em contato com um ADM.",
@@ -3231,12 +3227,14 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 
         nowb = now_br_str()
 
+        # adiciona inscrição
         ws_enr.append_row(
             [str(season), str(cycle), pid, "active", nowb, nowb],
             value_input_option="USER_ENTERED"
         )
         cache_invalidate(ws_enr)
 
+        # registra deck
         rown = ensure_deck_row(ws_decks, season, cycle, pid)
         col_decks = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
@@ -3267,6 +3265,18 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /inscrever: {e}", ephemeral=True)
+
+
+# =========================================================
+# Função de checagem de inscrição por ciclo
+# =========================================================
+def player_active_in_cycle(ws_enr, season, cycle, pid):
+    records = ws_enr.get_all_records()
+    for r in records:
+        if str(r.get("discord_id")).strip() == str(pid) and str(r.get("season")) == str(season) and str(r.get("cycle")) == str(cycle):
+            if r.get("status", "").lower() == "active":
+                return True
+    return False
 
 # =================================================
 # FIM DO SUB-BLOCO A/2
