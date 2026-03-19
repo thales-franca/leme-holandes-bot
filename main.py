@@ -5005,7 +5005,6 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
 @client.tree.command(name="cadastrar_player", description="(ADM/Organizador/Owner) Cadastra player manualmente com season, ciclo, inscrição, deck e decklist.")
 @app_commands.describe(
     membro="Selecione o usuário no Discord",
-    nick="Nome e Sobrenome (sem abreviações)",
     season="Season para cadastrar",
     ciclo="Ciclo para cadastrar",
     deck="Nome do deck",
@@ -5015,7 +5014,6 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
 async def cadastrar_player(
     interaction: discord.Interaction,
     membro: discord.Member,
-    nick: str,
     season: int,
     ciclo: int,
     deck: str,
