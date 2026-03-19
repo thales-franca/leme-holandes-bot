@@ -4716,55 +4716,52 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         if not stats:
             return await interaction.followup.send("Sem matches confirmados.", ephemeral=False)
 
-        K = 3
+        # ----------------------------
+        # Cálculos MWP, GW%, OMW%, OGW%, PPM ajustado
+        # ----------------------------
+        K = 3  # constante para ajuste de PPM
         MIN_MATCHES = 5
 
         mwp_adj = {}
-        ppm_adj = {}
         gwp = {}
-
         for pid, s in stats.items():
             m = s["matches"]
-            pts = s["pts"]
-
-            mwp_adj[pid] = (pts + K * 1.5) / (3 * (m + K)) if m > 0 else 1/3
-            ppm_adj[pid] = (pts + K * 1.0) / (m + K) if m > 0 else 1.0
-
+            mwp_adj[pid] = (s["pts"] / (3 * m)) if m > 0 else 0
             games = s["gw"] + s["gl"] + s["gd"]
-            gwp[pid] = 1/3 if games <= 0 else floor_333((s["gw"] + 0.5 * s["gd"]) / games)
+            gwp[pid] = (s["gw"] + 0.5 * s["gd"]) / games if games > 0 else 0
 
         omw = {}
         ogw = {}
-        for pid in stats.keys():
+        ppm_adj = {}
+        for pid, s in stats.items():
             opps = opps_map.get(pid, [])
-            if not opps:
-                omw[pid] = 1/3
-                ogw[pid] = 1/3
-            else:
-                omw[pid] = sum(mwp_adj.get(o, 1/3) for o in opps) / len(opps)
-                ogw[pid] = sum(gwp.get(o, 1/3) for o in opps) / len(opps)
+            omw[pid] = sum(mwp_adj.get(o, 1/3) for o in opps) / len(opps) if opps else 1/3
+            ogw[pid] = sum(gwp.get(o, 1/3) for o in opps) / len(opps) if opps else 1/3
+            ppm_adj[pid] = (s["pts"] + K*1.0) / (s["matches"] + K)
 
+        # ----------------------------
+        # Monta tabela
+        # ----------------------------
         table = []
         for pid, s in stats.items():
             table.append({
                 "pid": pid,
                 "pts": s["pts"],
-                "mwp": pct1(mwp_adj[pid]),
-                "ppm": f"{ppm_adj[pid]:.2f}",
-                "omw": pct1(omw[pid]),
-                "gw": pct1(gwp[pid]),
-                "ogw": pct1(ogw[pid]),
+                "mwp_val": mwp_adj[pid],
+                "ppm_val": ppm_adj[pid],
+                "omw_val": omw[pid],
+                "gw_val": gwp[pid],
+                "ogw_val": ogw[pid],
                 "j": s["matches"],
-                "eligible": s["matches"] >= MIN_MATCHES
             })
 
         table.sort(
             key=lambda r: (
-                float(r["mwp"].replace("%","")),
-                float(r["ppm"]),
-                float(r["omw"].replace("%","")),
-                float(r["gw"].replace("%","")),
-                float(r["ogw"].replace("%","")),
+                r["mwp_val"],
+                r["ppm_val"],
+                r["omw_val"],
+                r["gw_val"],
+                r["ogw_val"],
                 r["pts"]
             ),
             reverse=True
@@ -4778,12 +4775,9 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         nick_map = get_player_nick_map_fast(sh)
 
         for i, r in enumerate(table[:top], 1):
-            marker = "" if r["eligible"] else "*"
             out.append(
-                f"{i} | {nick_map.get(r['pid'], r['pid'])}{marker} | {r['mwp']} | {r['ppm']} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}"
+                f"{i} | {nick_map.get(r['pid'], r['pid'])} | {pct1(r['mwp_val'])} | {r['ppm_val']:.2f} | {r['pts']} | {pct1(r['omw_val'])} | {pct1(r['gw_val'])} | {pct1(r['ogw_val'])} | {r['j']}"
             )
-
-        out.append("\n* Jogador com menos de 5 partidas")
 
         await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
 
