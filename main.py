@@ -4340,6 +4340,52 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
 
 
 # =========================================================
+# FORMATADOR DE STANDINGS (ALINHADO)
+# =========================================================
+def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
+    # 🔒 Limite seguro
+    top = max(10, min(top, 60))
+
+    out = []
+    out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
+
+    # 🔥 HEADER PADRÃO
+    out.append(f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}")
+    out.append("-" * 60)
+
+    for i, r in enumerate(rows[:top], 1):
+        # 🔥 SEGURANÇA DE DADOS
+        p = str(r.get("player_id", "")).strip()
+        nome = nick_map.get(p, p)
+
+        j = int(r.get("matches", 0) or 0)
+        pts = int(r.get("points", 0) or 0)
+
+        # 🔥 GARANTE QUE NÃO QUEBRE (float/string/null)
+        try:
+            mwp = float(r.get("mwp", 0) or 0)
+        except:
+            mwp = 0
+
+        try:
+            ppm = float(r.get("ppm", 0) or 0)
+        except:
+            ppm = 0
+
+        # 🔥 LINHA FORMATADA
+        out.append(
+            f"{i:>3} | "
+            f"{nome[:23]:<23} | "
+            f"{j:>2} | "
+            f"{pts:>4} | "
+            f"{mwp*100:>5.1f} | "
+            f"{ppm:>5.2f}"
+        )
+
+    # 🔥 ESSENCIAL PRO DISCORD
+    return "```" + "\n".join(out) + "```"
+
+# =========================================================
 # /standings_publicar
 # =========================================================
 @client.tree.command(name="standings_publicar", description="(ADM) Publica standings no canal configurado.")
@@ -4648,7 +4694,7 @@ async def status_ciclo(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Erro no /status_ciclo: {e}", ephemeral=True)
 
 # =========================================================
-# /ranking_geral (CORRIGIDO)
+# /ranking_geral (FINAL AJUSTADO E FORMATADO)
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
 @app_commands.describe(top="Quantidade de jogadores (10..60)")
@@ -4715,6 +4761,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         if not stats:
             return await interaction.followup.send("Sem matches confirmados.")
 
+        # 🔥 PARÂETRO DE REGRESSÃO
         K = 3
 
         table = []
@@ -4733,6 +4780,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 for o in opps[p] if stats[o]["m"]
             ) / len(opps[p]) if opps[p] else 0
 
+            # 🔥 SCORE HÍBRIDO
             peso_pts = m / (m + K)
             peso_ppm = K / (m + K)
 
@@ -4749,30 +4797,43 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 "j": m
             })
 
+        # 🔥 ORDENAÇÃO FINAL
         table.sort(
             key=lambda x: (x["score"], x["ppm"], x["mwp"]),
             reverse=True
         )
 
-        # 🔥 CORREÇÃO DO NOME
         nick_map = get_player_nick_map_fast(sh)
 
         top = max(10, min(top, 60))
 
         out = []
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
-        out.append("pos |         jogador         |  J  |  SCORE  |  PTS  |  MWP  |  PPM  |  OMW  |   GW ")
-        out.append("--- | ----------------------- | --- | ------- | ----- | ----- | ----- | ----- | -----")
 
+        # 🔥 HEADER ALINHADO
+        out.append(f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5}")
+        out.append("-" * 80)
+
+        # 🔥 LINHAS ALINHADAS
         for i, r in enumerate(table[:top], 1):
-            nome = nick_map.get(str(r["p"]), str(r["p"]))  # 🔥 FIX PRINCIPAL
+            nome = nick_map.get(str(r["p"]), str(r["p"]))
 
             out.append(
-                f"{i} | {nome} | {r['j']} | {r['score']:.2f} | {r['pts']} | "
-                f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
+                f"{i:>3} | "
+                f"{nome[:23]:<23} | "
+                f"{r['j']:>2} | "
+                f"{r['score']:>6.2f} | "
+                f"{r['pts']:>4} | "
+                f"{r['mwp']*100:>5.1f} | "
+                f"{r['ppm']:>5.2f} | "
+                f"{r['omw']*100:>5.1f} | "
+                f"{r['gw']*100:>5.1f}"
             )
 
-        await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
+        # 🔥 ENVIA COMO CODE BLOCK (ALINHAMENTO PERFEITO)
+        msg = "```" + "\n".join(out) + "```"
+
+        await send_followup_chunks(interaction, msg, ephemeral=False)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
