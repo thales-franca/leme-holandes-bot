@@ -4761,8 +4761,8 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
         out = []
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
-        out.append("pos | jogador | J | SCORE | PTS | MWP | PPM | OMW | GW")
-        out.append("--- | ------- | - | ----- | --- | --- | --- | --- | ---")
+        out.append("pos |         jogador         |  J  |  SCORE  |  PTS  |  MWP  |  PPM  |  OMW  |   GW ")
+        out.append("--- | ----------------------- | --- | ------- | ----- | ----- | ----- | ----- | -----")
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))  # 🔥 FIX PRINCIPAL
