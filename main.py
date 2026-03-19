@@ -4447,34 +4447,13 @@ async def final(interaction: discord.Interaction, cycle: int):
                 continue
 
             updates.extend([
-                {
-                    "range": f"{col_letter(col['a_games_won'])}{rown}",
-                    "values": [["0"]]
-                },
-                {
-                    "range": f"{col_letter(col['b_games_won'])}{rown}",
-                    "values": [["0"]]
-                },
-                {
-                    "range": f"{col_letter(col['draw_games'])}{rown}",
-                    "values": [["3"]]
-                },
-                {
-                    "range": f"{col_letter(col['result_type'])}{rown}",
-                    "values": [["intentional_draw"]]
-                },
-                {
-                    "range": f"{col_letter(col['confirmed_status'])}{rown}",
-                    "values": [["confirmed"]]
-                },
-                {
-                    "range": f"{col_letter(col['confirmed_by_id'])}{rown}",
-                    "values": [["AUTO_FINAL"]]
-                },
-                {
-                    "range": f"{col_letter(col['updated_at'])}{rown}",
-                    "values": [[updated_at]]
-                },
+                {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [["0"]]},
+                {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [["0"]]},
+                {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [["3"]]},
+                {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["intentional_draw"]]},
+                {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["confirmed"]]},
+                {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [["AUTO_FINAL"]]},
+                {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
             ])
             changed += 1
 
@@ -4533,34 +4512,13 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         updated_at = now_iso_utc()
 
         ws_matches.batch_update([
-            {
-                "range": f"{col_letter(col['a_games_won'])}{found}",
-                "values": [[str(v)]]
-            },
-            {
-                "range": f"{col_letter(col['b_games_won'])}{found}",
-                "values": [[str(d)]]
-            },
-            {
-                "range": f"{col_letter(col['draw_games'])}{found}",
-                "values": [[str(e)]]
-            },
-            {
-                "range": f"{col_letter(col['result_type'])}{found}",
-                "values": [["normal"]]
-            },
-            {
-                "range": f"{col_letter(col['confirmed_status'])}{found}",
-                "values": [["confirmed"]]
-            },
-            {
-                "range": f"{col_letter(col['confirmed_by_id'])}{found}",
-                "values": [[str(interaction.user.id)]]
-            },
-            {
-                "range": f"{col_letter(col['updated_at'])}{found}",
-                "values": [[updated_at]]
-            },
+            {"range": f"{col_letter(col['a_games_won'])}{found}", "values": [[str(v)]]},
+            {"range": f"{col_letter(col['b_games_won'])}{found}", "values": [[str(d)]]},
+            {"range": f"{col_letter(col['draw_games'])}{found}", "values": [[str(e)]]},
+            {"range": f"{col_letter(col['result_type'])}{found}", "values": [["normal"]]},
+            {"range": f"{col_letter(col['confirmed_status'])}{found}", "values": [["confirmed"]]},
+            {"range": f"{col_letter(col['confirmed_by_id'])}{found}", "values": [[str(interaction.user.id)]]},
+            {"range": f"{col_letter(col['updated_at'])}{found}", "values": [[updated_at]]},
         ])
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
@@ -4606,42 +4564,15 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
         updated_at = now_iso_utc()
 
         ws_matches.batch_update([
-            {
-                "range": f"{col_letter(col['a_games_won'])}{found}",
-                "values": [["0"]]
-            },
-            {
-                "range": f"{col_letter(col['b_games_won'])}{found}",
-                "values": [["0"]]
-            },
-            {
-                "range": f"{col_letter(col['draw_games'])}{found}",
-                "values": [["0"]]
-            },
-            {
-                "range": f"{col_letter(col['result_type'])}{found}",
-                "values": [["normal"]]
-            },
-            {
-                "range": f"{col_letter(col['confirmed_status'])}{found}",
-                "values": [["open"]]
-            },
-            {
-                "range": f"{col_letter(col['reported_by_id'])}{found}",
-                "values": [[""]]
-            },
-            {
-                "range": f"{col_letter(col['confirmed_by_id'])}{found}",
-                "values": [[""]]
-            },
-            {
-                "range": f"{col_letter(col['auto_confirm_at'])}{found}",
-                "values": [[""]]
-            },
-            {
-                "range": f"{col_letter(col['updated_at'])}{found}",
-                "values": [[updated_at]]
-            },
+            {"range": f"{col_letter(col['a_games_won'])}{found}", "values": [["0"]]},
+            {"range": f"{col_letter(col['b_games_won'])}{found}", "values": [["0"]]},
+            {"range": f"{col_letter(col['draw_games'])}{found}", "values": [["0"]]},
+            {"range": f"{col_letter(col['result_type'])}{found}", "values": [["normal"]]},
+            {"range": f"{col_letter(col['confirmed_status'])}{found}", "values": [["open"]]},
+            {"range": f"{col_letter(col['reported_by_id'])}{found}", "values": [[""]]},
+            {"range": f"{col_letter(col['confirmed_by_id'])}{found}", "values": [[""]]},
+            {"range": f"{col_letter(col['auto_confirm_at'])}{found}", "values": [[""]]},
+            {"range": f"{col_letter(col['updated_at'])}{found}", "values": [[updated_at]]},
         ])
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
@@ -4785,11 +4716,19 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         if not stats:
             return await interaction.followup.send("Sem matches confirmados.", ephemeral=False)
 
-        mwp = {}
+        K = 3
+        MIN_MATCHES = 5
+
+        mwp_adj = {}
+        ppm_adj = {}
         gwp = {}
+
         for pid, s in stats.items():
             m = s["matches"]
-            mwp[pid] = 1/3 if m <= 0 else floor_333(s["pts"] / (3 * m))
+            pts = s["pts"]
+
+            mwp_adj[pid] = (pts + K * 1.5) / (3 * (m + K)) if m > 0 else 1/3
+            ppm_adj[pid] = (pts + K * 1.0) / (m + K) if m > 0 else 1.0
 
             games = s["gw"] + s["gl"] + s["gd"]
             gwp[pid] = 1/3 if games <= 0 else floor_333((s["gw"] + 0.5 * s["gd"]) / games)
@@ -4802,7 +4741,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 omw[pid] = 1/3
                 ogw[pid] = 1/3
             else:
-                omw[pid] = sum(mwp.get(o, 1/3) for o in opps) / len(opps)
+                omw[pid] = sum(mwp_adj.get(o, 1/3) for o in opps) / len(opps)
                 ogw[pid] = sum(gwp.get(o, 1/3) for o in opps) / len(opps)
 
         table = []
@@ -4810,26 +4749,41 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             table.append({
                 "pid": pid,
                 "pts": s["pts"],
-                "mwp": pct1(mwp[pid]),
+                "mwp": pct1(mwp_adj[pid]),
+                "ppm": f"{ppm_adj[pid]:.2f}",
                 "omw": pct1(omw[pid]),
                 "gw": pct1(gwp[pid]),
                 "ogw": pct1(ogw[pid]),
                 "j": s["matches"],
+                "eligible": s["matches"] >= MIN_MATCHES
             })
 
-        table.sort(key=lambda r: (r["mwp"], r["omw"], r["gw"], r["ogw"], r["pts"]), reverse=True)
+        table.sort(
+            key=lambda r: (
+                float(r["mwp"].replace("%","")),
+                float(r["ppm"]),
+                float(r["omw"].replace("%","")),
+                float(r["gw"].replace("%","")),
+                float(r["ogw"].replace("%","")),
+                r["pts"]
+            ),
+            reverse=True
+        )
 
         top = max(10, min(top, 60))
         out = [f"🏆 Ranking Geral — Season {season_id} (Top {top})"]
-        out.append("pos | jogador | MWP | pts | OMW | GW | OGW | J")
-        out.append("--- | ------ | --- | --- | --- | --- | --- | ---")
+        out.append("pos | jogador | MWP | PPM | pts | OMW | GW | OGW | J")
+        out.append("--- | ------ | --- | --- | --- | --- | --- | --- | ---")
 
         nick_map = get_player_nick_map_fast(sh)
 
         for i, r in enumerate(table[:top], 1):
+            marker = "" if r["eligible"] else "*"
             out.append(
-                f"{i} | {nick_map.get(r['pid'], r['pid'])} | {r['mwp']} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}"
+                f"{i} | {nick_map.get(r['pid'], r['pid'])}{marker} | {r['mwp']} | {r['ppm']} | {r['pts']} | {r['omw']} | {r['gw']} | {r['ogw']} | {r['j']}"
             )
+
+        out.append("\n* Jogador com menos de 5 partidas")
 
         await send_followup_chunks(interaction, "\n".join(out), ephemeral=False)
 
