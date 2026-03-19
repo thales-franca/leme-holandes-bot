@@ -542,6 +542,8 @@ async def get_access_level(interaction: discord.Interaction) -> str:
 # =========================
 # URL validation (decklist)
 # =========================
+from urllib.parse import urlparse, parse_qs
+
 def validate_decklist_url(url: str) -> tuple[bool, str]:
     raw = str(url).strip()
 
@@ -549,29 +551,32 @@ def validate_decklist_url(url: str) -> tuple[bool, str]:
         raw = "https://" + raw
 
     if " " in raw or len(raw) < 10 or len(raw) > 400:
-        return (False, "Link inválido. Envie uma URL completa (sem espaços).")
+        return False, "Link inválido. Envie uma URL completa (sem espaços)."
 
     parsed = urlparse(raw)
     host = (parsed.netloc or "").lower()
 
+    # Remove www. se existir
     if host.startswith("www."):
         host = host[4:]
 
-    allowed_hosts = {"https://www.moxfield.com", "https://www.ligamagic.com", "https://www.ligamagic.com.br"}
+    allowed_hosts = {"moxfield.com", "ligamagic.com", "ligamagic.com.br"}
     if host not in allowed_hosts:
-        return (False, "Link não permitido. Use apenas moxfield.com ou ligamagic.com(.br)")
+        return False, "Link não permitido. Use apenas moxfield.com ou ligamagic.com(.br)"
 
-    if host == "moxfield.com":
+    # Moxfield
+    if "moxfield.com" in host:
         if "/decks/" not in (parsed.path or ""):
-            return (False, "Link inválido do Moxfield. Exemplo: https://www.moxfield.com/decks/SEU_ID")
+            return False, "Link inválido do Moxfield. Exemplo: https://www.moxfield.com/decks/SEU_ID"
 
-    if host == "ligamagic.com.br":
+    # LigaMagic
+    if "ligamagic.com" in host:
         qs = parse_qs(parsed.query or "")
         deck_id = (qs.get("id", [""])[0] or "").strip()
         if not deck_id.isdigit():
-            return (False, "Link inválido da LigaMagic. Exemplo: https://www.ligamagic.com(.br)/?view=dks/deck&id=123456")
+            return False, "Link inválido da LigaMagic. Exemplo: https://www.ligamagic.com(.br)/?view=dks/deck&id=123456"
 
-    return (True, raw)
+    return True, raw
 
 
 # =========================
