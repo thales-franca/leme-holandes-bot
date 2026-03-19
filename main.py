@@ -4307,8 +4307,9 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
+
 # =========================================================
-# /ranking (REVISADO E BLINDADO)
+# /ranking
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(cycle="Número do ciclo", top="Quantidade de jogadores")
@@ -4320,85 +4321,24 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
         sh = open_sheet()
         season_id = require_current_season(sh)
 
-        ws_standings = ensure_worksheet(
-            sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30
-        )
+        ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
 
         rows = _read_cycle_standings(ws_standings, season_id, cycle)
-
         if not rows:
             return await interaction.followup.send(
                 "⚠️ Não há standings para este ciclo ainda. Use `/recalcular` primeiro.",
                 ephemeral=False
             )
 
-        # 🔥 SANITIZAÇÃO (mantida, mas sem quebrar estrutura original)
-        clean_rows = []
-        for r in rows:
-            try:
-                clean_rows.append({
-                    "player_id": str(r.get("player_id", "")).strip(),
-                    "matches": safe_int(r.get("matches", 0), 0),
-                    "points": safe_int(r.get("points", 0), 0),
-                    "mwp": float(str(r.get("mwp", 0)).replace(",", ".")),
-                    "ppm": float(str(r.get("ppm", 0)).replace(",", ".")),
-                })
-            except:
-                continue
-
-        # 🔥 ORDENAÇÃO SEGURA (apenas fallback, sem perder rank_position)
-        if not all("rank_position" in r for r in rows):
-            rows.sort(
-                key=lambda x: (
-                    safe_int(x.get("points", 0), 0),
-                    float(str(x.get("mwp", 0)).replace(",", ".")),
-                ),
-                reverse=True
-            )
-
         nick_map = get_player_nick_map_fast(sh)
 
-        # 🔥 USA OS DADOS ORIGINAIS (CORREÇÃO PRINCIPAL)
-        text = _format_standings_text(
-            rows,
-            nick_map,
-            season_id,
-            cycle,
-            top=top
-        )
-
+        text = _format_standings_text(rows, nick_map, season_id, cycle, top=top)
         await send_followup_chunks(interaction, text, ephemeral=False)
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /ranking: {e}",
-            ephemeral=False
-        )
+        await interaction.followup.send(f"❌ Erro no /ranking: {e}", ephemeral=False)
 
 
-# =========================================================
-# FORMATADOR DE STANDINGS (ALINHADO E ROBUSTO)
-# =========================================================
-def _format_standings_text(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
-    top = max(1, min(top, 100))
-    lines = [f"🏆 **Ranking do Ciclo {cycle}** | Season {season_id}"]
-    lines.append("pos | jogador | pts | OMW | GW | OGW | J")
-    lines.append("--- | ------ | --- | --- | --- | --- | ---")
-
-    for r in rows[:top]:
-        pid = str(r.get("player_id", "")).strip()
-        lines.append(
-            f"{safe_int(r.get('rank_position', 0), 0)} | "
-            f"{nick_map.get(pid, pid)} | "
-            f"{safe_int(r.get('points', 0), 0)} | "
-            f"{r.get('omw', 0)} | "
-            f"{r.get('gw', 0)} | "
-            f"{r.get('ogw', 0)} | "
-            f"{safe_int(r.get('matches', 0), 0)}"
-        )
-    return "\n".join(lines)
-
-    
 # =========================================================
 # /standings_publicar
 # =========================================================
@@ -4731,9 +4671,7 @@ async def ranking_geral(interaction: discord.Interaction):
                 continue
             if not as_bool(r.get("active", "TRUE")):
                 continue
-
-            # ✅ FIX 1: normalização do confirmed_status
-            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
+            if r.get("confirmed_status") != "confirmed":
                 continue
 
             a = r.get("player_a_id")
@@ -4783,12 +4721,7 @@ async def ranking_geral(interaction: discord.Interaction):
             games = s["gw"] + s["gl"] + s["gd"]
             gw = (s["gw"] + 0.5*s["gd"]) / games if games else 0
 
-            # ✅ FIX 2: proteção no cálculo de OMW
-            valid_opps = [o for o in opps[p] if stats[o]["m"] > 0]
-            omw = (
-                sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in valid_opps) / len(valid_opps)
-                if valid_opps else 0
-            )
+            omw = sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in opps[p] if stats[o]["m"]) / len(opps[p]) if opps[p] else 0
 
             peso_pts = m/(m+K)
             peso_ppm = K/(m+K)
@@ -4821,8 +4754,7 @@ async def ranking_geral(interaction: discord.Interaction):
                 f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
             )
 
-        # ✅ FIX 3: formatação correta no Discord
-        await interaction.followup.send(f"```\n{'\n'.join(out)}\n```")
+        await interaction.followup.send("\n".join(out))
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
