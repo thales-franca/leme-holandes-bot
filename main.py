@@ -4731,7 +4731,9 @@ async def ranking_geral(interaction: discord.Interaction):
                 continue
             if not as_bool(r.get("active", "TRUE")):
                 continue
-            if r.get("confirmed_status") != "confirmed":
+
+            # ✅ FIX 1: normalização do confirmed_status
+            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
                 continue
 
             a = r.get("player_a_id")
@@ -4781,7 +4783,12 @@ async def ranking_geral(interaction: discord.Interaction):
             games = s["gw"] + s["gl"] + s["gd"]
             gw = (s["gw"] + 0.5*s["gd"]) / games if games else 0
 
-            omw = sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in opps[p] if stats[o]["m"]) / len(opps[p]) if opps[p] else 0
+            # ✅ FIX 2: proteção no cálculo de OMW
+            valid_opps = [o for o in opps[p] if stats[o]["m"] > 0]
+            omw = (
+                sum((stats[o]["pts"] / (3*stats[o]["m"])) for o in valid_opps) / len(valid_opps)
+                if valid_opps else 0
+            )
 
             peso_pts = m/(m+K)
             peso_ppm = K/(m+K)
@@ -4814,7 +4821,8 @@ async def ranking_geral(interaction: discord.Interaction):
                 f"{r['mwp']*100:.1f} | {r['ppm']:.2f} | {r['omw']*100:.1f} | {r['gw']*100:.1f}"
             )
 
-        await interaction.followup.send("\n".join(out))
+        # ✅ FIX 3: formatação correta no Discord
+        await interaction.followup.send(f"```\n{'\n'.join(out)}\n```")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
