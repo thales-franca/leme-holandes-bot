@@ -4307,7 +4307,6 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
-
 # =========================================================
 # /ranking (REVISADO E BLINDADO)
 # =========================================================
@@ -4333,7 +4332,7 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        # 🔥 SANITIZAÇÃO FORTE DOS DADOS
+        # 🔥 SANITIZAÇÃO (mantida, mas sem quebrar estrutura original)
         clean_rows = []
         for r in rows:
             try:
@@ -4341,22 +4340,27 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                     "player_id": str(r.get("player_id", "")).strip(),
                     "matches": safe_int(r.get("matches", 0), 0),
                     "points": safe_int(r.get("points", 0), 0),
-                    "mwp": float(r.get("mwp", 0) or 0),
-                    "ppm": float(r.get("ppm", 0) or 0),
+                    "mwp": float(str(r.get("mwp", 0)).replace(",", ".")),
+                    "ppm": float(str(r.get("ppm", 0)).replace(",", ".")),
                 })
             except:
                 continue
 
-        # 🔥 ORDENAÇÃO GARANTIDA (CASO SHEETS VENHA BAGUNÇADO)
-        clean_rows.sort(
-            key=lambda x: (x["points"], x["ppm"], x["mwp"]),
-            reverse=True
-        )
+        # 🔥 ORDENAÇÃO SEGURA (apenas fallback, sem perder rank_position)
+        if not all("rank_position" in r for r in rows):
+            rows.sort(
+                key=lambda x: (
+                    safe_int(x.get("points", 0), 0),
+                    float(str(x.get("mwp", 0)).replace(",", ".")),
+                ),
+                reverse=True
+            )
 
         nick_map = get_player_nick_map_fast(sh)
 
+        # 🔥 USA OS DADOS ORIGINAIS (CORREÇÃO PRINCIPAL)
         text = _format_standings_text(
-            clean_rows,
+            rows,
             nick_map,
             season_id,
             cycle,
@@ -4393,6 +4397,7 @@ def _format_standings_text(rows: list[dict], nick_map: dict[str, str], season_id
             f"{safe_int(r.get('matches', 0), 0)}"
         )
     return "\n".join(lines)
+
     
 # =========================================================
 # /standings_publicar
