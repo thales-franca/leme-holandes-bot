@@ -4744,7 +4744,7 @@ async def status_ciclo(interaction: discord.Interaction):
 # /ranking_geral (REVISADO + PADRÃO VISUAL DO /ranking)
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
-@app_commands.describe(season="Season", top="Quantidade de jogadores (10..60)")
+@app_commands.describe(season="Season", top="Quantidade de jogadores (8..60)")
 @app_commands.autocomplete(season=ac_pods_ver_season)
 async def ranking_geral(interaction: discord.Interaction, season: int, top: int = 30):
     await interaction.response.defer()
@@ -4880,7 +4880,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
         nick_map = get_player_nick_map_fast(sh)
 
-        top = max(10, min(top, 30))
+        top = max(8, min(top, 40))
 
                # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
@@ -4912,13 +4912,13 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         out.append("")
         out.append("Legenda:")
         out.append("J = Número de jogos realizados")
-        out.append("SCORE = Critério principal de rankeamento = {PTS×[J÷(J+3)]}+{PPM×[3÷(J+3)]}")
-        out.append("PTS = Pontos totais acumulados - Não utilizado como critério de rakeamento diretamente")
-        out.append("MWP = Match Win Percentage - primeiro critério de desempate")
-        out.append("PPM = Points Per Match - segundo critério de desempate")
-        out.append("OMW = Opponents Match Win Percentage - terceiro critério de desempate")
-        out.append("GW = Game Win Percentage - quarto critério de desempate")
-        out.append("OGW = Opponents Game Win Percentage - quinto critério de desempate")
+        out.append("SCORE = {PTS×[J÷(J+3)]}+{PPM×[3÷(J+3)]}")
+        out.append("PTS = Pontos totais acumulados")
+        out.append("MWP = Match Win Percentage")
+        out.append("PPM = Points Per Match")
+        out.append("OMW = Opponents Match Win Percentage")
+        out.append("GW = Game Win Percentage")
+        out.append("OGW = Opponents Game Win Percentage")
 
         msg = "```txt\n" + "\n".join(out) + "\n```"
         await interaction.followup.send(msg, ephemeral=False)
