@@ -4033,45 +4033,45 @@ def require_current_season(sh) -> int:
 # =========================================================
 # Helpers de standings/ranking
 # =========================================================
-def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict]:
-    rows = cached_get_all_records(ws_standings, ttl_seconds=10)
-    out = []
-    for r in rows:
-        if safe_int(r.get("season_id", 0), 0) != season_id:
-            continue
-        if safe_int(r.get("cycle", 0), 0) != cycle:
-            continue
-        out.append(r)
-    out.sort(key=lambda x: safe_int(x.get("rank_position", 999999), 999999))
-    return out
+#def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict]:
+    #rows = cached_get_all_records(ws_standings, ttl_seconds=10)
+    #out = []
+    #for r in rows:
+     #   if safe_int(r.get("season_id", 0), 0) != season_id:
+      #      continue
+       # if safe_int(r.get("cycle", 0), 0) != cycle:
+        #    continue
+        #out.append(r)
+    #out.sort(key=lambda x: safe_int(x.get("rank_position", 999999), 999999))
+    #return out
 
-def _format_standings_text_legacy(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
-    top = max(1, min(top, 100))
-    lines = [f"🏆 **Ranking do Ciclo {cycle}** | Season {season_id}"]
-    lines.append("pos | jogador | pts | OMW | GW | OGW | J")
-    lines.append("--- | ------ | --- | --- | --- | --- | ---")
+#def _format_standings_text_legacy(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
+ #   top = max(1, min(top, 100))
+ #   lines = [f"🏆 **Ranking do Ciclo {cycle}** | Season {season_id}"]
+  #  lines.append("pos | jogador | pts | OMW | GW | OGW | J")
+  #  lines.append("--- | ------ | --- | --- | --- | --- | ---")
 
-    for r in rows[:top]:
-        pid = str(r.get("player_id", "")).strip()
-        lines.append(
-            f"{safe_int(r.get('rank_position', 0), 0)} | "
-            f"{nick_map.get(pid, pid)} | "
-            f"{safe_int(r.get('match_points', 0), 0)} | "
-            f"{r.get('omw_percent', 0)} | "
-            f"{r.get('gw_percent', 0)} | "
-            f"{r.get('ogw_percent', 0)} | "
-            f"{safe_int(r.get('matches_played', 0), 0)}"
+    #for r in rows[:top]:
+     #   pid = str(r.get("player_id", "")).strip()
+       # lines.append(
+            #f"{safe_int(r.get('rank_position', 0), 0)} | "
+            #f"{nick_map.get(pid, pid)} | "
+            #f"{safe_int(r.get('match_points', 0), 0)} | "
+            #f"{r.get('omw_percent', 0)} | "
+            #f"{r.get('gw_percent', 0)} | "
+            #f"{r.get('ogw_percent', 0)} | "
+            #f"{safe_int(r.get('matches_played', 0), 0)}"
         )
-    return "\n".join(lines)
+    #return "\n".join(lines)
 
-def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -> bool:
-    for r in cached_get_all_records(ws_pods, ttl_seconds=10):
-        if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
-            return True
-    for r in cached_get_all_records(ws_matches, ttl_seconds=10):
-        if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
-            return True
-    return False
+#def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -> bool:
+    #for r in cached_get_all_records(ws_pods, ttl_seconds=10):
+     #   if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
+      #      return True
+    #for r in cached_get_all_records(ws_matches, ttl_seconds=10):
+     #   if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
+            #return True
+   # return False
 
 
 # =========================================================
@@ -4437,10 +4437,10 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 f"{score:>5.2f} | "
                 f"{pts:>3} | "
                 f"{ppm:>5.2f} | "
-                f"{mwp*100:>5.1f} | "
-                f"{omw*100:>5.1f} | "
-                f"{gw*100:>5.1f} | "
-                f"{ogw*100:>5.1f}"
+                f"{mwp*-100:>5.1f} | "
+                f"{omw*-100:>5.1f} | "
+                f"{gw*-100:>5.1f} | "
+                f"{ogw*-100:>5.1f}"
             )
 
         chunk_size = 12
