@@ -4824,7 +4824,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             })
 
         # =========================================================
-        # ORDENAÇÃO (MANTIDA ORIGINAL)
+        # ORDENAÇÃO (MANTIDA)
         # =========================================================
         table.sort(
             key=lambda x: (x["score"], x["ppm"], x["mwp"]),
@@ -4836,25 +4836,24 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         top = max(10, min(top, 60))
 
         # =========================================================
-        # FORMATAÇÃO (ALINHAMENTO CORRIGIDO)
+        # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
         out = []
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
 
         out.append(
-            f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        out.append("-" * 110)
+        out.append("-" * 95)
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
 
             out.append(
                 f"{i:>3} | "
-                f"{nome[:23]:<23} | "
+                f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>6.2f} | "
-                f"{r['pts']:>4} | "
+                f"{r['pts']:>3} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['omw']*100:>5.1f} | "
@@ -4862,7 +4861,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 f"{r['ogw']*100:>5.1f}"
             )
 
-        msg = "```" + "\n".join(out) + "```"
+        msg = "```txt\n" + "\n".join(out) + "\n```"
 
         await send_followup_chunks(interaction, msg, ephemeral=False)
 
