@@ -4767,7 +4767,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         # =========================================================
         # CÁLCULOS
         # =========================================================
-        K = 3  # regressão
+        K = 3
 
         table = []
 
@@ -4775,19 +4775,15 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             m = s["m"]
             pts = s["pts"]
 
-            # 🔥 MWP com mínimo 33.3%
             raw_mwp = (pts / (3 * m)) if m else 0
             mwp = max(raw_mwp, 0.333)
 
-            # 🔥 PPM suavizado
             ppm = (pts + K) / (m + K) if m else 0
 
-            # 🔥 GW com mínimo
             games = s["gw"] + s["gl"] + s["gd"]
             raw_gw = (s["gw"] + 0.5 * s["gd"]) / games if games else 0
             gw = max(raw_gw, 0.333)
 
-            # 🔥 OMW com mínimo por oponente
             omw_list = []
             for o in opps[p]:
                 om = stats[o]["m"]
@@ -4799,7 +4795,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
             omw = sum(omw_list) / len(omw_list) if omw_list else 0
 
-            # 🔥 OGW com mínimo por oponente
             ogw_list = []
             for o in opps[p]:
                 og = stats[o]["gw"] + stats[o]["gl"] + stats[o]["gd"]
@@ -4811,7 +4806,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
             ogw = sum(ogw_list) / len(ogw_list) if ogw_list else 0
 
-            # 🔥 SCORE HÍBRIDO (mantém PTS dominante)
             peso_pts = m / (m + K)
             peso_ppm = K / (m + K)
 
@@ -4830,7 +4824,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
             })
 
         # =========================================================
-        # ORDENAÇÃO
+        # ORDENAÇÃO (MANTIDA ORIGINAL)
         # =========================================================
         table.sort(
             key=lambda x: (x["score"], x["ppm"], x["mwp"]),
@@ -4842,7 +4836,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         top = max(10, min(top, 60))
 
         # =========================================================
-        # FORMATAÇÃO (PADRÃO EXATO DO /ranking)
+        # FORMATAÇÃO (ALINHAMENTO CORRIGIDO)
         # =========================================================
         out = []
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
@@ -4850,7 +4844,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append(
             f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        out.append("-" * 95)
+        out.append("-" * 110)
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
