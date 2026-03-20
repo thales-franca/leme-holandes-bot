@@ -4415,33 +4415,24 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         header_lines.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
+        
         header_lines.append("-" * 110)
 
         row_lines = []
-        for i, r in enumerate(clean_rows[:top], 1):
-            p = r["player_id"]
-            nome = nick_map.get(p, p)
-
-            j = r["matches"]
-            pts = r["points"]
-            score = r["score"]
-            ppm = r["ppm"]
-            mwp = r["mwp"]
-            omw = r["omw"]
-            gw = r["gw"]
-            ogw = r["ogw"]
+        for i, r in enumerate(table[:top], 1):
+            nome = nick_map.get(str(r["p"]), str(r["p"]))
 
             row_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
-                f"{j:>2} | "
-                f"{score:>5.2f} | "
-                f"{pts:>3} | "
-                f"{ppm:>5.2f} | "
-                f"{mwp*-100:>5.1f} | "
-                f"{omw*-100:>5.1f} | "
-                f"{gw*-100:>5.1f} | "
-                f"{ogw*-100:>5.1f}"
+                f"{r['j']:>2} | "
+                f"{r['score']:>5.2f} | "
+                f"{r['pts']:>3} | "
+                f"{r['ppm']:>5.2f} | "
+                f"{r['mwp']*100:>5.1f} | "
+                f"{r['omw']*10:>5.1f} | "
+                f"{r['gw']*100:>5.1f} | "
+                f"{r['ogw']*10:>5.1f}"
             )
 
         chunk_size = 12
