@@ -4872,6 +4872,8 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             reverse=True
         )
 
+        nick_map = get_player_nick_map_fast(sh)
+        
         # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
