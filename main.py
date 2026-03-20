@@ -4324,9 +4324,11 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
 @app_commands.describe(season="Season", cycle="Número do ciclo", top="Quantidade de jogadores")
 @app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
 async def ranking(interaction: discord.Interaction, season: int, cycle: int, top: int = 30):
+
     await interaction.response.defer(ephemeral=False)
 
     try:
+
         sh = open_sheet()
 
         if not season_exists(sh, season):
@@ -4347,11 +4349,25 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 ephemeral=False
             )
 
-        K = 3  # mesmo fator do ranking_geral
+        K = 3
+
+
+        # ===============================
+        # NORMALIZAÇÃO DE PERCENTUAL
+        # ===============================
+        def pct(v):
+            v = float(v or 0)
+            if v <= 1:
+                return v * 100
+            return v
+
 
         clean_rows = []
+
         for r in rows:
+
             try:
+
                 matches = safe_int(r.get("matches_played", r.get("matches", 0)), 0)
                 points = safe_int(r.get("match_points", r.get("points", 0)), 0)
 
@@ -4359,16 +4375,6 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 omw = float(r.get("omw", 0) or 0)
                 gw = float(r.get("gw", 0) or 0)
                 ogw = float(r.get("ogw", 0) or 0)
-
-                # proteção (caso venha quebrado do sheets)
-                if mwp > 1:
-                    mwp /= 100
-                if omw > 1:
-                    omw /= 100
-                if gw > 1:
-                    gw /= 100
-                if ogw > 1:
-                    ogw /= 100
 
                 ppm = (points + K) / (matches + K) if matches > 0 else 0
 
@@ -4388,12 +4394,14 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                     "gw": gw,
                     "ogw": ogw
                 })
-            except Exception:
+
+            except:
                 continue
 
-        # =========================================================
-        # ORDENAÇÃO (ALINHADA COM GERAL)
-        # =========================================================
+
+        # ===============================
+        # ORDENAÇÃO
+        # ===============================
         clean_rows.sort(
             key=lambda x: (
                 x["score"],
@@ -4401,127 +4409,178 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 x["mwp"],
                 x["omw"],
                 x["gw"],
-                x["ogw"]
+                x["ogw"],
             ),
             reverse=True
         )
+
 
         nick_map = get_player_nick_map_fast(sh)
 
         top = max(8, min(top, 60))
 
+
+        # ===============================
+        # CABEÇALHO
+        # ===============================
         header_lines = []
-        header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
+
+        header_lines.append(
+            f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})"
+        )
+
         header_lines.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
+
         header_lines.append("-" * 110)
 
+
+        # ===============================
+        # LINHAS
+        # ===============================
         row_lines = []
+
         for i, r in enumerate(clean_rows[:top], 1):
-            p = r.get("player_id", "")
+
+            p = r["player_id"]
+
             nome = nick_map.get(p, p)
 
-            j = safe_int(r.get("matches", 0), 0)
-            pts = safe_int(r.get("points", 0), 0)
-            score = float(r.get("score", 0) or 0)
-            ppm = float(r.get("ppm", 0) or 0)
-            mwp = float(r.get("mwp", 0) or 0)
-            omw = float(r.get("omw", 0) or 0)
-            gw = float(r.get("gw", 0) or 0)
-            ogw = float(r.get("ogw", 0) or 0)
+            j = safe_int(r["matches"], 0)
+            pts = safe_int(r["points"], 0)
+
+            score = float(r["score"] or 0)
+            ppm = float(r["ppm"] or 0)
+
+            mwp = pct(r["mwp"])
+            omw = pct(r["omw"])
+            gw = pct(r["gw"])
+            ogw = pct(r["ogw"])
+
 
             row_lines.append(
+
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
                 f"{j:>2} | "
                 f"{score:>5.2f} | "
                 f"{pts:>3} | "
                 f"{ppm:>5.2f} | "
-                f"{mwp*100:>5.1f} | "
-                f"{omw*10:>5.1f} | "
-                f"{gw*100:>5.1f} | "
-                f"{ogw*10:>5.1f}"
+                f"{mwp:>5.1f} | "
+                f"{omw:>5.1f} | "
+                f"{gw:>5.1f} | "
+                f"{ogw:>5.1f}"
+
             )
 
-        chunk_size = 12
-        total_rows = len(row_lines)
 
-        for start in range(0, total_rows, chunk_size):
-            part_lines = []
-            part_lines.extend(header_lines)
-            part_lines.extend(row_lines[start:start + chunk_size])
+        # ===============================
+        # PAGINAÇÃO 12 POR VEZ
+        # ===============================
+        chunk = 12
 
-            part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
-            await interaction.followup.send(part_msg, ephemeral=False)
+        for start in range(0, len(row_lines), chunk):
 
-        legend_lines = []
-        legend_lines.append("Legenda:")
-        legend_lines.append("J = Número de jogos realizados")
-        legend_lines.append("SCORE = PTS×(J÷(J+3) + {PPM×[3÷(J+3)]}")
-        legend_lines.append("PTS = Pontos totais acumulados")
-        legend_lines.append("PPM = Points Per Match")
-        legend_lines.append("MWP = Match Win Percentage")
-        legend_lines.append("OMW = Opponent's Match Win Percentage")
-        legend_lines.append("GW = Game Win Percentage")
-        legend_lines.append("OGW = Opponent's Game Win Percentage")
+            part = []
 
-        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
-        await interaction.followup.send(legend_msg, ephemeral=False)
+            part.extend(header_lines)
+
+            part.extend(row_lines[start:start + chunk])
+
+            msg = "```txt\n" + "\n".join(part) + "\n```"
+
+            await interaction.followup.send(msg, ephemeral=False)
+
+
+        # ===============================
+        # LEGENDA
+        # ===============================
+        legend = []
+
+        legend.append("Legenda:")
+        legend.append("J = Número de jogos realizados")
+        legend.append("SCORE = PTS×(J÷(J+3) + {PPM×[3÷(J+3)]}")
+        legend.append("PTS = Pontos totais acumulados")
+        legend.append("PPM = Points Per Match")
+        legend.append("MWP = Match Win Percentage")
+        legend.append("OMW = Opponent's Match Win Percentage")
+        legend.append("GW = Game Win Percentage")
+        legend.append("OGW = Opponent's Game Win Percentage")
+
+        msg = "```txt\n" + "\n".join(legend) + "\n```"
+
+        await interaction.followup.send(msg, ephemeral=False)
+
 
     except Exception as e:
+
         await interaction.followup.send(
             f"❌ Erro no /ranking: {e}",
             ephemeral=False
         )
 
 
+
 # =========================================================
-# FORMATADOR DE STANDINGS
+# FORMATADOR DE STANDINGS (compatibilidade)
 # =========================================================
 def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
-    """
-    Mantido apenas por compatibilidade.
-    O /ranking atualizado não depende mais deste formatador.
-    """
+
     top = max(8, min(top, 60))
 
     out = []
-    out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
+
+    out.append(
+        f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})"
+    )
+
     out.append(
         f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
     )
+
     out.append("-" * 110)
 
     for i, r in enumerate(rows[:top], 1):
+
         p = r.get("player_id", "")
+
         nome = nick_map.get(p, p)
 
         j = safe_int(r.get("matches", 0), 0)
         pts = safe_int(r.get("points", 0), 0)
+
         score = float(r.get("score", 0) or 0)
         ppm = float(r.get("ppm", 0) or 0)
+
         mwp = float(r.get("mwp", 0) or 0)
         omw = float(r.get("omw", 0) or 0)
         gw = float(r.get("gw", 0) or 0)
         ogw = float(r.get("ogw", 0) or 0)
 
+        if mwp <= 1: mwp *= 100
+        if omw <= 1: omw *= 100
+        if gw <= 1: gw *= 100
+        if ogw <= 1: ogw *= 100
+
         out.append(
+
             f"{i:>3} | "
             f"{nome[:20]:<20} | "
             f"{j:>2} | "
             f"{score:>5.2f} | "
             f"{pts:>3} | "
             f"{ppm:>5.2f} | "
-            f"{mwp*100:>5.1f} | "
-            f"{omw*10:>5.1f} | "
-            f"{gw*100:>5.1f} | "
-            f"{ogw*10:>5.1f}"
+            f"{mwp:>5.1f} | "
+            f"{omw:>5.1f} | "
+            f"{gw:>5.1f} | "
+            f"{ogw:>5.1f}"
+
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
 
-    
+
 # =================================================
 # FIM DO SUB-BLOCO B/7
 # =================================================
