@@ -4415,7 +4415,7 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
         )
 
 # =========================================================
-# FORMATADOR DE STANDINGS (COM SCORE)
+# FORMATADOR DE STANDINGS (PADRÃO FINAL CORRIGIDO)
 # =========================================================
 def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     top = max(10, min(top, 60))
@@ -4424,28 +4424,42 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
 
     out.append(
-        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'SCR':>5} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCR':>5} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
     )
     out.append("-" * 110)
 
     for i, r in enumerate(rows[:top], 1):
-        nome = nick_map.get(r["player_id"], r["player_id"])
+        p = r.get("player_id", "")
+        nome = nick_map.get(p, p)
+
+        j = safe_int(r.get("matches", 0), 0)
+        pts = safe_int(r.get("points", 0), 0)
+        score = float(r.get("score", 0) or 0)
+
+        # ✅ usar percentuais já prontos da planilha
+        mwp = float(r.get("mwp_percent", 0) or 0)
+        omw = float(r.get("omw_percent", 0) or 0)
+        gw = float(r.get("gw_percent", 0) or 0)
+        ogw = float(r.get("ogw_percent", 0) or 0)
+
+        # ✅ PPM seguro
+        ppm = (pts / j) if j > 0 else 0
 
         out.append(
             f"{i:>3} | "
             f"{nome[:20]:<20} | "
-            f"{r['matches']:>2} | "
-            f"{r['points']:>3} | "
-            f"{r['score']:>5.2f} | "
-            f"{r['mwp']*100:>5.1f} | "
-            f"{r['ppm']:>5.2f} | "
-            f"{r['omw']*100:>5.1f} | "
-            f"{r['gw']*100:>5.1f} | "
-            f"{r['ogw']*100:>5.1f}"
+            f"{j:>2} | "
+            f"{pts:>3} | "
+            f"{score:>5.2f} | "
+            f"{mwp:>5.1f} | "
+            f"{ppm:>5.2f} | "
+            f"{omw:>5.1f} | "
+            f"{gw:>5.1f} | "
+            f"{ogw:>5.1f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
-
+    
 # =================================================
 # FIM DO SUB-BLOCO B/7
 # =================================================
