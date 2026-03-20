@@ -4925,6 +4925,9 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
         await interaction.followup.send(table_msg, ephemeral=False)
         await interaction.followup.send(legend_msg, ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {e}")
         
 # =================================================
 # FIM DO SUB-BLOCO C/7
