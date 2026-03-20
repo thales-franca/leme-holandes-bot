@@ -1848,6 +1848,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             "player_id": pid,
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
+            "matches": s["matches_played"],              # ✅ compatibilidade ranking
+            "points": s["match_points"],                 # ✅ compatibilidade ranking
+            "mwp": mwp[pid],                             # ✅ compatibilidade ranking (raw)
+            "omw": omw[pid],                             # ✅ compatibilidade ranking (raw)
+            "gw": gwp[pid],                              # ✅ compatibilidade ranking (raw)
+            "ogw": ogw[pid],                             # ✅ compatibilidade ranking (raw)
             "mwp_percent": pct1(mwp[pid]),
             "game_wins": s["game_wins"],
             "game_losses": s["game_losses"],
@@ -1876,7 +1882,9 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         r["last_recalc_at"] = ts
 
     header = [
-        "season_id", "cycle", "player_id", "matches_played", "match_points", "mwp_percent",
+        "season_id", "cycle", "player_id", "matches_played", "match_points",
+        "matches", "points", "mwp", "omw", "gw", "ogw",
+        "mwp_percent",
         "game_wins", "game_losses", "game_draws", "games_played", "gw_percent",
         "omw_percent", "ogw_percent", "rank_position", "last_recalc_at"
     ]
@@ -1900,7 +1908,9 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for r in out_rows:
         values.append([
             r["season_id"], r["cycle"], r["player_id"],
-            r["matches_played"], r["match_points"], r["mwp_percent"],
+            r["matches_played"], r["match_points"],
+            r["matches"], r["points"], r["mwp"], r["omw"], r["gw"], r["ogw"],
+            r["mwp_percent"],
             r["game_wins"], r["game_losses"], r["game_draws"], r["games_played"], r["gw_percent"],
             r["omw_percent"], r["ogw_percent"], r["rank_position"], r["last_recalc_at"]
         ])
@@ -1927,7 +1937,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
 # =========================================================
 # [BLOCO 4/12 termina aqui]
-# =========================================================
+# =================================================
 
 # =================================================
 # FIM DO SUB-BLOCO ÚNICA
