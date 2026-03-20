@@ -4799,6 +4799,18 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
             omw = sum(omw_list) / len(omw_list) if omw_list else 0
 
+            # 🔥 OGW com mínimo por oponente
+            ogw_list = []
+            for o in opps[p]:
+                og = stats[o]["gw"] + stats[o]["gl"] + stats[o]["gd"]
+                if og == 0:
+                    ogw_list.append(0.333)
+                else:
+                    val = (stats[o]["gw"] + 0.5 * stats[o]["gd"]) / og
+                    ogw_list.append(max(val, 0.333))
+
+            ogw = sum(ogw_list) / len(ogw_list) if ogw_list else 0
+
             # 🔥 SCORE HÍBRIDO (mantém PTS dominante)
             peso_pts = m / (m + K)
             peso_ppm = K / (m + K)
@@ -4813,6 +4825,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 "ppm": ppm,
                 "omw": omw,
                 "gw": gw,
+                "ogw": ogw,
                 "j": m
             })
 
@@ -4835,9 +4848,9 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
 
         out.append(
-            f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}"
+            f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'SCORE':>6} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        out.append("-" * 75)
+        out.append("-" * 95)
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
@@ -4849,7 +4862,10 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 f"{r['score']:>6.2f} | "
                 f"{r['pts']:>4} | "
                 f"{r['mwp']*100:>5.1f} | "
-                f"{r['ppm']:>5.2f}"
+                f"{r['ppm']:>5.2f} | "
+                f"{r['omw']*100:>5.1f} | "
+                f"{r['gw']*100:>5.1f} | "
+                f"{r['ogw']*100:>5.1f}"
             )
 
         msg = "```" + "\n".join(out) + "```"
@@ -4858,7 +4874,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
-
+        
 # =================================================
 # FIM DO SUB-BLOCO C/7
 # =================================================
@@ -7246,7 +7262,6 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
             ephemeral=True,
             limit=1800
         )
-        await log_admin(interaction, f"matches_ciclo season={season} cycle={cycle}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /matches_ciclo: {e}", ephemeral=True)
