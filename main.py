@@ -4880,7 +4880,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
         nick_map = get_player_nick_map_fast(sh)
 
-        top = max(10, min(top, 60))
+        top = max(10, min(top, 30))
 
                # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
@@ -4912,7 +4912,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         out.append("")
         out.append("Legenda:")
         out.append("J = Número de jogos realizados")
-        out.append("SCORE = Critério principal de rankeamento = (PTS×(J÷(J+3)))+((PPM×(3÷(J+3))))")
+        out.append("SCORE = Critério principal de rankeamento = {PTS×[J÷(J+3)]}+{PPM×[3÷(J+3)]}")
         out.append("PTS = Pontos totais acumulados - Não utilizado como critério de rakeamento diretamente")
         out.append("MWP = Match Win Percentage - primeiro critério de desempate")
         out.append("PPM = Points Per Match - segundo critério de desempate")
@@ -4921,7 +4921,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         out.append("OGW = Opponents Game Win Percentage - quinto critério de desempate")
 
         msg = "```txt\n" + "\n".join(out) + "\n```"
-        await send_followup_chunks(interaction, msg, ephemeral=False)
+        await interaction.followup.send(msg, ephemeral=False)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
