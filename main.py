@@ -4904,9 +4904,9 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{r['pts']:>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*1:>5.1f} | "
+                f"{r['omw']*10:>5.1f} | "
                 f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*1:>5.1f}"
+                f"{r['ogw']*10:>5.1f}"
             )
 
         chunk_size = 12
