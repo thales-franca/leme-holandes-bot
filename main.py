@@ -4332,7 +4332,7 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
-# /ranking (REVISADO E BLINDADO)
+# /ranking (REVISADO E AJUSTADO)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(cycle="Número do ciclo", top="Quantidade de jogadores")
@@ -4356,38 +4356,35 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        # 🔥 SANITIZAÇÃO + NOVOS CAMPOS
+        # 🔥 SANITIZAÇÃO FORTE DOS DADOS (AJUSTADA PARA O PADRÃO DA PLANILHA)
         clean_rows = []
         for r in rows:
             try:
+                matches = safe_int(r.get("matches", 0), 0)
+                points = safe_int(r.get("points", 0), 0)
+
                 clean_rows.append({
                     "player_id": str(r.get("player_id", "")).strip(),
-                    "matches": safe_int(r.get("matches", 0), 0),
-                    "points": safe_int(r.get("points", 0), 0),
+                    "matches": matches,
+                    "points": points,
                     "mwp": float(r.get("mwp", 0) or 0),
-                    "ppm": float(r.get("ppm", 0) or 0),
                     "omw": float(r.get("omw", 0) or 0),
                     "gw": float(r.get("gw", 0) or 0),
                     "ogw": float(r.get("ogw", 0) or 0),
+                    "ppm": (points / matches) if matches > 0 else 0
                 })
             except:
                 continue
 
-        # 🔥 SCORE IGUAL AO RANKING GERAL
-        K = 3
-        for r in clean_rows:
-            m = r["matches"]
-            pts = r["points"]
-            ppm = r["ppm"]
-
-            peso_pts = m / (m + K) if m else 0
-            peso_ppm = K / (m + K) if m else 0
-
-            r["score"] = pts * peso_pts + ppm * peso_ppm
-
-        # 🔥 ORDENAÇÃO ATUALIZADA
+        # 🔥 ORDENAÇÃO ALINHADA COM O RECALCULO
         clean_rows.sort(
-            key=lambda x: (x["score"], x["ppm"], x["mwp"]),
+            key=lambda x: (
+                x["mwp"],
+                x["omw"],
+                x["gw"],
+                x["ogw"],
+                x["points"]
+            ),
             reverse=True
         )
 
@@ -4436,6 +4433,12 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
         omw = float(r.get("omw", 0) or 0)
         gw = float(r.get("gw", 0) or 0)
         ogw = float(r.get("ogw", 0) or 0)
+
+        # 🔥 PROTEÇÃO CONTRA VALORES JÁ EM %
+        if mwp > 1: mwp = mwp / 100
+        if omw > 1: omw = omw / 100
+        if gw > 1: gw = gw / 100
+        if ogw > 1: ogw = ogw / 100
 
         out.append(
             f"{i:>3} | "
