@@ -4423,9 +4423,9 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out = []
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
 
-      out.append(
-    f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'SCR':>5} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
-)
+    out.append(
+        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'SCR':>5} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+    )
     out.append("-" * 110)
 
     for i, r in enumerate(rows[:top], 1):
