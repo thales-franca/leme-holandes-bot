@@ -4735,68 +4735,66 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         if not season_exists(sh, season):
             return await interaction.followup.send(f"❌ A season {season} não existe.")
 
-        ws_matches = ensure_worksheet(
-            sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30
+        ws_standings = ensure_worksheet(
+            sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30
         )
-        ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
+        ensure_sheet_columns(ws_standings, STANDINGS_REQUIRED)
 
-        rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+        rows = cached_get_all_records(ws_standings, ttl_seconds=10)
 
         stats = {}
-        opps = {}
 
         # =========================================================
-        # COLETA DE DADOS
+        # COLETA DE DADOS DA ABA STANDINGS (TODOS OS CICLOS DA SEASON)
         # =========================================================
         for r in rows:
             if safe_int(r.get("season_id", 0), 0) != season:
                 continue
-            if not as_bool(r.get("active", "TRUE")):
-                continue
-            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
-                continue
-            if str(r.get("result_type", "")).strip().lower() == "bye":
+
+            p = str(r.get("player_id", "")).strip()
+            if not p:
                 continue
 
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
+            if p not in stats:
+                stats[p] = {
+                    "pts": 0,
+                    "m": 0,
+                    "gwins": 0,
+                    "glosses": 0,
+                    "gdraws": 0,
+                    "gplayed": 0,
+                    "omw_weighted_sum": 0.0,
+                    "ogw_weighted_sum": 0.0,
+                    "omw_weight": 0,
+                    "ogw_weight": 0,
+                }
 
-            if not a or not b:
-                continue
+            matches_played = safe_int(r.get("matches_played", 0), 0)
+            match_points = safe_int(r.get("match_points", 0), 0)
+            game_wins = safe_int(r.get("game_wins", 0), 0)
+            game_losses = safe_int(r.get("game_losses", 0), 0)
+            game_draws = safe_int(r.get("game_draws", 0), 0)
+            games_played = safe_int(r.get("games_played", 0), 0)
 
-            for p in (a, b):
-                if p not in stats:
-                    stats[p] = {"pts": 0, "m": 0, "gw": 0, "gl": 0, "gd": 0}
-                    opps[p] = []
+            omw_percent = float(r.get("omw_percent", 0) or 0)
+            ogw_percent = float(r.get("ogw_percent", 0) or 0)
 
-            a_w = safe_int(r.get("a_games_won", 0), 0)
-            b_w = safe_int(r.get("b_games_won", 0), 0)
-            d = safe_int(r.get("draw_games", 0), 0)
+            stats[p]["pts"] += match_points
+            stats[p]["m"] += matches_played
+            stats[p]["gwins"] += game_wins
+            stats[p]["glosses"] += game_losses
+            stats[p]["gdraws"] += game_draws
+            stats[p]["gplayed"] += games_played
 
-            stats[a]["gw"] += a_w
-            stats[a]["gl"] += b_w
-            stats[a]["gd"] += d
-
-            stats[b]["gw"] += b_w
-            stats[b]["gl"] += a_w
-            stats[b]["gd"] += d
-
-            stats[a]["m"] += 1
-            stats[b]["m"] += 1
-
-            if a_w > b_w:
-                stats[a]["pts"] += 3
-            elif b_w > a_w:
-                stats[b]["pts"] += 3
-            else:
-                stats[a]["pts"] += 1
-                stats[b]["pts"] += 1
-
-            opps[a].append(b)
-            opps[b].append(a)
+            # média ponderada pelos matches do ciclo
+            if matches_played > 0:
+                stats[p]["omw_weighted_sum"] += omw_percent * matches_played
+                stats[p]["ogw_weighted_sum"] += ogw_percent * matches_played
+                stats[p]["omw_weight"] += matches_played
+                stats[p]["ogw_weight"] += matches_played
 
         if not stats:
-            return await interaction.followup.send("Sem matches confirmados.")
+            return await interaction.followup.send("Sem standings para esta season.")
 
         # =========================================================
         # CÁLCULOS
@@ -4814,34 +4812,22 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
             ppm = (pts + K) / (m + K) if m else 0
 
-            games = s["gw"] + s["gl"] + s["gd"]
-            raw_gw = (s["gw"] + 0.5 * s["gd"]) / games if games else 0
+            games = s["gplayed"]
+            raw_gw = ((s["gwins"] + 0.5 * s["gdraws"]) / games) if games else 0
             gw = max(raw_gw, 0.333)
 
-            omw_list = []
-            for o in opps[p]:
-                om = stats[o]["m"]
-                if om == 0:
-                    omw_list.append(0.333)
-                else:
-                    val = stats[o]["pts"] / (3 * om)
-                    omw_list.append(max(val, 0.333))
+            if s["omw_weight"] > 0:
+                omw = max((s["omw_weighted_sum"] / s["omw_weight"]) / 100.0, 0.333)
+            else:
+                omw = 0.333
 
-            omw = sum(omw_list) / len(omw_list) if omw_list else 0
+            if s["ogw_weight"] > 0:
+                ogw = max((s["ogw_weighted_sum"] / s["ogw_weight"]) / 100.0, 0.333)
+            else:
+                ogw = 0.333
 
-            ogw_list = []
-            for o in opps[p]:
-                og = stats[o]["gw"] + stats[o]["gl"] + stats[o]["gd"]
-                if og == 0:
-                    ogw_list.append(0.333)
-                else:
-                    val = (stats[o]["gw"] + 0.5 * stats[o]["gd"]) / og
-                    ogw_list.append(max(val, 0.333))
-
-            ogw = sum(ogw_list) / len(ogw_list) if ogw_list else 0
-
-            peso_pts = m / (m + K)
-            peso_ppm = K / (m + K)
+            peso_pts = m / (m + K) if m > 0 else 0
+            peso_ppm = K / (m + K) if m > 0 else 0
 
             score = pts * peso_pts + ppm * peso_ppm
 
@@ -4873,7 +4859,9 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         )
 
         nick_map = get_player_nick_map_fast(sh)
-        
+
+        top = max(10, min(top, 60))
+
         # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
