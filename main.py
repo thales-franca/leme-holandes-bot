@@ -1682,9 +1682,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 4/12
 # SUB-BLOCO: ÚNICA
-# REVISÃO: aproveitamento do índice RAM de Matches, filtro de inscrições ativas
-# no ciclo, reconstrução mais consistente da aba Standings e manutenção integral
-# da lógica oficial de cálculo do ranking.
+# REVISÃO: correção de persistência no Sheets (RAW) e proteção de percentuais
 # =================================================
 
 def recalculate_cycle(sh, season_id: int, cycle: int):
@@ -1703,13 +1701,11 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
     ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
 
-    # auto-confirm "silencioso" (opcional) antes do cálculo
     try:
         sweep_auto_confirm(sh, season_id, cycle)
     except Exception:
         pass
 
-    # Base de jogadores do ciclo — ranking inclui apenas inscritos ATIVOS no ciclo
     ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
     enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
 
@@ -1744,7 +1740,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for pid in all_player_ids:
         ensure(pid)
 
-    # Filtra matches válidos (season+cycle)
     valid = []
     try:
         matches_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=cycle, only_active=True)
@@ -1771,7 +1766,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         if not a or not b:
             continue
 
-        # mantém participantes do match no cálculo, mesmo se alguma inscrição estiver inconsistente
         ensure(a)
         ensure(b)
 
@@ -1781,7 +1775,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
         valid.append((a, b, a_gw, b_gw, d_g))
 
-    # Atualiza estatísticas
     for a, b, a_gw, b_gw, d_g in valid:
         stats[a]["matches_played"] += 1
         stats[b]["matches_played"] += 1
@@ -1796,7 +1789,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         stats[b]["game_draws"] += d_g
         stats[b]["games_played"] += (a_gw + b_gw + d_g)
 
-        # Match points
         if a_gw > b_gw:
             stats[a]["match_points"] += 3
         elif b_gw > a_gw:
@@ -1808,7 +1800,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         opponents[a].append(b)
         opponents[b].append(a)
 
-    # Calcula MWP/GWP com piso 33,3%
     mwp = {}
     gwp = {}
 
@@ -1824,7 +1815,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             gwp_raw = (s["game_wins"] + 0.5 * s["game_draws"]) / float(gplayed)
             gwp[pid] = floor_333(gwp_raw)
 
-    # Calcula OMW/OGW como média dos oponentes
     omw = {}
     ogw = {}
 
@@ -1839,7 +1829,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
-    # Monta linhas do standings
     out_rows = []
     for pid, s in stats.items():
         out_rows.append({
@@ -1848,12 +1837,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             "player_id": pid,
             "matches_played": s["matches_played"],
             "match_points": s["match_points"],
-            "matches": s["matches_played"],              # ✅ compatibilidade ranking
-            "points": s["match_points"],                 # ✅ compatibilidade ranking
-            "mwp": mwp[pid],                             # ✅ compatibilidade ranking (raw)
-            "omw": omw[pid],                             # ✅ compatibilidade ranking (raw)
-            "gw": gwp[pid],                              # ✅ compatibilidade ranking (raw)
-            "ogw": ogw[pid],                             # ✅ compatibilidade ranking (raw)
+            "matches": s["matches_played"],
+            "points": s["match_points"],
+            "mwp": round(mwp[pid], 6),
+            "omw": round(omw[pid], 6),
+            "gw": round(gwp[pid], 6),
+            "ogw": round(ogw[pid], 6),
             "mwp_percent": pct1(mwp[pid]),
             "game_wins": s["game_wins"],
             "game_losses": s["game_losses"],
@@ -1864,7 +1853,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             "ogw_percent": pct1(ogw[pid]),
         })
 
-    # Ordena: MWP > OMW > GW > OGW > Pontos
     out_rows.sort(
         key=lambda r: (
             r["mwp_percent"],
@@ -1915,7 +1903,6 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             r["omw_percent"], r["ogw_percent"], r["rank_position"], r["last_recalc_at"]
         ])
 
-    # Reconstrução controlada da aba inteira, preservando outros ciclos
     ws_standings.clear()
     ws_standings.append_row(header)
 
@@ -1929,12 +1916,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         for i in range(0, len(rows_to_write), 500):
             ws_standings.append_rows(
                 rows_to_write[i:i + 500],
-                value_input_option="USER_ENTERED"
+                value_input_option="RAW"  # 🔥 CORREÇÃO CRÍTICA
             )
 
     cache_invalidate(ws_standings)
     return out_rows
-
+    
 # =========================================================
 # [BLOCO 4/12 termina aqui]
 # =================================================
@@ -4332,7 +4319,7 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
 
 
 # =========================================================
-# /ranking (REVISADO E AJUSTADO)
+# /ranking (ALINHADO COM /ranking_geral)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(cycle="Número do ciclo", top="Quantidade de jogadores")
@@ -4356,34 +4343,55 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        # 🔥 SANITIZAÇÃO FORTE DOS DADOS (AJUSTADA PARA O PADRÃO DA PLANILHA)
+        K = 3  # mesmo fator do ranking_geral
+
         clean_rows = []
         for r in rows:
             try:
                 matches = safe_int(r.get("matches", 0), 0)
                 points = safe_int(r.get("points", 0), 0)
 
+                mwp = float(r.get("mwp", 0) or 0)
+                omw = float(r.get("omw", 0) or 0)
+                gw = float(r.get("gw", 0) or 0)
+                ogw = float(r.get("ogw", 0) or 0)
+
+                # proteção (caso venha quebrado do sheets)
+                if mwp > 1: mwp /= 100
+                if omw > 1: omw /= 100
+                if gw > 1: gw /= 100
+                if ogw > 1: ogw /= 100
+
+                ppm = (points + K) / (matches + K) if matches > 0 else 0
+
+                peso_pts = matches / (matches + K) if matches > 0 else 0
+                peso_ppm = K / (matches + K) if matches > 0 else 0
+
+                score = points * peso_pts + ppm * peso_ppm
+
                 clean_rows.append({
                     "player_id": str(r.get("player_id", "")).strip(),
                     "matches": matches,
                     "points": points,
-                    "mwp": float(r.get("mwp", 0) or 0),
-                    "omw": float(r.get("omw", 0) or 0),
-                    "gw": float(r.get("gw", 0) or 0),
-                    "ogw": float(r.get("ogw", 0) or 0),
-                    "ppm": (points / matches) if matches > 0 else 0
+                    "score": score,
+                    "ppm": ppm,
+                    "mwp": mwp,
+                    "omw": omw,
+                    "gw": gw,
+                    "ogw": ogw
                 })
             except:
                 continue
 
-        # 🔥 ORDENAÇÃO ALINHADA COM O RECALCULO
+        # 🔥 ORDENAÇÃO CORRETA (ALINHADA COM GERAL)
         clean_rows.sort(
             key=lambda x: (
+                x["score"],
+                x["ppm"],
                 x["mwp"],
                 x["omw"],
                 x["gw"],
-                x["ogw"],
-                x["points"]
+                x["ogw"]
             ),
             reverse=True
         )
@@ -4406,9 +4414,8 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
             ephemeral=False
         )
 
-
 # =========================================================
-# FORMATADOR DE STANDINGS (PADRÃO + NOVAS COLUNAS)
+# FORMATADOR DE STANDINGS (COM SCORE)
 # =========================================================
 def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     top = max(10, min(top, 60))
@@ -4416,40 +4423,25 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out = []
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
 
-    out.append(
-        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
-    )
-    out.append("-" * 95)
+      out.append(
+    f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'SCR':>5} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+)
+    out.append("-" * 110)
 
     for i, r in enumerate(rows[:top], 1):
-        p = r.get("player_id", "")
-        nome = nick_map.get(p, p)
-
-        j = safe_int(r.get("matches", 0), 0)
-        pts = safe_int(r.get("points", 0), 0)
-
-        mwp = float(r.get("mwp", 0) or 0)
-        ppm = float(r.get("ppm", 0) or 0)
-        omw = float(r.get("omw", 0) or 0)
-        gw = float(r.get("gw", 0) or 0)
-        ogw = float(r.get("ogw", 0) or 0)
-
-        # 🔥 PROTEÇÃO CONTRA VALORES JÁ EM %
-        if mwp > 1: mwp = mwp / 100
-        if omw > 1: omw = omw / 100
-        if gw > 1: gw = gw / 100
-        if ogw > 1: ogw = ogw / 100
+        nome = nick_map.get(r["player_id"], r["player_id"])
 
         out.append(
             f"{i:>3} | "
             f"{nome[:20]:<20} | "
-            f"{j:>2} | "
-            f"{pts:>3} | "
-            f"{mwp*100:>5.1f} | "
-            f"{ppm:>5.2f} | "
-            f"{omw*100:>5.1f} | "
-            f"{gw*100:>5.1f} | "
-            f"{ogw*100:>5.1f}"
+            f"{r['matches']:>2} | "
+            f"{r['points']:>3} | "
+            f"{r['score']:>5.2f} | "
+            f"{r['mwp']*100:>5.1f} | "
+            f"{r['ppm']:>5.2f} | "
+            f"{r['omw']*100:>5.1f} | "
+            f"{r['gw']*100:>5.1f} | "
+            f"{r['ogw']*100:>5.1f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
