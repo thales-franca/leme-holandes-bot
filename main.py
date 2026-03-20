@@ -4904,12 +4904,12 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{r['pts']:>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*100:>5.1f} | "
+                f"{r['omw']*1:>5.1f} | "
                 f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*100:>5.1f}"
+                f"{r['ogw']*1:>5.1f}"
             )
 
-        chunk_size = 10
+        chunk_size = 12
         total_rows = len(row_lines)
 
         for start in range(0, total_rows, chunk_size):
@@ -4923,7 +4923,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         legend_lines = []
         legend_lines.append("Legenda:")
         legend_lines.append("J = Número de jogos realizados")
-        legend_lines.append("SCORE = PTS×(J÷(J+3) + {PPM×[3÷(J+3)]}")
+        legend_lines.append("SCORE = {PTS×[J÷(J+3]} + {PPM×[3÷(J+3)]}")
         legend_lines.append("PTS = Pontos totais acumulados")
         legend_lines.append("PPM = Points Per Match")
         legend_lines.append("MWP = Match Win Percentage")
