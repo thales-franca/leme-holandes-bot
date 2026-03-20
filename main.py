@@ -4045,7 +4045,7 @@ def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict
     out.sort(key=lambda x: safe_int(x.get("rank_position", 999999), 999999))
     return out
 
-def _format_standings_text(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
+def _format_standings_text_legacy(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
     top = max(1, min(top, 100))
     lines = [f"🏆 **Ranking do Ciclo {cycle}** | Season {season_id}"]
     lines.append("pos | jogador | pts | OMW | GW | OGW | J")
@@ -4871,7 +4871,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
 
         out.append(
-            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
         out.append("-" * 95)
 
@@ -4882,6 +4882,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
+                f"{r['score']:>3} | "
                 f"{r['pts']:>3} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['ppm']:>5.2f} | "
