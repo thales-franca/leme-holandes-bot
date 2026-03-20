@@ -4880,23 +4880,23 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
         nick_map = get_player_nick_map_fast(sh)
 
-        top = max(8, min(top, 40))
+        top = max(8, min(top, 30))
 
-               # =========================================================
+        # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
-        out = []
-        out.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
+        table_lines = []
+        table_lines.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
 
-        out.append(
+        table_lines.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        out.append("-" * 110)
+        table_lines.append("-" * 110)
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
 
-            out.append(
+            table_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
@@ -4909,22 +4909,22 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{r['ogw']*100:>5.1f}"
             )
 
-        out.append("")
-        out.append("Legenda:")
-        out.append("J = Número de jogos realizados")
-        out.append("SCORE = {PTS×[J÷(J+3)]}+{PPM×[3÷(J+3)]}")
-        out.append("PTS = Pontos totais acumulados")
-        out.append("MWP = Match Win Percentage")
-        out.append("PPM = Points Per Match")
-        out.append("OMW = Opponents Match Win Percentage")
-        out.append("GW = Game Win Percentage")
-        out.append("OGW = Opponents Game Win Percentage")
+        legend_lines = []
+        legend_lines.append("Legenda:")
+        legend_lines.append("J = Número de jogos realizados")
+        legend_lines.append("SCORE = PTS×(J÷(J+3) + {PPM×[3÷(J+3)]}")
+        legend_lines.append("PTS = Pontos totais acumulados")
+        legend_lines.append("MWP = Match Win Percentage")
+        legend_lines.append("PPM = Points Per Match")
+        legend_lines.append("OMW = Opponent's Match Win Percentage")
+        legend_lines.append("GW = Game Win Percentage")
+        legend_lines.append("OGW = Opponent's Game Win Percentage")
 
-        msg = "```txt\n" + "\n".join(out) + "\n```"
-        await interaction.followup.send(msg, ephemeral=False)
+        table_msg = "```txt\n" + "\n".join(table_lines) + "\n```"
+        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
 
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}")
+        await interaction.followup.send(table_msg, ephemeral=False)
+        await interaction.followup.send(legend_msg, ephemeral=False)
         
 # =================================================
 # FIM DO SUB-BLOCO C/7
