@@ -4346,7 +4346,7 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                 ephemeral=False
             )
 
-        # 🔥 SANITIZAÇÃO FORTE DOS DADOS
+        # 🔥 SANITIZAÇÃO + NOVOS CAMPOS
         clean_rows = []
         for r in rows:
             try:
@@ -4356,13 +4356,28 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
                     "points": safe_int(r.get("points", 0), 0),
                     "mwp": float(r.get("mwp", 0) or 0),
                     "ppm": float(r.get("ppm", 0) or 0),
+                    "omw": float(r.get("omw", 0) or 0),
+                    "gw": float(r.get("gw", 0) or 0),
+                    "ogw": float(r.get("ogw", 0) or 0),
                 })
             except:
                 continue
 
-        # 🔥 ORDENAÇÃO GARANTIDA (CASO SHEETS VENHA BAGUNÇADO)
+        # 🔥 SCORE IGUAL AO RANKING GERAL
+        K = 3
+        for r in clean_rows:
+            m = r["matches"]
+            pts = r["points"]
+            ppm = r["ppm"]
+
+            peso_pts = m / (m + K) if m else 0
+            peso_ppm = K / (m + K) if m else 0
+
+            r["score"] = pts * peso_pts + ppm * peso_ppm
+
+        # 🔥 ORDENAÇÃO ATUALIZADA
         clean_rows.sort(
-            key=lambda x: (x["points"], x["ppm"], x["mwp"]),
+            key=lambda x: (x["score"], x["ppm"], x["mwp"]),
             reverse=True
         )
 
@@ -4386,7 +4401,7 @@ async def ranking(interaction: discord.Interaction, cycle: int, top: int = 30):
 
 
 # =========================================================
-# FORMATADOR DE STANDINGS (ALINHADO E ROBUSTO)
+# FORMATADOR DE STANDINGS (PADRÃO + NOVAS COLUNAS)
 # =========================================================
 def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     top = max(10, min(top, 60))
@@ -4395,9 +4410,9 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
 
     out.append(
-        f"{'pos':>3} | {'jogador':<23} | {'J':>2} | {'PTS':>4} | {'MWP':>5} | {'PPM':>5}"
+        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
     )
-    out.append("-" * 60)
+    out.append("-" * 95)
 
     for i, r in enumerate(rows[:top], 1):
         p = r.get("player_id", "")
@@ -4406,30 +4421,25 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
         j = safe_int(r.get("matches", 0), 0)
         pts = safe_int(r.get("points", 0), 0)
 
-        mwp = r.get("mwp", 0) or 0
-        ppm = r.get("ppm", 0) or 0
-
-        # 🔥 GARANTE NUMÉRICO
-        try:
-            mwp = float(mwp)
-        except:
-            mwp = 0
-
-        try:
-            ppm = float(ppm)
-        except:
-            ppm = 0
+        mwp = float(r.get("mwp", 0) or 0)
+        ppm = float(r.get("ppm", 0) or 0)
+        omw = float(r.get("omw", 0) or 0)
+        gw = float(r.get("gw", 0) or 0)
+        ogw = float(r.get("ogw", 0) or 0)
 
         out.append(
             f"{i:>3} | "
-            f"{nome[:23]:<23} | "
+            f"{nome[:20]:<20} | "
             f"{j:>2} | "
-            f"{pts:>4} | "
+            f"{pts:>3} | "
             f"{mwp*100:>5.1f} | "
-            f"{ppm:>5.2f}"
+            f"{ppm:>5.2f} | "
+            f"{omw*100:>5.1f} | "
+            f"{gw*100:>5.1f} | "
+            f"{ogw*100:>5.1f}"
         )
 
-    return "```" + "\n".join(out) + "```"
+    return "```txt\n" + "\n".join(out) + "\n```"
 
 # =================================================
 # FIM DO SUB-BLOCO B/7
