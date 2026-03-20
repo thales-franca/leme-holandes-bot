@@ -4506,7 +4506,8 @@ async def final(interaction: discord.Interaction, cycle: int):
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
-        changed = 0
+        pending_confirmed = 0
+        id_applied = 0
         updates = []
         updated_at = now_iso_utc()
 
@@ -4521,9 +4522,24 @@ async def final(interaction: discord.Interaction, cycle: int):
                 continue
             if safe_int(getc("cycle"), 0) != cycle:
                 continue
-            if str(getc("reported_by_id")).strip():
-                continue
             if not as_bool(getc("active") or "TRUE"):
+                continue
+
+            status = str(getc("confirmed_status") or "").strip().lower()
+            reported_by = str(getc("reported_by_id") or "").strip()
+
+            # 1) confirma tudo que estiver pending
+            if status == "pending":
+                updates.extend([
+                    {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["confirmed"]]},
+                    {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [["AUTO_FINAL"]]},
+                    {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
+                ])
+                pending_confirmed += 1
+                continue
+
+            # 2) aplica 0-0-3 apenas nas matches ainda sem resultado reportado
+            if reported_by:
                 continue
 
             updates.extend([
@@ -4535,19 +4551,23 @@ async def final(interaction: discord.Interaction, cycle: int):
                 {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [["AUTO_FINAL"]]},
                 {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
             ])
-            changed += 1
+            id_applied += 1
 
-        if changed:
+        if updates:
             ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
             invalidate_match_ram_index()
             invalidate_match_ac_index()
 
-        await interaction.followup.send(f"✅ FINAL aplicado. {changed} matches ajustados.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ FINAL aplicado.\n"
+            f"- Pending confirmadas: **{pending_confirmed}**\n"
+            f"- Matches ajustadas com 0-0-3: **{id_applied}**",
+            ephemeral=True
+        )
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
 
 # =========================================================
 # /admin_resultado_editar
@@ -4862,16 +4882,16 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
         top = max(10, min(top, 60))
 
-        # =========================================================
+               # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
         out = []
         out.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
 
         out.append(
-            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        out.append("-" * 95)
+        out.append("-" * 110)
 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
@@ -4880,6 +4900,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
+                f"{r['score']:>5.2f} | "
                 f"{r['pts']:>3} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['ppm']:>5.2f} | "
@@ -4888,12 +4909,18 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{r['ogw']*100:>5.1f}"
             )
 
+        out.append("")
+        out.append("Legenda:")
+        out.append("J = Número de jogos realizados")
+        out.append("SCORE = Critério principal de rankeamento = (PTS×(J÷(J+3)))+((PPM×(3÷(J+K))))")
+        out.append("PTS = Pontos totais acumulados - Não utilizado como critério de rakeamento diretamente")
+        out.append("MWP = Match Win Percentage - primeiro critério de desempate")
+        out.append("PPM = Points Per Match - segundo critério de desempate")
+        out.append("OMW = Opponents Match Win Percentage - terceiro critério de desempate")
+        out.append("GW = Game Win Percentage - quarto critério de desempate")
+        out.append("OGW = Opponents Game Win Percentage - quinto critério de desempate")
+
         msg = "```txt\n" + "\n".join(out) + "\n```"
-
-        await send_followup_chunks(interaction, msg, ephemeral=False)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}")
         
 # =================================================
 # FIM DO SUB-BLOCO C/7
