@@ -4724,13 +4724,16 @@ async def status_ciclo(interaction: discord.Interaction):
 # /ranking_geral (REVISADO + PADRÃO VISUAL DO /ranking)
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
-@app_commands.describe(top="Quantidade de jogadores (10..60)")
-async def ranking_geral(interaction: discord.Interaction, top: int = 30):
+@app_commands.describe(season="Season", top="Quantidade de jogadores (10..60)")
+@app_commands.autocomplete(season=ac_pods_ver_season)
+async def ranking_geral(interaction: discord.Interaction, season: int, top: int = 30):
     await interaction.response.defer()
 
     try:
         sh = open_sheet()
-        season_id = require_current_season(sh)
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(f"❌ A season {season} não existe.")
 
         ws_matches = ensure_worksheet(
             sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30
@@ -4746,11 +4749,13 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         # COLETA DE DADOS
         # =========================================================
         for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
+            if safe_int(r.get("season_id", 0), 0) != season:
                 continue
             if not as_bool(r.get("active", "TRUE")):
                 continue
-            if r.get("confirmed_status") != "confirmed":
+            if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
+                continue
+            if str(r.get("result_type", "")).strip().lower() == "bye":
                 continue
 
             a = str(r.get("player_a_id", "")).strip()
@@ -4764,9 +4769,9 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                     stats[p] = {"pts": 0, "m": 0, "gw": 0, "gl": 0, "gd": 0}
                     opps[p] = []
 
-            a_w = safe_int(r.get("a_games_won", 0))
-            b_w = safe_int(r.get("b_games_won", 0))
-            d = safe_int(r.get("draw_games", 0))
+            a_w = safe_int(r.get("a_games_won", 0), 0)
+            b_w = safe_int(r.get("b_games_won", 0), 0)
+            d = safe_int(r.get("draw_games", 0), 0)
 
             stats[a]["gw"] += a_w
             stats[a]["gl"] += b_w
@@ -4868,7 +4873,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
         # =========================================================
         out = []
-        out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
+        out.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
 
         out.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
