@@ -4858,16 +4858,19 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             })
 
         # =========================================================
-        # ORDENAÇÃO (MANTIDA)
+        # ORDENAÇÃO (REVISADA)
         # =========================================================
         table.sort(
-            key=lambda x: (x["score"], x["ppm"], x["mwp"]),
+            key=lambda x: (
+                x["score"],
+                x["ppm"],
+                x["mwp"],
+                x["omw"],
+                x["gw"],
+                x["ogw"],
+            ),
             reverse=True
         )
-
-        nick_map = get_player_nick_map_fast(sh)
-
-        top = max(10, min(top, 60))
 
         # =========================================================
         # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
