@@ -4871,7 +4871,7 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
         out.append(f"🏆 Ranking Geral — Season {season_id} (Top {top})")
 
         out.append(
-            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'PTS':>3} | {'MWP':>5} | {'PPM':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
         out.append("-" * 95)
 
@@ -4882,7 +4882,6 @@ async def ranking_geral(interaction: discord.Interaction, top: int = 30):
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>3} | "
                 f"{r['pts']:>3} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['ppm']:>5.2f} | "
