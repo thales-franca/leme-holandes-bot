@@ -293,45 +293,6 @@ def cache_invalidate(ws, kind=None):
                 None
             )
 
-
-# =========================================================
-# RAM INDEX
-# =========================================================
-
-_MATCH_RAM_INDEX = None
-_MATCH_RAM_LOCK = threading.Lock()
-
-_PLAYER_RAM_INDEX = None
-_PLAYER_RAM_LOCK = threading.Lock()
-
-_CYCLE_RAM_INDEX = None
-_CYCLE_RAM_LOCK = threading.Lock()
-
-
-def invalidate_match_ram_index():
-
-    global _MATCH_RAM_INDEX
-
-    with _MATCH_RAM_LOCK:
-        _MATCH_RAM_INDEX = None
-
-
-def invalidate_player_ram_index():
-
-    global _PLAYER_RAM_INDEX
-
-    with _PLAYER_RAM_LOCK:
-        _PLAYER_RAM_INDEX = None
-
-
-def invalidate_cycle_ram_index():
-
-    global _CYCLE_RAM_INDEX
-
-    with _CYCLE_RAM_LOCK:
-        _CYCLE_RAM_INDEX = None
-
-
 # =================================================
 # FIM DO SUB-BLOCO A/2
 # =================================================
@@ -1134,28 +1095,6 @@ def get_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int | 
             return i
 
     return None
-
-
-def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int:
-
-    rown = get_deck_row(ws_decks, season_id, cycle, player_id)
-
-    if rown is not None:
-        return rown
-
-    nowb = now_br_str()
-
-    ws_decks.append_row(
-        [str(season_id), str(cycle), str(player_id).strip(), "", "", nowb, nowb],
-        value_input_option="USER_ENTERED"
-    )
-
-    cache_invalidate(ws_decks)
-
-    vals = cached_get_all_values(ws_decks, ttl_seconds=5)
-
-    return len(vals)
-
 
 def get_deck_fields(ws_decks, row: int) -> dict:
 
@@ -3269,17 +3208,6 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
         await interaction.followup.send(f"❌ Erro no /inscrever: {e}", ephemeral=True)
 
 
-# =========================================================
-# Função de checagem de inscrição por ciclo
-# =========================================================
-def player_active_in_cycle(ws_enr, season, cycle, pid):
-    records = ws_enr.get_all_records()
-    for r in records:
-        if str(r.get("discord_id")).strip() == str(pid) and str(r.get("season")) == str(season) and str(r.get("cycle")) == str(cycle):
-            if r.get("status", "").lower() == "active":
-                return True
-    return False
-
 # =================================================
 # FIM DO SUB-BLOCO A/2
 # =================================================
@@ -3292,16 +3220,19 @@ def player_active_in_cycle(ws_enr, season, cycle, pid):
 # =================================================
 
 # =========================================================
-# Helper: resolve matches de player que dropou (FIXED)
+# Helper: resolve matches de player que dropou
 # =========================================================
 def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
     try:
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER)
-        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED)
+        col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
         updates = []
         resolved = 0
+        updated_at = now_iso_utc()
+
+        pid = str(player_id).strip()
 
         for idx in range(1, len(rows)):
             r = rows[idx]
@@ -3316,18 +3247,21 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
             if safe_int(getc("cycle"), 0) != cycle:
                 continue
 
+            if not as_bool(getc("active") or "TRUE"):
+                continue
+
             if str(getc("confirmed_status")).strip().lower() == "confirmed":
                 continue
 
             pa = str(getc("player_a_id")).strip()
             pb = str(getc("player_b_id")).strip()
 
-            if player_id not in (pa, pb):
+            if pid not in (pa, pb):
                 continue
 
             rown = idx + 1
 
-            if pa == player_id:
+            if pa == pid:
                 a_w, b_w = 0, 2
             else:
                 a_w, b_w = 2, 0
@@ -3336,12 +3270,11 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
                 {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[a_w]]},
                 {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[b_w]]},
                 {"range": f"{col_letter(col['draw_games'])}{rown}", "values": [[0]]},
-                {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["AUTO_FORFEIT"]]},
-                {"range": f"{col_letter(col['auto_forfeit'])}{rown}", "values": [["TRUE"]]},
-                {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["CONFIRMED"]]},
+                {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["auto_forfeit"]]},
+                {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["confirmed"]]},
                 {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [["SYSTEM"]]},
                 {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [["SYSTEM"]]},
-                {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_br_str()]]},
+                {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
             ])
 
             resolved += 1
@@ -3350,13 +3283,13 @@ def resolve_drop_matches(sh, season_id: int, cycle: int, player_id: str) -> int:
             ws_matches.batch_update(updates)
             cache_invalidate(ws_matches)
             invalidate_match_ram_index()
+            invalidate_match_ac_index()
 
         return resolved
 
     except Exception as e:
         print("ERRO resolve_drop_matches:", e)
         return 0
-
 
 # =========================================================
 # /drop
