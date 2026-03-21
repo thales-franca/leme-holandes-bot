@@ -4319,7 +4319,7 @@ async def recalcular(interaction: discord.Interaction, cycle: int):
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 # =========================================================
-# /ranking (PADRÃO ALINHADO COM /ranking_geral)
+# /ranking (PADRÃO IDÊNTICO AO /ranking_geral, FILTRADO POR CICLO)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(season="Season", cycle="Número do ciclo", top="Quantidade de jogadores")
@@ -4349,14 +4349,15 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
             )
 
         K = 3
-        clean_rows = []
+        table = []
 
         for r in rows:
             try:
-                matches = safe_int(r.get("matches_played", r.get("matches", 0)), 0)
-                points = safe_int(r.get("match_points", r.get("points", 0)), 0)
+                m = safe_int(r.get("matches_played", 0), 0)
+                pts = safe_int(r.get("match_points", 0), 0)
 
                 mwp = float(r.get("mwp", 0) or 0)
+                ppm = (pts + K) / (m + K) if m else 0
                 omw = float(r.get("omw", 0) or 0)
                 gw = float(r.get("gw", 0) or 0)
                 ogw = float(r.get("ogw", 0) or 0)
@@ -4370,31 +4371,28 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 if ogw > 1:
                     ogw /= 100
 
-                ppm = (points + K) / (matches + K) if matches > 0 else 0
+                peso_pts = m / (m + K) if m else 0
+                peso_ppm = K / (m + K) if m else 0
+                score = pts * peso_pts + ppm * peso_ppm
 
-                peso_pts = matches / (matches + K) if matches > 0 else 0
-                peso_ppm = K / (matches + K) if matches > 0 else 0
-
-                score = points * peso_pts + ppm * peso_ppm
-
-                clean_rows.append({
-                    "player_id": str(r.get("player_id", "")).strip(),
-                    "matches": matches,
-                    "points": points,
+                table.append({
+                    "p": str(r.get("player_id", "")).strip(),
                     "score": score,
-                    "ppm": ppm,
+                    "pts": pts,
                     "mwp": mwp,
+                    "ppm": ppm,
                     "omw": omw,
                     "gw": gw,
-                    "ogw": ogw
+                    "ogw": ogw,
+                    "j": m
                 })
             except Exception:
                 continue
 
         # =========================================================
-        # ORDENAÇÃO (MESMO CRITÉRIO DO RANKING GERAL)
+        # ORDENAÇÃO (IDÊNTICA AO /ranking_geral)
         # =========================================================
-        clean_rows.sort(
+        table.sort(
             key=lambda x: (
                 x["score"],
                 x["ppm"],
@@ -4410,6 +4408,9 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
         top = max(8, min(top, 60))
 
+        # =========================================================
+        # FORMATAÇÃO (IDÊNTICA AO /ranking_geral)
+        # =========================================================
         header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
@@ -4418,20 +4419,20 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         header_lines.append("-" * 110)
 
         row_lines = []
-        for i, r in enumerate(clean_rows[:top], 1):
-            nome = nick_map.get(str(r["player_id"]), str(r["player_id"]))
+        for i, r in enumerate(table[:top], 1):
+            nome = nick_map.get(str(r["p"]), str(r["p"]))
 
             row_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
-                f"{r['matches']:>2} | "
+                f"{r['j']:>2} | "
                 f"{r['score']:>5.2f} | "
-                f"{r['points']:>3} | "
+                f"{r['pts']:>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*10:>5.1f} | "
+                f"{r['omw']*100:>5.1f} | "
                 f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*10:>5.1f}"
+                f"{r['ogw']*100:>5.1f}"
             )
 
         chunk_size = 12
@@ -4448,38 +4449,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         legend_lines = []
         legend_lines.append("Legenda:")
         legend_lines.append("J = Número de jogos realizados")
-        legend_lines.append("SCORE = PTS×(J÷(J+3)) + {PPM×[3÷(J+3)]}")
-        legend_lines.append("PTS = Pontos totais acumulados")
-        legend_lines.append("PPM = Points Per Match")
-        legend_lines.append("MWP = Match Win Percentage")
-        legend_lines.append("OMW = Opponent's Match Win Percentage")
-        legend_lines.append("GW = Game Win Percentage")
-        legend_lines.append("OGW = Opponent's Game Win Percentage")
-
-        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
-        await interaction.followup.send(legend_msg, ephemeral=False)
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /ranking: {e}",
-            ephemeral=False
-        )
-
-        chunk_size = 12
-        total_rows = len(row_lines)
-
-        for start in range(0, total_rows, chunk_size):
-            part_lines = []
-            part_lines.extend(header_lines)
-            part_lines.extend(row_lines[start:start + chunk_size])
-
-            part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
-            await interaction.followup.send(part_msg, ephemeral=False)
-
-        legend_lines = []
-        legend_lines.append("Legenda:")
-        legend_lines.append("J = Número de jogos realizados")
-        legend_lines.append("SCORE = PTS×(J÷(J+3)) + {PPM×[3÷(J+3)]}")
+        legend_lines.append("SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}")
         legend_lines.append("PTS = Pontos totais acumulados")
         legend_lines.append("PPM = Points Per Match")
         legend_lines.append("MWP = Match Win Percentage")
@@ -4501,13 +4471,10 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 # FORMATADOR DE STANDINGS
 # =========================================================
 def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
-    def pct(v):
-        try:
-            x = float(v or 0)
-        except Exception:
-            x = 0.0
-        return x * 100 if x <= 1 else x
-
+    """
+    Mantido apenas por compatibilidade.
+    O /ranking atualizado não depende mais deste formatador.
+    """
     top = max(8, min(top, 60))
 
     out = []
@@ -4521,26 +4488,17 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
         p = r.get("player_id", "")
         nome = nick_map.get(p, p)
 
-        j = safe_int(r.get("matches", 0), 0)
-        pts = safe_int(r.get("points", 0), 0)
-        score = float(r.get("score", 0) or 0)
-        ppm = float(r.get("ppm", 0) or 0)
-        mwp = pct(r.get("mwp", 0))
-        omw = pct(r.get("omw", 0))
-        gw = pct(r.get("gw", 0))
-        ogw = pct(r.get("ogw", 0))
-
         out.append(
             f"{i:>3} | "
             f"{nome[:20]:<20} | "
-            f"{j:>2} | "
-            f"{score:>5.2f} | "
-            f"{pts:>3} | "
-            f"{ppm:>5.2f} | "
-            f"{mwp:>5.1f} | "
-            f"{omw:>5.1f} | "
-            f"{gw:>5.1f} | "
-            f"{ogw:>5.1f}"
+            f"{safe_int(r.get('j', r.get('matches', 0)), 0):>2} | "
+            f"{float(r.get('score', 0) or 0):>5.2f} | "
+            f"{safe_int(r.get('pts', r.get('points', 0)), 0):>3} | "
+            f"{float(r.get('ppm', 0) or 0):>5.2f} | "
+            f"{float(r.get('mwp', 0) or 0)*100:>5.1f} | "
+            f"{float(r.get('omw', 0) or 0)*10:>5.1f} | "
+            f"{float(r.get('gw', 0) or 0)*100:>5.1f} | "
+            f"{float(r.get('ogw', 0) or 0)*10:>5.1f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
