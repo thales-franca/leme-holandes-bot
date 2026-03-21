@@ -4410,24 +4410,23 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
         top = max(8, min(top, 60))
 
-        header_lines = []
+               header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
-        
         header_lines.append("-" * 110)
 
         row_lines = []
-        for i, r in enumerate(table[:top], 1):
-            nome = nick_map.get(str(r["p"]), str(r["p"]))
+        for i, r in enumerate(clean_rows[:top], 1):
+            nome = nick_map.get(str(r["player_id"]), str(r["player_id"]))
 
             row_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<20} | "
-                f"{r['j']:>2} | "
+                f"{r['matches']:>2} | "
                 f"{r['score']:>5.2f} | "
-                f"{r['pts']:>3} | "
+                f"{r['points']:>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['omw']*10:>5.1f} | "
