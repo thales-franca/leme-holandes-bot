@@ -1,4 +1,4 @@
-# =================================================
+    # =================================================
 # BLOCO ORIGINAL: BLOCO 1/12
 # SUB-BLOCO: A/2
 # REVISÃO FINAL — cache otimizado + RAM index + locks globais mais leves
@@ -4924,8 +4924,8 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             game_draws = safe_int(r.get("game_draws", 0), 0)
             games_played = safe_int(r.get("games_played", 0), 0)
 
-            omw_percent = sheet_float(r.get("omw_percent", 0), 0.0)
-            ogw_percent = sheet_float(r.get("ogw_percent", 0), 0.0)
+            omw_raw = sheet_float(r.get("omw", 0), 0.0)
+            ogw_raw = sheet_float(r.get("ogw", 0), 0.0)
 
             stats[p]["pts"] += match_points
             stats[p]["m"] += matches_played
@@ -4936,8 +4936,8 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
             # média ponderada pelos matches do ciclo
             if matches_played > 0:
-                stats[p]["omw_weighted_sum"] += omw_percent * matches_played
-                stats[p]["ogw_weighted_sum"] += ogw_percent * matches_played
+                stats[p]["omw_weighted_sum"] += omw_raw * matches_played
+                stats[p]["ogw_weighted_sum"] += ogw_raw * matches_played
                 stats[p]["omw_weight"] += matches_played
                 stats[p]["ogw_weight"] += matches_played
 
@@ -4964,12 +4964,12 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             gw = max(raw_gw, 0.333)
 
             if s["omw_weight"] > 0:
-                omw = max((s["omw_weighted_sum"] / s["omw_weight"]) / 100.0, 0.333)
+                omw = max(s["omw_weighted_sum"] / s["omw_weight"], 0.333)
             else:
                 omw = 0.333
 
             if s["ogw_weight"] > 0:
-                ogw = max((s["ogw_weighted_sum"] / s["ogw_weight"]) / 100.0, 0.333)
+                ogw = max(s["ogw_weighted_sum"] / s["ogw_weight"], 0.333)
             else:
                 ogw = 0.333
 
