@@ -7152,6 +7152,14 @@ def get_cycle_choices_fast(
 
     return out
 
+# =========================================================
+# LOCKS GLOBAIS — RAM INDEX
+# =========================================================
+_PLAYER_RAM_INDEX = None
+_PLAYER_RAM_LOCK = threading.Lock()
+
+_CYCLE_RAM_INDEX = None
+_CYCLE_RAM_LOCK = threading.Lock()
 
 # =========================================================
 # CACHE DE ÍNDICE — SEASONS
