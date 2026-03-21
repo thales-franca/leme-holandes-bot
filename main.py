@@ -4888,18 +4888,31 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         )
         ensure_sheet_columns(ws_standings, STANDINGS_REQUIRED)
 
-        rows = cached_get_all_records(ws_standings, ttl_seconds=10)
+        vals = cached_get_all_values(ws_standings, ttl_seconds=10)
+
+        if len(vals) <= 1:
+            return await interaction.followup.send("Sem standings para esta season.")
+
+        header = vals[0]
+        idx = {name: i for i, name in enumerate(header)}
 
         stats = {}
 
         # =========================================================
         # COLETA DE DADOS DA ABA STANDINGS (TODOS OS CICLOS DA SEASON)
         # =========================================================
-        for r in rows:
-            if safe_int(r.get("season_id", 0), 0) != season:
+
+        for row in vals[1:]:
+            def getv(name: str, default=""):
+                i = idx.get(name, -1)
+                if i < 0 or i >= len(row):
+                    return default
+                return row[i]
+
+            if safe_int(getv("season_id", 0), 0) != season:
                 continue
 
-            p = str(r.get("player_id", "")).strip()
+            p = str(getv("player_id", "")).strip()
             if not p:
                 continue
 
@@ -4917,15 +4930,15 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                     "ogw_weight": 0,
                 }
 
-            matches_played = safe_int(r.get("matches_played", 0), 0)
-            match_points = safe_int(r.get("match_points", 0), 0)
-            game_wins = safe_int(r.get("game_wins", 0), 0)
-            game_losses = safe_int(r.get("game_losses", 0), 0)
-            game_draws = safe_int(r.get("game_draws", 0), 0)
-            games_played = safe_int(r.get("games_played", 0), 0)
+            matches_played = safe_int(getv("matches_played", 0), 0)
+            match_points = safe_int(getv("match_points", 0), 0)
+            game_wins = safe_int(getv("game_wins", 0), 0)
+            game_losses = safe_int(getv("game_losses", 0), 0)
+            game_draws = safe_int(getv("game_draws", 0), 0)
+            games_played = safe_int(getv("games_played", 0), 0)
 
-            omw_raw = sheet_float(r.get("omw", 0), 0.0)
-            ogw_raw = sheet_float(r.get("ogw", 0), 0.0)
+            omw_raw = sheet_float(getv("omw", 0), 0.0)
+            ogw_raw = sheet_float(getv("ogw", 0), 0.0)
 
             stats[p]["pts"] += match_points
             stats[p]["m"] += matches_played
@@ -4933,6 +4946,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             stats[p]["glosses"] += game_losses
             stats[p]["gdraws"] += game_draws
             stats[p]["gplayed"] += games_played
+
 
             # média ponderada pelos matches do ciclo
             if matches_played > 0:
