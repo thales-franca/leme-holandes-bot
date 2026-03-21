@@ -4410,7 +4410,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
         top = max(8, min(top, 60))
 
-               header_lines = []
+        header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
             f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
@@ -4433,6 +4433,37 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 f"{r['gw']*100:>5.1f} | "
                 f"{r['ogw']*10:>5.1f}"
             )
+
+        chunk_size = 12
+        total_rows = len(row_lines)
+
+        for start in range(0, total_rows, chunk_size):
+            part_lines = []
+            part_lines.extend(header_lines)
+            part_lines.extend(row_lines[start:start + chunk_size])
+
+            part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
+            await interaction.followup.send(part_msg, ephemeral=False)
+
+        legend_lines = []
+        legend_lines.append("Legenda:")
+        legend_lines.append("J = Número de jogos realizados")
+        legend_lines.append("SCORE = PTS×(J÷(J+3)) + {PPM×[3÷(J+3)]}")
+        legend_lines.append("PTS = Pontos totais acumulados")
+        legend_lines.append("PPM = Points Per Match")
+        legend_lines.append("MWP = Match Win Percentage")
+        legend_lines.append("OMW = Opponent's Match Win Percentage")
+        legend_lines.append("GW = Game Win Percentage")
+        legend_lines.append("OGW = Opponent's Game Win Percentage")
+
+        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
+        await interaction.followup.send(legend_msg, ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /ranking: {e}",
+            ephemeral=False
+        )
 
         chunk_size = 12
         total_rows = len(row_lines)
