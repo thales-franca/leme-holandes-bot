@@ -621,11 +621,14 @@ MATCHES_REQUIRED_COLS = [
 MATCHES_HEADER = MATCHES_REQUIRED_COLS[:]
 
 STANDINGS_HEADER = [
-    "season_id","cycle","player_id",
-    "matches_played","match_points","mwp_percent",
-    "game_wins","game_losses","game_draws","games_played","gw_percent",
-    "omw_percent","ogw_percent",
-    "rank_position","last_recalc_at"
+    "season_id", "cycle", "player_id",
+    "matches_played", "match_points",
+    "matches", "points",
+    "mwp", "omw", "gw", "ogw",
+    "mwp_percent",
+    "game_wins", "game_losses", "game_draws", "games_played", "gw_percent",
+    "omw_percent", "ogw_percent",
+    "rank_position", "last_recalc_at"
 ]
 
 STANDINGS_REQUIRED = STANDINGS_HEADER[:]
@@ -1513,7 +1516,7 @@ async def ac_season_open(interaction: discord.Interaction, current: str):
             sid = str(r.get("season_id", "")).strip()
             status = str(r.get("status", "")).strip().lower()
 
-            if not sid or status != "active":
+            if not sid or status != "open":
                 continue
 
             if q and q not in sid:
@@ -1621,20 +1624,37 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 4/12
 # SUB-BLOCO: ÚNICA
-# REVISÃO: correção de persistência no Sheets (RAW) e proteção de percentuais
+# REVISÃO V10: ordenação persistida alinhada à regra oficial da liga
 # =================================================
 
 def recalculate_cycle(sh, season_id: int, cycle: int):
     """
-    Recalcula o ranking do ciclo (SEMPRE do zero):
-    - Piso 33,3% primeiro (MWP/GWP)
-    - Ranking: MWP% > OMW% > GW% > OGW% > Pontos
+    Recalcula o ranking do ciclo (SEMPRE do zero), persistindo o Standing
+    no padrão oficial atual da liga.
+
+    Critério oficial de ordenação:
+    1. score
+    2. ppm
+    3. mwp
+    4. omw
+    5. gw
+    6. ogw
+
+    Regras base:
     - Match points: Win=3, Draw=1, Loss=0 (por match)
-    - GWP: (W + 0.5*D) / GamesPlayed (com piso)
-    - OMW: média do MWP (já com piso) dos oponentes enfrentados
-    - OGW: média do GWP (já com piso) dos oponentes enfrentados
+    - MWP com piso de 33,3%
+    - GWP com piso de 33,3%
+    - OMW = média do MWP dos oponentes enfrentados
+    - OGW = média do GWP dos oponentes enfrentados
     - Considera apenas matches:
       active=TRUE e confirmed_status=confirmed e result_type != bye
+
+    Score oficial:
+    - K = 3
+    - ppm = (pts + K) / (matches + K)
+    - peso_pts = matches / (matches + K)
+    - peso_ppm = K / (matches + K)
+    - score = pts * peso_pts + ppm * peso_ppm
     """
     ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
     ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
@@ -1679,12 +1699,18 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for pid in all_player_ids:
         ensure(pid)
 
-    valid = []
     try:
-        matches_rows = get_matches_for_cycle_fast(sh, season_id=season_id, cycle=cycle, only_active=True)
+        matches_rows = get_matches_for_cycle_fast(
+            sh,
+            season_id=season_id,
+            cycle=cycle,
+            only_active=True
+        )
     except Exception:
         ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         matches_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+    valid = []
 
     for r in matches_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
@@ -1745,6 +1771,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     for pid, s in stats.items():
         mp = s["match_points"]
         mplayed = s["matches_played"]
+
         mwp[pid] = (1 / 3) if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
 
         gplayed = s["games_played"]
@@ -1768,25 +1795,44 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             omw[pid] = sum(omw_vals) / len(omw_vals)
             ogw[pid] = sum(ogw_vals) / len(ogw_vals)
 
+    K = 3
     out_rows = []
+
     for pid, s in stats.items():
+        matches_played = s["matches_played"]
+        match_points = s["match_points"]
+
+        ppm = (match_points + K) / (matches_played + K)
+        peso_pts = matches_played / (matches_played + K)
+        peso_ppm = K / (matches_played + K)
+        score = (match_points * peso_pts) + (ppm * peso_ppm)
+
         out_rows.append({
             "season_id": season_id,
             "cycle": cycle,
             "player_id": pid,
-            "matches_played": s["matches_played"],
-            "match_points": s["match_points"],
-            "matches": s["matches_played"],
-            "points": s["match_points"],
+
+            "matches_played": matches_played,
+            "match_points": match_points,
+
+            "matches": matches_played,
+            "points": match_points,
+
+            "ppm": round(ppm, 6),
+            "score": round(score, 6),
+
             "mwp": round(mwp[pid], 6),
             "omw": round(omw[pid], 6),
             "gw": round(gwp[pid], 6),
             "ogw": round(ogw[pid], 6),
+
             "mwp_percent": pct1(mwp[pid]),
+
             "game_wins": s["game_wins"],
             "game_losses": s["game_losses"],
             "game_draws": s["game_draws"],
             "games_played": s["games_played"],
+
             "gw_percent": pct1(gwp[pid]),
             "omw_percent": pct1(omw[pid]),
             "ogw_percent": pct1(ogw[pid]),
@@ -1794,11 +1840,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
     out_rows.sort(
         key=lambda r: (
-            r["mwp_percent"],
-            r["omw_percent"],
-            r["gw_percent"],
-            r["ogw_percent"],
-            r["match_points"],
+            r["score"],
+            r["ppm"],
+            r["mwp"],
+            r["omw"],
+            r["gw"],
+            r["ogw"],
         ),
         reverse=True
     )
@@ -1809,11 +1856,14 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         r["last_recalc_at"] = ts
 
     header = [
-        "season_id", "cycle", "player_id", "matches_played", "match_points",
-        "matches", "points", "mwp", "omw", "gw", "ogw",
+        "season_id", "cycle", "player_id",
+        "matches_played", "match_points",
+        "matches", "points",
+        "mwp", "omw", "gw", "ogw",
         "mwp_percent",
         "game_wins", "game_losses", "game_draws", "games_played", "gw_percent",
-        "omw_percent", "ogw_percent", "rank_position", "last_recalc_at"
+        "omw_percent", "ogw_percent",
+        "rank_position", "last_recalc_at"
     ]
 
     existing = cached_get_all_values(ws_standings, ttl_seconds=10)
@@ -1836,10 +1886,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         values.append([
             r["season_id"], r["cycle"], r["player_id"],
             r["matches_played"], r["match_points"],
-            r["matches"], r["points"], r["mwp"], r["omw"], r["gw"], r["ogw"],
+            r["matches"], r["points"],
+            r["mwp"], r["omw"], r["gw"], r["ogw"],
             r["mwp_percent"],
             r["game_wins"], r["game_losses"], r["game_draws"], r["games_played"], r["gw_percent"],
-            r["omw_percent"], r["ogw_percent"], r["rank_position"], r["last_recalc_at"]
+            r["omw_percent"], r["ogw_percent"],
+            r["rank_position"], r["last_recalc_at"]
         ])
 
     ws_standings.clear()
@@ -1855,7 +1907,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         for i in range(0, len(rows_to_write), 500):
             ws_standings.append_rows(
                 rows_to_write[i:i + 500],
-                value_input_option="RAW"  # 🔥 CORREÇÃO CRÍTICA
+                value_input_option="RAW"
             )
 
     cache_invalidate(ws_standings)
@@ -4539,7 +4591,7 @@ async def final(interaction: discord.Interaction, cycle: int):
 
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
         ws_pods = ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
-        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_REQUIRED_COLS, rows=50000, cols=30)
+        ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
 
         _, end_br, _, _ = compute_cycle_start_deadline_br(season_id, cycle, ws_pods, ws_cycles)
 
@@ -4606,10 +4658,14 @@ async def final(interaction: discord.Interaction, cycle: int):
             invalidate_match_ram_index()
             invalidate_match_ac_index()
 
+        # recálculo obrigatório após alterações
+        rows_recalc = recalculate_cycle(sh, season_id, cycle)
+
         await interaction.followup.send(
             f"✅ FINAL aplicado.\n"
             f"- Pending confirmadas: **{pending_confirmed}**\n"
-            f"- Matches ajustadas com 0-0-3: **{id_applied}**",
+            f"- Matches ajustadas com 0-0-3: **{id_applied}**\n"
+            f"- Linhas standings recalculadas: **{len(rows_recalc)}**",
             ephemeral=True
         )
 
@@ -4645,11 +4701,16 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
         found = None
+        season_id = 0
+        cycle = 0
+
         for idx in range(1, len(rows)):
             r = rows[idx]
             val = r[col["match_id"]] if col["match_id"] < len(r) else ""
             if str(val).strip() == match_id:
                 found = idx + 1
+                season_id = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+                cycle = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
                 break
 
         if not found:
@@ -4671,7 +4732,15 @@ async def admin_resultado_editar(interaction: discord.Interaction, match_id: str
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
-        await interaction.followup.send(f"✅ Resultado editado: **{placar}**", ephemeral=True)
+        rows_recalc = []
+        if season_id > 0 and cycle > 0:
+            rows_recalc = recalculate_cycle(sh, season_id, cycle)
+
+        await interaction.followup.send(
+            f"✅ Resultado editado: **{placar}**\n"
+            f"- Linhas standings recalculadas: **{len(rows_recalc)}**",
+            ephemeral=True
+        )
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
@@ -4693,7 +4762,8 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         found = None
-        match_row = get_match_by_id_fast(sh, match_id)
+        season_id = 0
+        cycle = 0
 
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
         for idx in range(1, len(rows)):
@@ -4701,6 +4771,8 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
             val = r[col["match_id"]] if col["match_id"] < len(r) else ""
             if str(val).strip() == match_id:
                 found = idx + 1
+                season_id = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+                cycle = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
                 break
 
         if not found:
@@ -4719,16 +4791,24 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
             {"range": f"{col_letter(col['auto_confirm_at'])}{found}", "values": [[""]]},
             {"range": f"{col_letter(col['updated_at'])}{found}", "values": [[updated_at]]},
         ])
+
         cache_invalidate(ws_matches)
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
-        await interaction.followup.send("✅ Resultado cancelado. Match reaberto.", ephemeral=True)
+        rows_recalc = []
+        if season_id > 0 and cycle > 0:
+            rows_recalc = recalculate_cycle(sh, season_id, cycle)
+
+        await interaction.followup.send(
+            f"✅ Resultado cancelado. Match reaberto.\n"
+            f"- Linhas standings recalculadas: **{len(rows_recalc)}**",
+            ephemeral=True
+        )
         await log_admin(interaction, f"admin_resultado_cancelar {match_id}")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /admin_resultado_cancelar: {e}", ephemeral=True)
-
 
 # =========================================================
 # /status_ciclo
@@ -4789,6 +4869,7 @@ async def status_ciclo(interaction: discord.Interaction):
 
 # =========================================================
 # /ranking_geral (REVISADO + PADRÃO VISUAL DO /ranking)
+# REVISÃO V10: parsing robusto + percentuais corrigidos
 # =========================================================
 @client.tree.command(name="ranking_geral", description="Mostra ranking geral da season.")
 @app_commands.describe(season="Season", top="Quantidade de jogadores (8..60)")
@@ -4843,8 +4924,8 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             game_draws = safe_int(r.get("game_draws", 0), 0)
             games_played = safe_int(r.get("games_played", 0), 0)
 
-            omw_percent = float(r.get("omw_percent", 0) or 0)
-            ogw_percent = float(r.get("ogw_percent", 0) or 0)
+            omw_percent = sheet_float(r.get("omw_percent", 0), 0.0)
+            ogw_percent = sheet_float(r.get("ogw_percent", 0), 0.0)
 
             stats[p]["pts"] += match_points
             stats[p]["m"] += matches_played
@@ -4867,7 +4948,6 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         # CÁLCULOS
         # =========================================================
         K = 3
-
         table = []
 
         for p, s in stats.items():
@@ -4911,7 +4991,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             })
 
         # =========================================================
-        # ORDENAÇÃO (REVISADA)
+        # ORDENAÇÃO OFICIAL
         # =========================================================
         table.sort(
             key=lambda x: (
@@ -4930,7 +5010,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         top = max(8, min(top, 30))
 
         # =========================================================
-        # FORMATAÇÃO (PADRÃO CORRIGIDO DISCORD)
+        # FORMATAÇÃO
         # =========================================================
         header_lines = []
         header_lines.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
@@ -4951,9 +5031,9 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{r['pts']:>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*10:>5.1f} | "
+                f"{r['omw']*100:>5.1f} | "
                 f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*10:>5.1f}"
+                f"{r['ogw']*100:>5.1f}"
             )
 
         chunk_size = 12
@@ -4970,7 +5050,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         legend_lines = []
         legend_lines.append("Legenda:")
         legend_lines.append("J = Número de jogos realizados")
-        legend_lines.append("SCORE = {PTS×[J÷(J+3]} + {PPM×[3÷(J+3)]}")
+        legend_lines.append("SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}")
         legend_lines.append("PTS = Pontos totais acumulados")
         legend_lines.append("PPM = Points Per Match")
         legend_lines.append("MWP = Match Win Percentage")
@@ -5010,7 +5090,7 @@ def _next_season_id(sh) -> int:
     return mx + 1 if mx > 0 else 1
 
 
-@client.tree.command(name="startseason", description="(OWNER) Abre uma nova season e define como ativa.")
+@client.tree.command(name="startseason", description="(OWNER) Abre uma nova season e define como season atual.")
 @app_commands.describe(nome="Nome opcional da season (ex: Season 3)")
 async def startseason(interaction: discord.Interaction, nome: str = ""):
     if not await is_owner_only(interaction):
@@ -5043,7 +5123,7 @@ async def startseason(interaction: discord.Interaction, nome: str = ""):
         await interaction.followup.send(f"❌ Erro no /startseason: {e}", ephemeral=True)
 
 
-@client.tree.command(name="closeseason", description="(OWNER) Fecha a season atual (desativa).")
+@client.tree.command(name="closeseason", description="(OWNER) Fecha a season atual.")
 async def closeseason(interaction: discord.Interaction):
     if not await is_owner_only(interaction):
         return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
