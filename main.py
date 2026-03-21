@@ -4034,17 +4034,94 @@ def require_current_season(sh) -> int:
 # Helpers de standings/ranking
 # =========================================================
 
+def sheet_float(v, default=0.0):
+    try:
+        s = str(v).strip()
+        if not s:
+            return default
+
+        s = s.replace(" ", "")
+
+        # Formato BR: 1.234,56
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+
+        return float(s)
+    except Exception:
+        return default
+
 def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict]:
-    rows = cached_get_all_records(ws_standings, ttl_seconds=10)
+    vals = cached_get_all_values(ws_standings, ttl_seconds=10)
+
+    if len(vals) <= 1:
+        return []
+
+    header = vals[0]
+    idx = {name: i for i, name in enumerate(header)}
+
     out = []
-    for r in rows:
-        if safe_int(r.get("season_id", 0), 0) != season_id:
+
+    for row in vals[1:]:
+        def getv(name: str, default=""):
+            i = idx.get(name, -1)
+            if i < 0 or i >= len(row):
+                return default
+            return row[i]
+
+        r_season = safe_int(getv("season_id", 0), 0)
+        r_cycle = safe_int(getv("cycle", 0), 0)
+
+        if r_season != season_id:
             continue
-        if safe_int(r.get("cycle", 0), 0) != cycle:
+        if r_cycle != cycle:
             continue
-        out.append(r)
+
+        matches_played = safe_int(getv("matches_played", 0), 0)
+        match_points = safe_int(getv("match_points", 0), 0)
+
+        item = {
+            "season_id": r_season,
+            "cycle": r_cycle,
+            "player_id": str(getv("player_id", "")).strip(),
+
+            "matches_played": matches_played,
+            "match_points": match_points,
+
+            # aliases para compatibilidade
+            "matches": matches_played,
+            "points": match_points,
+
+            # frações normalizadas
+            "mwp": sheet_float(getv("mwp", 0), 0.0),
+            "omw": sheet_float(getv("omw", 0), 0.0),
+            "gw": sheet_float(getv("gw", 0), 0.0),
+            "ogw": sheet_float(getv("ogw", 0), 0.0),
+
+            # percentuais prontos da planilha
+            "mwp_percent": sheet_float(getv("mwp_percent", 0), 0.0),
+            "gw_percent": sheet_float(getv("gw_percent", 0), 0.0),
+            "omw_percent": sheet_float(getv("omw_percent", 0), 0.0),
+            "ogw_percent": sheet_float(getv("ogw_percent", 0), 0.0),
+
+            "game_wins": safe_int(getv("game_wins", 0), 0),
+            "game_losses": safe_int(getv("game_losses", 0), 0),
+            "game_draws": safe_int(getv("game_draws", 0), 0),
+            "games_played": safe_int(getv("games_played", 0), 0),
+
+            "rank_position": safe_int(getv("rank_position", 999999), 999999),
+            "last_recalc_at": str(getv("last_recalc_at", "")).strip(),
+        }
+
+        out.append(item)
+
     out.sort(key=lambda x: safe_int(x.get("rank_position", 999999), 999999))
     return out
+
 
 def _format_standings_text_legacy(rows: list[dict], nick_map: dict[str, str], season_id: int, cycle: int, top: int = 30) -> str:
     top = max(1, min(top, 100))
@@ -4065,6 +4142,7 @@ def _format_standings_text_legacy(rows: list[dict], nick_map: dict[str, str], se
         )
     return "\n".join(lines)
 
+
 def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -> bool:
     for r in cached_get_all_records(ws_pods, ttl_seconds=10):
         if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
@@ -4073,7 +4151,6 @@ def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -
         if safe_int(r.get("season_id", 0), 0) == season_id and safe_int(r.get("cycle", 0), 0) == cycle:
             return True
     return False
-
 
 # =========================================================
 # /forcesync
@@ -4356,20 +4433,12 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 m = safe_int(r.get("matches_played", 0), 0)
                 pts = safe_int(r.get("match_points", 0), 0)
 
-                mwp = float(r.get("mwp", 0) or 0)
-                ppm = (pts + K) / (m + K) if m else 0
-                omw = float(r.get("omw", 0) or 0)
-                gw = float(r.get("gw", 0) or 0)
-                ogw = float(r.get("ogw", 0) or 0)
+                mwp = sheet_float(r.get("mwp", 0), 0.0)
+                omw = sheet_float(r.get("omw", 0), 0.0)
+                gw = sheet_float(r.get("gw", 0), 0.0)
+                ogw = sheet_float(r.get("ogw", 0), 0.0)
 
-                if mwp > 1:
-                    mwp /= 100
-                if omw > 1:
-                    omw /= 100
-                if gw > 1:
-                    gw /= 100
-                if ogw > 1:
-                    ogw /= 100
+                ppm = (pts + K) / (m + K) if m else 0
 
                 peso_pts = m / (m + K) if m else 0
                 peso_ppm = K / (m + K) if m else 0
@@ -4384,7 +4453,11 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                     "omw": omw,
                     "gw": gw,
                     "ogw": ogw,
-                    "j": m
+                    "j": m,
+                    "mwp_percent": sheet_float(r.get("mwp_percent", 0), 0.0),
+                    "omw_percent": sheet_float(r.get("omw_percent", 0), 0.0),
+                    "gw_percent": sheet_float(r.get("gw_percent", 0), 0.0),
+                    "ogw_percent": sheet_float(r.get("ogw_percent", 0), 0.0),
                 })
             except Exception:
                 continue
@@ -4408,9 +4481,6 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
         top = max(8, min(top, 60))
 
-        # =========================================================
-        # FORMATAÇÃO (IDÊNTICA AO /ranking_geral)
-        # =========================================================
         header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
@@ -4429,10 +4499,10 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 f"{r['score']:>5.2f} | "
                 f"{r['pts']:>3} | "
                 f"{r['ppm']:>5.2f} | "
-                f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*100:>5.1f} | "
-                f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*100:>5.1f}"
+                f"{r['mwp_percent']:>5.1f} | "
+                f"{r['omw_percent']:>5.1f} | "
+                f"{r['gw_percent']:>5.1f} | "
+                f"{r['ogw_percent']:>5.1f}"
             )
 
         chunk_size = 12
@@ -4491,14 +4561,14 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
         out.append(
             f"{i:>3} | "
             f"{nome[:20]:<20} | "
-            f"{safe_int(r.get('j', r.get('matches', 0)), 0):>2} | "
+            f"{safe_int(r.get('j', r.get('matches_played', 0)), 0):>2} | "
             f"{float(r.get('score', 0) or 0):>5.2f} | "
-            f"{safe_int(r.get('pts', r.get('points', 0)), 0):>3} | "
+            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>3} | "
             f"{float(r.get('ppm', 0) or 0):>5.2f} | "
-            f"{float(r.get('mwp', 0) or 0)*100:>5.1f} | "
-            f"{float(r.get('omw', 0) or 0)*10:>5.1f} | "
-            f"{float(r.get('gw', 0) or 0)*100:>5.1f} | "
-            f"{float(r.get('ogw', 0) or 0)*10:>5.1f}"
+            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>5.1f} | "
+            f"{sheet_float(r.get('omw_percent', 0), 0.0):>5.1f} | "
+            f"{sheet_float(r.get('gw_percent', 0), 0.0):>5.1f} | "
+            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>5.1f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
