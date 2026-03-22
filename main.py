@@ -2435,11 +2435,10 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 # A intenção é: /comando sempre refletir TUDO que a liga considera “comandos oficiais”.
 COMMANDS_CATALOG = [
     # Jogador
-    ("jogador", "/meuid", "Mostra seu ID do Discord (suporte)."),
     ("jogador", "/tutorial", "Mostra um guia rápido de como usar o bot."),
     ("jogador", "/inscrever", "Se inscreve com season, ciclo, deck e decklist válidos."),
     ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
-    ("jogador", "/pods_ver", "Mostra todos os PODs no ciclo atual + deck + decklist."),
+    ("jogador", "/pods_ver", "Mostra todos os PODs no ciclo - Jogador + deck + decklist."),
     ("jogador", "/meus_matches", "Lista seus matches do ciclo."),
     ("jogador", "/resultado", "Reporta resultado V-D-E (games) para um match."),
     ("jogador", "/rejeitar", "Rejeita um resultado pendente (janela 48h)."),
@@ -2447,36 +2446,35 @@ COMMANDS_CATALOG = [
     ("jogador", "/ranking_geral", "Mostra ranking geral da season."),
     ("jogador", "/prazo", "Mostra o prazo oficial do ciclo."),
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
+    ("jogador", "/historico_confronto", "Mostra histórico de confrontos (admin)."),
+    ("jogador", "/status_ciclo", "Mostra status dos ciclos da season atual.."),
 
     # Administrativo (ADM/Organizador)
     ("adm", "/deck", "Define ou altera deck do jogador no ciclo."),
     ("adm", "/decklist", "Define ou altera decklist do jogador no ciclo."),
     ("adm", "/drop_adm", "Dropa um jogador do ciclo escolhido (marca dropped)."),
-    ("adm", "/forcesync", "Sincroniza comandos no servidor."),
-    ("adm", "/onboarding", "Reposta o botão de onboarding no canal atual."),
     ("adm", "/ciclo_abrir", "Abre um ciclo para inscrições."),
     ("adm", "/ciclo_fechar", "Fecha inscrições do ciclo."),
-    ("adm", "/ciclo_encerrar", "Encerra ciclo (completed)."),
     ("adm", "/start_cycle", "Gera pods + matches e trava ciclo (locked)."),
     ("adm", "/deadline", "Lista pendências próximas do vencimento (48h)."),
-    ("adm", "/standings_publicar", "Publica standings (canal configurado)."),
-    ("adm", "/final", "Finaliza ciclo: aplica 0-0-3 (ID) nos matches sem report após prazo."),
     ("adm", "/admin_resultado_editar", "Edita resultado de um match (admin)."),
     ("adm", "/admin_resultado_cancelar", "Cancela um resultado (admin)."),
-    ("adm", "/status_ciclo", "Mostra status do ciclo atual."),
-    ("adm", "/exportar_ciclo", "Exporta dados do ciclo (admin)."),
     ("adm", "/fechar_resultados_atrasados", "Força fechamento de pendências antigas (admin)."),
     ("adm", "/substituir_jogador", "Substitui jogador (admin)."),
-    ("adm", "/historico_confronto", "Mostra histórico de confrontos (admin)."),
     ("adm", "/estatisticas", "Estatísticas da liga (admin)."),
     ("adm", "/inscritos", "Lista inscritos, deck/decklist e pendências do ciclo."),
     ("adm", "/cadastrar_player", "Cadastra player manualmente com season, ciclo, deck e decklist."),
-    ("adm", "/matches_ciclo", "Veja todas as Matches ID do Ciclo, quais estão pendentes e quais já foram lançadas"),
+    ("adm", "/matches_ciclo", "Lista todas as matches do ciclo, separando pendentes e registradas."),
 
     # Owner
     ("owner", "/recalcular", "Auto-confirma pendentes, recalcula ranking do ciclo e adiciona bonus %."),
     ("owner", "/startseason", "Abre uma nova season e define como ativa (owner)."),
     ("owner", "/closeseason", "Fecha a season atual (owner)."),
+    ("owner", "/forcesync", "Sincroniza comandos no servidor (owner)."),
+    ("owner", "/onboarding", "Reposta o botão de onboarding no canal atual (owner)."),
+    ("owner", "/ciclo_encerrar", "Encerra ciclo (completed) (owner)."),
+    ("owner", "/final", "Finaliza ciclo: aplica 0-0-3 (ID) nos matches sem report após prazo (owner)."),
+    ("owner", "/exportar_ciclo", "Exporta dados do ciclo (owner)."),
 ]
 
 
@@ -2541,32 +2539,34 @@ async def tutorial(interaction: discord.Interaction):
         lines = [
             "📘 **Tutorial rápido do jogador**",
             "",
-            "**1. Faça seu cadastro**",
-            "• Entre pelo onboarding do servidor e confirme seus dados.",
-            "",
-            "**2. Veja seus comandos**",
+            "**1. Veja seus comandos disponíveis**",
             "• Use **/comando** para ver o que está disponível para você.",
             "",
-            "**3. Inscreva-se no ciclo**",
+            "**2. Inscreva-se no ciclo**",
             "• Use **/inscrever** informando a season, o ciclo, o nome do deck e a decklist.",
             "",
-            "**4. Consulte os PODs**",
-            "• Use **/pods_ver** para ver os grupos do ciclo.",
+            "**3. Consulte os PODs - Jogadores e Decklist**",
+            "• Use **/pods_ver** para ver os grupos do ciclo e suas devidas decklist.",
             "",
-            "**5. Veja seus matches**",
-            "• Use **/meus_matches** para consultar suas partidas.",
+            "**4. Veja seus matches**",
+            "• Use **/meus_matches** para consultar suas partidas (realizadas e não realizadas).",
             "",
-            "**6. Envie seu resultado**",
-            "• Use **/resultado** no formato **V-D-E**. Exemplo: **2-1-0**.",
+            "**5. Envie seu resultado**",
+            "• Use **/resultado** Indique o nome do Oponente e o Placar.",
             "",
-            "**7. Confirmação do oponente**",
-            "• O oponente pode confirmar ou rejeitar o resultado.",
-            "• Se não houver rejeição em até **48h**, o sistema pode auto-confirmar.",
+            "**6. Confirmação do oponente**",
+            "• O oponente pode rejeitar o resultado, por DM enviado pelo BOT, ou usando /rejeitar caso o resultado tenha sido lançado errado por engano.",
+            "• Se não houver rejeição em até **48h**, o sistema irá auto-confirmar.",
             "",
-            "**8. Acompanhe o campeonato**",
+            "**7. Acompanhe o campeonato**",
             "• Use **/ranking** para ver o ranking do ciclo.",
             "• Use **/ranking_geral** para ver o ranking geral da season.",
             "• Use **/prazo** para consultar o prazo oficial do ciclo.",
+            "• Use **/historico_confronto** Para consultar confrontos entre jogador A e jogador B.",
+            "• Use **/status_ciclo** Para consultar o histórico de datas dos ciclos.",
+            "",
+            "**8. Sair do ciclo**",
+            "• Use **/drop** Para dropar do ciclo desejado.",
             "",
             "**Comandos mais usados na prática**",
             "• **/comando**",
@@ -2574,8 +2574,16 @@ async def tutorial(interaction: discord.Interaction):
             "• **/pods_ver**",
             "• **/meus_matches**",
             "• **/resultado**",
+            "• **/rejeitar**",
             "• **/ranking**",
+            "• **/ranking_geral**",
             "• **/prazo**",
+            "• **/historico_confronto**",
+            "• **/status_ciclo**",
+            "• **/drop**"
+            "",
+            "**Se tiver dúvidas acione um ADM**",
+            "",
         ]
 
         await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True, limit=1500)
@@ -3062,18 +3070,18 @@ async def on_member_join(member: discord.Member):
         pass
 
 
-@client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (ADM).")
+@client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (OWNER).")
 async def onboarding(interaction: discord.Interaction):
-    try:
-        if not await is_admin_or_organizer(interaction):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
-            return
-    except Exception:
         try:
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            if not await is_owner_only(interaction):
+                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+                return
         except Exception:
-            pass
-        return
+            try:
+                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+            except Exception:
+                pass
+            return
 
     try:
         await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
@@ -4307,10 +4315,10 @@ def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -
 # =========================================================
 # /forcesync
 # =========================================================
-@client.tree.command(name="forcesync", description="(ADM) Sincroniza os comandos do bot no servidor.")
+@client.tree.command(name="forcesync", description="(OWNER) Sincroniza os comandos do bot no servidor.")
 async def forcesync(interaction: discord.Interaction):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        if not await is_owner_only(interaction):
+            return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -4392,11 +4400,11 @@ async def ciclo_fechar(interaction: discord.Interaction, cycle: int):
 # =========================================================
 # /ciclo_encerrar
 # =========================================================
-@client.tree.command(name="ciclo_encerrar", description="(ADM) Encerra o ciclo (completed).")
+@client.tree.command(name="ciclo_encerrar", description="(OWNER) Encerra o ciclo (completed).")
 @app_commands.describe(cycle="Número do ciclo")
 async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -4426,7 +4434,7 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 # BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: B/7
 # REVISÃO: uso de índices RAM para Players e Matches, redução de releituras
-# em /ranking, /standings_publicar e /deadline, mantendo a mesma lógica
+# em /ranking e /deadline, mantendo a mesma lógica
 # funcional dos comandos de prazo, pendências e ranking do ciclo.
 # =================================================
 
@@ -4787,12 +4795,12 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
 # =========================================================
 # /final
 # =========================================================
-@client.tree.command(name="final", description="(ADM) Aplica 0-0-3 após deadline do ciclo.")
+@client.tree.command(name="final", description="(OWNER) Aplica 0-0-3 após deadline do ciclo.")
 @app_commands.describe(cycle="Número do ciclo")
 @app_commands.autocomplete(cycle=ac_cycle_open)
 async def final(interaction: discord.Interaction, cycle: int):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -5024,10 +5032,8 @@ async def admin_resultado_cancelar(interaction: discord.Interaction, match_id: s
 # =========================================================
 # /status_ciclo
 # =========================================================
-@client.tree.command(name="status_ciclo", description="(ADM) Mostra status dos ciclos da season atual.")
+@client.tree.command(name="status_ciclo", description="Mostra status dos ciclos da season atual.")
 async def status_ciclo(interaction: discord.Interaction):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -6040,12 +6046,12 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 # =========================================================
 # /exportar_ciclo
 # =========================================================
-@client.tree.command(name="exportar_ciclo", description="(ADM) Exporta CSV do ciclo.")
+@client.tree.command(name="exportar_ciclo", description="(OWNER) Exporta CSV do ciclo.")
 @app_commands.describe(cycle="Número do ciclo")
 @app_commands.autocomplete(cycle=ac_cycle_open)
 async def exportar_ciclo(interaction: discord.Interaction, cycle: int):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -6364,12 +6370,9 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 # =========================================================
 # /historico_confronto
 # =========================================================
-@client.tree.command(name="historico_confronto", description="(ADM) Mostra histórico entre dois jogadores.")
+@client.tree.command(name="historico_confronto", description="Mostra histórico entre dois jogadores."
 @app_commands.describe(jogador_a="Primeiro jogador", jogador_b="Segundo jogador")
 async def historico_confronto(interaction: discord.Interaction, jogador_a: discord.Member, jogador_b: discord.Member):
-
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
