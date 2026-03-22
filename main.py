@@ -4317,8 +4317,11 @@ def _cycle_has_generated_data(ws_pods, ws_matches, season_id: int, cycle: int) -
 # =========================================================
 @client.tree.command(name="forcesync", description="(OWNER) Sincroniza os comandos do bot no servidor.")
 async def forcesync(interaction: discord.Interaction):
-        if not await is_owner_only(interaction):
-            return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message(
+            "❌ Apenas o OWNER do servidor pode usar.",
+            ephemeral=True
+        )
 
     await interaction.response.defer(ephemeral=True)
 
@@ -4338,7 +4341,10 @@ async def forcesync(interaction: discord.Interaction):
         )
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /forcesync: {e}", ephemeral=True)
+        await interaction.followup.send(
+            f"❌ Erro no /forcesync: {e}",
+            ephemeral=True
+        )
 
 
 # =========================================================
