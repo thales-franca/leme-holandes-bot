@@ -4199,7 +4199,16 @@ def sheet_float(v, default=0.0):
         return default
 
 def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict]:
-    vals = cached_get_all_values(ws_standings, ttl_seconds=10)
+    vals = ws_standings.get_all_values()
+
+    if len(vals) <= 1:
+        return []
+
+    header = vals[0]
+    idx = {name: i for i, name in enumerate(header)}
+
+    out = []
+    ...
 
     if len(vals) <= 1:
         return []
