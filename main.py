@@ -4225,8 +4225,8 @@ def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict
             continue
 
         matches_played = safe_int(getv("matches_played", 0), 0)
-        match_points = safe_int(getv("match_points", 0), 0)
-
+        match_points = sheet_float(getv("match_points", 0), 0.0)
+        
         item = {
             "season_id": r_season,
             "cycle": r_cycle,
