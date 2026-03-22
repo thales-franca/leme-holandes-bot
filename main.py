@@ -997,6 +997,33 @@ def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, dea
     cache_invalidate(ws_cycles)
 
 
+def get_auto_inscription_target(sh) -> tuple[int, int]:
+    season_id = get_current_season_id(sh)
+    if season_id <= 0:
+        raise RuntimeError("Não existe season ativa.")
+
+    ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
+    open_cycles = []
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        cyc = safe_int(r.get("cycle", 0), 0)
+        st = str(r.get("status", "")).strip().lower()
+
+        if cyc > 0 and st == "open":
+            open_cycles.append(cyc)
+
+    if not open_cycles:
+        raise RuntimeError("Não existe ciclo aberto para inscrição na season atual.")
+
+    cycle = max(open_cycles)
+    return season_id, cycle
+
+
 # =========================
 # Cycle bonus helpers
 # =========================
@@ -2436,7 +2463,7 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 COMMANDS_CATALOG = [
     # Jogador
     ("jogador", "/tutorial", "Mostra um guia rápido de como usar o bot."),
-    ("jogador", "/inscrever", "Se inscreve com season, ciclo, deck e decklist válidos."),
+    ("jogador", "/inscrever", "Se inscreve automaticamente no ciclo aberto informando nome do deck e decklist."),
     ("jogador", "/drop", "Sai do ciclo (marca dropped)."),
     ("jogador", "/pods_ver", "Mostra todos os PODs no ciclo - Jogador + deck + decklist."),
     ("jogador", "/meus_matches", "Lista seus matches do ciclo."),
@@ -2543,7 +2570,7 @@ async def tutorial(interaction: discord.Interaction):
             "• Use **/comando** para ver o que está disponível para você.",
             "",
             "**2. Inscreva-se no ciclo**",
-            "• Use **/inscrever** informando a season, o ciclo, o nome do deck e a decklist.",
+            "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (moxfield ou ligamagic).",
             "",
             "**3. Consulte os PODs - Jogadores e Decklist**",
             "• Use **/pods_ver** para ver os grupos do ciclo e suas devidas decklist.",
@@ -3240,12 +3267,6 @@ def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str
 
     return None
 
-
-async def ac_inscrever_season(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_inscrever_season"):
-            return []
-
         sh = open_sheet()
         q = str(current or "").strip().lower()
 
@@ -3262,12 +3283,6 @@ async def ac_inscrever_season(interaction: discord.Interaction, current: str):
         return out[:25]
     except Exception:
         return []
-
-
-async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_inscrever_cycle"):
-            return []
 
         sh = open_sheet()
 
@@ -3297,19 +3312,15 @@ async def ac_inscrever_cycle(interaction: discord.Interaction, current: str):
     except Exception:
         return []
 
-
 # =========================================================
 # /inscrever
 # =========================================================
-@client.tree.command(name="inscrever", description="Se inscreve no ciclo aberto informando deck e decklist.")
+@client.tree.command(name="inscrever", description="Se inscreve automaticamente no ciclo aberto informando deck e decklist.")
 @app_commands.describe(
-    season="Season",
-    cycle="Número do ciclo",
-    deck="Nome do deck",
+    nome_deck="Nome do deck",
     decklist="Link da decklist"
 )
-@app_commands.autocomplete(season=ac_inscrever_season, cycle=ac_inscrever_cycle)
-async def inscrever(interaction: discord.Interaction, season: int, cycle: int, deck: str, decklist: str):
+async def inscrever(interaction: discord.Interaction, nome_deck: str, decklist: str):
     await interaction.response.defer(ephemeral=True)
 
     # valida decklist
@@ -3319,6 +3330,7 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
 
     try:
         sh = open_sheet()
+        season, cycle = get_auto_inscription_target(sh)
 
         ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER)
         ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER)
@@ -3365,7 +3377,6 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
                 ephemeral=True
             )
 
-        # permite múltiplos ciclos na mesma season, então não checamos inscrição ativa na season
         if player_active_in_cycle(ws_enr, season, cycle, pid):
             return await interaction.followup.send(
                 "❌ Você já está inscrito neste ciclo. Entre em contato com um ADM.",
@@ -3380,9 +3391,12 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
                     ephemeral=True
                 )
 
-        deck = str(deck).strip()
-        if not deck or len(deck) > 80:
-            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
+        nome_deck = str(nome_deck).strip()
+        if not nome_deck or len(nome_deck) > 80:
+            return await interaction.followup.send(
+                "❌ Nome de deck inválido (1 a 80 caracteres).",
+                ephemeral=True
+            )
 
         nowb = now_br_str()
 
@@ -3400,7 +3414,7 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
         ws_decks.batch_update([
             {
                 "range": f"{col_letter(col_decks['deck'])}{rown}",
-                "values": [[deck]]
+                "values": [[nome_deck]]
             },
             {
                 "range": f"{col_letter(col_decks['decklist_url'])}{rown}",
@@ -3416,14 +3430,22 @@ async def inscrever(interaction: discord.Interaction, season: int, cycle: int, d
         await interaction.followup.send(
             f"✅ Inscrição confirmada na **Season {season} / Ciclo {cycle}**.\n"
             f"- Nick: **{nick_atual}**\n"
-            f"- Deck: **{deck}**\n"
+            f"- Deck: **{nome_deck}**\n"
             f"- Decklist: salva com sucesso.",
             ephemeral=True
         )
-        await log_admin(interaction, f"inscrição completa: {interaction.user} S{season} C{cycle}")
+
+        await log_admin(
+            interaction,
+            f"inscrição completa: {interaction.user} S{season} C{cycle}"
+        )
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /inscrever: {e}", ephemeral=True)
+        await interaction.followup.send(
+            f"❌ Erro no /inscrever: {e}",
+            ephemeral=True
+        )
+
 
 
 # =================================================
