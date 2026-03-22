@@ -20,6 +20,7 @@ from discord import app_commands
 from flask import Flask
 
 import gspread
+from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
 
@@ -414,7 +415,7 @@ def ensure_sheet_columns(ws, required_cols: list[str]):
 def ensure_worksheet(sh, title: str, header: list[str], rows: int = 2000, cols: int = 25):
     try:
         ws = sh.worksheet(title)
-    except Exception:
+    except WorksheetNotFound:
         ws = sh.add_worksheet(title=title, rows=rows, cols=cols)
 
     current = cached_get_all_values(ws, ttl_seconds=10)
