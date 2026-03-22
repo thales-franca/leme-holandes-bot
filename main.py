@@ -157,6 +157,16 @@ def floor_333(x):
 def pct1(x):
     return round(x * 100.0, 1)
 
+def fmt_compact_num(v) -> str:
+    try:
+        n = float(v)
+
+        if n.is_integer():
+            return str(int(n))
+
+        return f"{n:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(v)
 
 def col_letter(ci_0):
 
@@ -603,6 +613,9 @@ DECKS_REQUIRED = DECKS_HEADER[:]
 ENROLLMENTS_HEADER = ["season_id", "cycle", "player_id", "status", "created_at", "updated_at"]
 ENROLLMENTS_REQUIRED = ENROLLMENTS_HEADER[:]
 
+CYCLE_BONUSES_HEADER = ["season_id", "cycle", "bonus_percent", "updated_at"]
+CYCLE_BONUSES_REQUIRED = CYCLE_BONUSES_HEADER[:]
+
 CYCLES_HEADER = ["season_id", "cycle", "status", "start_at_br", "deadline_at_br", "created_at", "updated_at"]
 CYCLES_REQUIRED = CYCLES_HEADER[:]
 
@@ -645,6 +658,7 @@ def ensure_all_sheets(sh):
     ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
     ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
     ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+    ensure_worksheet(sh, "CycleBonuses", CYCLE_BONUSES_HEADER, rows=2000, cols=10)
     ensure_worksheet(sh, "PodsHistory", PODSHISTORY_HEADER, rows=50000, cols=25)
     ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
     ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
@@ -980,6 +994,77 @@ def set_cycle_times(ws_cycles, season_id: int, cycle: int, start_at_br: str, dea
         ])
 
     cache_invalidate(ws_cycles)
+
+
+# =========================
+# Cycle bonus helpers
+# =========================
+def get_cycle_bonus_percent(ws_bonus, season_id: int, cycle: int) -> float:
+    """
+    Retorna o bônus percentual vigente do ciclo.
+    Se não existir registro, retorna 0.0
+    """
+    rows = cached_get_all_values(ws_bonus, ttl_seconds=10)
+    if len(rows) <= 1:
+        return 0.0
+
+    col = ensure_sheet_columns(ws_bonus, CYCLE_BONUSES_REQUIRED)
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+
+        s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        c = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
+
+        if s != season_id or c != cycle:
+            continue
+
+        raw = r[col["bonus_percent"]] if col["bonus_percent"] < len(r) else 0
+        return sheet_float(raw, 0.0)
+
+    return 0.0
+
+
+def set_cycle_bonus_percent(ws_bonus, season_id: int, cycle: int, bonus_percent: float):
+    """
+    Faz upsert do bônus percentual do ciclo.
+    """
+    rows = cached_get_all_values(ws_bonus, ttl_seconds=10)
+    col = ensure_sheet_columns(ws_bonus, CYCLE_BONUSES_REQUIRED)
+
+    nowb = now_br_str()
+    found = None
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+
+        s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        c = safe_int(r[col["cycle"]] if col["cycle"] < len(r) else 0, 0)
+
+        if s == season_id and c == cycle:
+            found = i
+            break
+
+    bonus_text = str(bonus_percent)
+
+    if found is None:
+        ws_bonus.append_row(
+            [str(season_id), str(cycle), bonus_text, nowb],
+            value_input_option="USER_ENTERED"
+        )
+    else:
+        ws_bonus.batch_update([
+            {
+                "range": f"{col_letter(col['bonus_percent'])}{found}",
+                "values": [[bonus_text]]
+            },
+            {
+                "range": f"{col_letter(col['updated_at'])}{found}",
+                "values": [[nowb]]
+            },
+        ])
+
+    cache_invalidate(ws_bonus)
 
 
 def list_cycles(ws_cycles, season_id: int) -> list[tuple[int, str]]:
@@ -1627,7 +1712,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
 # REVISÃO V10: ordenação persistida alinhada à regra oficial da liga
 # =================================================
 
-def recalculate_cycle(sh, season_id: int, cycle: int):
+def recalculate_cycle(sh, season_id: int, cycle: int, bonus_percent: float | None = None):
     """
     Recalcula o ranking do ciclo (SEMPRE do zero), persistindo o Standing
     no padrão oficial atual da liga.
@@ -1641,7 +1726,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     6. ogw
 
     Regras base:
-    - Match points: Win=3, Draw=1, Loss=0 (por match)
+    - Match points reais: Win=3, Draw=1, Loss=0 (por match)
     - MWP com piso de 33,3%
     - GWP com piso de 33,3%
     - OMW = média do MWP dos oponentes enfrentados
@@ -1649,21 +1734,24 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     - Considera apenas matches:
       active=TRUE e confirmed_status=confirmed e result_type != bye
 
-    Score oficial:
-    - K = 3
-    - ppm = (pts + K) / (matches + K)
-    - peso_pts = matches / (matches + K)
-    - peso_ppm = K / (matches + K)
-    - score = pts * peso_pts + ppm * peso_ppm
+    Bônus:
+    - aplicado sobre os pontos reais recalculados do zero
+    - nunca acumula sobre bônus anterior
     """
     ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
     ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
     ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=30)
+    ws_bonus = ensure_worksheet(sh, "CycleBonuses", CYCLE_BONUSES_HEADER, rows=2000, cols=10)
 
     try:
         sweep_auto_confirm(sh, season_id, cycle)
     except Exception:
         pass
+
+    if bonus_percent is None:
+        bonus_percent = get_cycle_bonus_percent(ws_bonus, season_id, cycle)
+
+    bonus_percent = sheet_float(bonus_percent, 0.0)
 
     ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
     enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
@@ -1687,7 +1775,7 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     def ensure(pid: str):
         if pid not in stats:
             stats[pid] = {
-                "match_points": 0,
+                "real_match_points": 0.0,
                 "matches_played": 0,
                 "game_wins": 0,
                 "game_losses": 0,
@@ -1755,12 +1843,12 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
         stats[b]["games_played"] += (a_gw + b_gw + d_g)
 
         if a_gw > b_gw:
-            stats[a]["match_points"] += 3
+            stats[a]["real_match_points"] += 3.0
         elif b_gw > a_gw:
-            stats[b]["match_points"] += 3
+            stats[b]["real_match_points"] += 3.0
         else:
-            stats[a]["match_points"] += 1
-            stats[b]["match_points"] += 1
+            stats[a]["real_match_points"] += 1.0
+            stats[b]["real_match_points"] += 1.0
 
         opponents[a].append(b)
         opponents[b].append(a)
@@ -1769,10 +1857,10 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
     gwp = {}
 
     for pid, s in stats.items():
-        mp = s["match_points"]
+        mp_real = sheet_float(s["real_match_points"], 0.0)
         mplayed = s["matches_played"]
 
-        mwp[pid] = (1 / 3) if mplayed == 0 else floor_333(mp / (3.0 * mplayed))
+        mwp[pid] = (1 / 3) if mplayed == 0 else floor_333(mp_real / (3.0 * mplayed))
 
         gplayed = s["games_played"]
         if gplayed == 0:
@@ -1800,12 +1888,14 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
 
     for pid, s in stats.items():
         matches_played = s["matches_played"]
-        match_points = s["match_points"]
+        real_points = round(sheet_float(s["real_match_points"], 0.0), 2)
 
-        ppm = (match_points + K) / (matches_played + K)
+        final_points = round(real_points * (1.0 + (bonus_percent / 100.0)), 2)
+
+        ppm = (final_points + K) / (matches_played + K)
         peso_pts = matches_played / (matches_played + K)
         peso_ppm = K / (matches_played + K)
-        score = (match_points * peso_pts) + (ppm * peso_ppm)
+        score = (final_points * peso_pts) + (ppm * peso_ppm)
 
         out_rows.append({
             "season_id": season_id,
@@ -1813,10 +1903,13 @@ def recalculate_cycle(sh, season_id: int, cycle: int):
             "player_id": pid,
 
             "matches_played": matches_played,
-            "match_points": match_points,
+            "match_points": final_points,
 
             "matches": matches_played,
-            "points": match_points,
+            "points": final_points,
+
+            "real_points": real_points,
+            "bonus_percent": bonus_percent,
 
             "ppm": round(ppm, 6),
             "score": round(score, 6),
@@ -2301,7 +2394,6 @@ COMMANDS_CATALOG = [
     ("adm", "/ciclo_encerrar", "Encerra ciclo (completed)."),
     ("adm", "/start_cycle", "Gera pods + matches e trava ciclo (locked)."),
     ("adm", "/deadline", "Lista pendências próximas do vencimento (48h)."),
-    ("adm", "/recalcular", "Auto-confirma pendentes e recalcula ranking do ciclo."),
     ("adm", "/standings_publicar", "Publica standings (canal configurado)."),
     ("adm", "/final", "Finaliza ciclo: aplica 0-0-3 (ID) nos matches sem report após prazo."),
     ("adm", "/admin_resultado_editar", "Edita resultado de um match (admin)."),
@@ -2317,6 +2409,7 @@ COMMANDS_CATALOG = [
     ("adm", "/matches_ciclo", "Veja todas as Matches ID do Ciclo, quais estão pendentes e quais já foram lançadas"),
 
     # Owner
+    ("owner", "/recalcular", "Auto-confirma pendentes, recalcula ranking do ciclo e adiciona bonus %."),
     ("owner", "/startseason", "Abre uma nova season e define como ativa (owner)."),
     ("owner", "/closeseason", "Fecha a season atual (owner)."),
 ]
@@ -4354,25 +4447,69 @@ async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12
 # =========================================================
 # /recalcular
 # =========================================================
-@client.tree.command(name="recalcular", description="(ADM) Auto-confirma pendências vencidas e recalcula standings do ciclo.")
-@app_commands.describe(cycle="Número do ciclo")
-@app_commands.autocomplete(cycle=ac_cycle_open)
-async def recalcular(interaction: discord.Interaction, cycle: int):
-    if not await is_admin_or_organizer(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+@client.tree.command(name="recalcular", description="(OWNER) Auto-confirma pendências vencidas e recalcula standings do ciclo.")
+@app_commands.describe(
+    season="Season",
+    cycle="Número do ciclo",
+    bonus_percentual="Opcional. Se vazio, mantém o último bônus do ciclo."
+)
+@app_commands.autocomplete(season=ac_owner_season, cycle=ac_owner_cycle_for_season)
+async def recalcular(
+    interaction: discord.Interaction,
+    season: int,
+    cycle: int,
+    bonus_percentual: str = ""
+):
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
     try:
         sh = open_sheet()
-        season_id = require_current_season(sh)
 
-        auto = sweep_auto_confirm(sh, season_id, cycle)
-        rows = recalculate_cycle(sh, season_id, cycle)
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        cf = get_cycle_fields(ws_cycles, season, cycle)
+        if cf.get("status") is None:
+            return await interaction.followup.send(
+                f"❌ O ciclo {cycle} não existe na season {season}.",
+                ephemeral=True
+            )
+
+        ws_bonus = ensure_worksheet(sh, "CycleBonuses", CYCLE_BONUSES_HEADER, rows=2000, cols=10)
+        ensure_sheet_columns(ws_bonus, CYCLE_BONUSES_REQUIRED)
+
+        bonus_raw = str(bonus_percentual or "").strip()
+
+        # Se o owner informou novo bônus, salva.
+        # Se deixou vazio, reaproveita o último do ciclo.
+        if bonus_raw:
+            bonus = sheet_float(bonus_raw, None)
+            if bonus is None:
+                return await interaction.followup.send(
+                    "❌ bônus_percentual inválido. Use apenas número. Ex: 0, 50, 100, 25.5",
+                    ephemeral=True
+                )
+
+            set_cycle_bonus_percent(ws_bonus, season, cycle, bonus)
+        else:
+            bonus = get_cycle_bonus_percent(ws_bonus, season, cycle)
+
+        auto = sweep_auto_confirm(sh, season, cycle)
+        rows = recalculate_cycle(sh, season, cycle, bonus_percent=bonus)
 
         await interaction.followup.send(
             f"✅ Recalculo concluído.\n"
+            f"- Season: **{season}**\n"
+            f"- Ciclo: **{cycle}**\n"
             f"- Auto-confirmados: **{auto}**\n"
+            f"- Bônus aplicado: **{fmt_compact_num(bonus)}%**\n"
             f"- Linhas standings geradas: **{len(rows)}**",
             ephemeral=True
         )
@@ -4416,7 +4553,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         for r in rows:
             try:
                 m = safe_int(r.get("matches_played", 0), 0)
-                pts = safe_int(r.get("match_points", 0), 0)
+                pts = sheet_float(r.get("match_points", 0), 0.0)
 
                 mwp = sheet_float(r.get("mwp", 0), 0.0)
                 omw = sheet_float(r.get("omw", 0), 0.0)
@@ -4482,7 +4619,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
                 f"{r['score']:>5.2f} | "
-                f"{r['pts']:>3} | "
+                f"{fmt_compact_num(r['pts']):>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp_percent']:>5.1f} | "
                 f"{r['omw_percent']:>5.1f} | "
@@ -4931,7 +5068,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 }
 
             matches_played = safe_int(getv("matches_played", 0), 0)
-            match_points = safe_int(getv("match_points", 0), 0)
+            match_points = sheet_float(getv("match_points", 0), 0.0)
             game_wins = safe_int(getv("game_wins", 0), 0)
             game_losses = safe_int(getv("game_losses", 0), 0)
             game_draws = safe_int(getv("game_draws", 0), 0)
@@ -5042,7 +5179,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
                 f"{nome[:20]:<20} | "
                 f"{r['j']:>2} | "
                 f"{r['score']:>5.2f} | "
-                f"{r['pts']:>3} | "
+                f"{fmt_compact_num(r['pts']):>3} | "
                 f"{r['ppm']:>5.2f} | "
                 f"{r['mwp']*100:>5.1f} | "
                 f"{r['omw']*100:>5.1f} | "
