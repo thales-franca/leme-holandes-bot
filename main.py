@@ -3267,51 +3267,6 @@ def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str
 
     return None
 
-        sh = open_sheet()
-        q = str(current or "").strip().lower()
-
-        items = get_season_choices_fast(sh, query=q, limit=25)
-
-        out: list[app_commands.Choice[int]] = []
-        for item in items:
-            sid = safe_int(item.get("season_id", 0), 0)
-            label = str(item.get("label", "")).strip()
-            if sid <= 0 or not label:
-                continue
-            out.append(app_commands.Choice(name=label[:100], value=sid))
-
-        return out[:25]
-    except Exception:
-        return []
-
-        sh = open_sheet()
-
-        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
-        q = str(current or "").strip().lower()
-
-        if season_selected <= 0:
-            return []
-
-        items = get_cycle_choices_fast(
-            sh,
-            season_id=season_selected,
-            query=q,
-            only_open=True,
-            limit=25
-        )
-
-        out: list[app_commands.Choice[int]] = []
-        for item in items:
-            cyc = safe_int(item.get("value", 0), 0)
-            label = str(item.get("label", "")).strip()
-            if cyc <= 0 or not label:
-                continue
-            out.append(app_commands.Choice(name=label[:100], value=cyc))
-
-        return out[:25]
-    except Exception:
-        return []
-
 # =========================================================
 # /inscrever
 # =========================================================
