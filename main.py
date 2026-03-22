@@ -6376,7 +6376,7 @@ async def substituir_jogador(interaction: discord.Interaction, cycle: int, antig
 # =========================================================
 # /historico_confronto
 # =========================================================
-@client.tree.command(name="historico_confronto", description="Mostra histórico entre dois jogadores."
+@client.tree.command(name="historico_confronto", description="Mostra histórico entre dois jogadores.")
 @app_commands.describe(jogador_a="Primeiro jogador", jogador_b="Segundo jogador")
 async def historico_confronto(interaction: discord.Interaction, jogador_a: discord.Member, jogador_b: discord.Member):
 
