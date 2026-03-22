@@ -3072,16 +3072,16 @@ async def on_member_join(member: discord.Member):
 
 @client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (OWNER).")
 async def onboarding(interaction: discord.Interaction):
-        try:
-            if not await is_owner_only(interaction):
-                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
-                return
-        except Exception:
-            try:
-                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
-            except Exception:
-                pass
+    try:
+        if not await is_owner_only(interaction):
+            await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
             return
+    except Exception:
+        try:
+            await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+        except Exception:
+            pass
+        return
 
     try:
         await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
