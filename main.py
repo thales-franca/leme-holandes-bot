@@ -3874,6 +3874,7 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
 
         lines = [
             f"📊 **Meta Field LEME HOLANDÊS ⚓🚢 — Season {season} / Ciclo {cycle}**",
+            f" **Season {season} / Ciclo {cycle}**",
             f"Total de decks registrados: **{total}**",
             ""
         ]
@@ -4251,7 +4252,7 @@ def _build_meta_rows(ws_decks, season: int, cycle: int) -> tuple[list[tuple[str,
 
     if other_count > 0:
         other_pct = round((other_count / total) * 100.0, 2)
-        result.append(("OUTROS", other_count, other_pct))
+        result.append(("Others", other_count, other_pct))
 
     return result, total
 
