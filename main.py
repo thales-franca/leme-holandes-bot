@@ -532,10 +532,20 @@ def validate_decklist_url(url: str) -> tuple[bool, str]:
     if host.startswith("www."):
         host = host[4:]
 
-    allowed_hosts = {"moxfield.com", "ligamagic.com", "ligamagic.com.br"}
+    allowed_hosts = {"moxfield.com", "ligamagic.com", "ligamagic.com.br", "mtgdecks.net", "mtggoldfish.com"}
     if host not in allowed_hosts:
-        return False, "Link não permitido. Use apenas moxfield.com ou ligamagic.com(.br)"
+        return False, "Link não permitido. Use apenas moxfield.com, ligamagic.com(.br), mtggoldfish.com ou mtgdecks.net "
 
+    # Mtgdecks
+    if "mtgdecks.net" in host:
+        if "/Modern/" not in (parsed.path or ""):
+            return False, "Link inválido do Mtgdecks. Exemplo: https://mtgdecks.net/Modern/..."
+
+    # Mtggoldfish
+    if "mtggoldfish.com" in host:
+        if "/archetype/modern" not in (parsed.path or ""):
+            return False, "Link inválido do Mtggoldfish. Exemplo: https://www.mtggoldfish.com/archetype/modern..."
+            
     # Moxfield
     if "moxfield.com" in host:
         if "/decks/" not in (parsed.path or ""):
@@ -2570,7 +2580,7 @@ async def tutorial(interaction: discord.Interaction):
     "• Use **/comando** para ver o que está disponível para você.",
     "",
     "**2. Inscreva-se no ciclo**",
-    "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (moxfield ou ligamagic).",
+    "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (moxfield, ligamagic, mtgdecks ou mtggoldfish).",
     "",
     "**3. Consulte os PODs - Jogadores e Decklist**",
     "• Use **/pods_ver** para ver os grupos do ciclo e suas devidas decklist.",
@@ -5429,7 +5439,7 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
     season="Season para cadastrar",
     ciclo="Ciclo para cadastrar",
     deck="Nome do deck",
-    decklist="Link (moxfield/ligamagic)"
+    decklist="Link (moxfield/ligamagic/mtgdecks/mtggoldfish)"
 )
 @app_commands.autocomplete(season=ac_owner_season, ciclo=ac_owner_cycle_for_season)
 async def cadastrar_player(
