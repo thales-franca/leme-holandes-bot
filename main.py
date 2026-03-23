@@ -3873,7 +3873,7 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
             )
 
         lines = [
-            f"📊 **Meta Field LEME HOLANDÊS ⚓🚢 — Season {season} / Ciclo {cycle}**",
+            f"📊 **Meta Field LEME HOLANDÊS ⚓🚢**",
             f" **Season {season} / Ciclo {cycle}**",
             f"Total de decks registrados: **{total}**",
             ""
