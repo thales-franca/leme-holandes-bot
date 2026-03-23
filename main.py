@@ -7022,6 +7022,18 @@ _PLAYER_RAM_INDEX_TTL_SECONDS = 60
 #   "choices": [{"label","value","search"}],
 # }
 
+def invalidate_player_ram_index():
+    global _PLAYER_RAM_INDEX
+
+    with _PLAYER_RAM_LOCK:
+        _PLAYER_RAM_INDEX = {
+            "ts": 0.0,
+            "by_id": {},
+            "nick_map": {},
+            "choices": [],
+        }
+
+
 def _normalize_player_row(raw: dict) -> dict:
     pid = str(raw.get("discord_id", "")).strip()
     nick = str(raw.get("nick", "")).strip()
@@ -7189,7 +7201,6 @@ def get_player_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
             if len(out) >= limit:
                 break
     return out
-
 
 # =========================================================
 # CACHE DE ÍNDICE — CYCLES
