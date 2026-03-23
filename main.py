@@ -2187,8 +2187,6 @@ class LemeBot(discord.Client):
         # Views persistentes (funcionam após restart quando o bot volta online)
         try:
             self.add_view(OnboardingStartView())
-            self.add_view(OnboardingConfirmIdView())
-            self.add_view(OnboardingChoiceView())
         except Exception:
             pass
 
@@ -2485,6 +2483,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/comando", "Mostra os comandos que você tem acesso."),
     ("jogador", "/historico_confronto", "Mostra histórico de confrontos (admin)."),
     ("jogador", "/status_ciclo", "Mostra status dos ciclos da season atual.."),
+    ("jogador", "/meta", "Mostra o meta field da season e ciclo indicado."),
 
     # Administrativo (ADM/Organizador)
     ("adm", "/deck", "Define ou altera deck do jogador no ciclo."),
@@ -2601,6 +2600,7 @@ async def tutorial(interaction: discord.Interaction):
     "• Use **/prazo** para consultar o prazo oficial do ciclo.",
     "• Use **/historico_confronto** para consultar confrontos entre jogador A e jogador B.",
     "• Use **/status_ciclo** para consultar o histórico de datas dos ciclos.",
+    "• Use **/meta** para consultar o meta field da season e ciclo indicado.",
     "",
     "**8. Sair do ciclo**",
     "• Use **/drop** para dropar do ciclo desejado.",
@@ -2700,79 +2700,8 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             return
 
         try:
-            await interaction.followup.send(
-                "✅ Cadastro salvo. Agora escolha uma opção abaixo:",
-                ephemeral=True,
-                view=OnboardingChoiceView()
-            )
-        except Exception:
-            pass
-
-
-class OnboardingStartView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Iniciar cadastro", style=discord.ButtonStyle.success, custom_id="lhb_onb_start")
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_message(
-                "Confirme abaixo para prosseguir com seu cadastro.",
-                ephemeral=True,
-                view=OnboardingConfirmIdView()
-            )
-        except Exception:
-            pass
-
-
-class OnboardingConfirmIdView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Confirmar ID", style=discord.ButtonStyle.primary, custom_id="lhb_onb_confirm")
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_modal(NicknameModal())
-        except Exception:
-            try:
-                await interaction.response.send_message(
-                    "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
-
-
-class OnboardingChoiceView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Participar", style=discord.ButtonStyle.success, custom_id="lhb_onb_join")
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            try:
-                await interaction.response.defer(ephemeral=True)
-            except Exception:
-                pass
-
             guild = interaction.guild
-            uid = str(interaction.user.id).strip()
-            nome_salvo = ""
-
-            try:
-                sh = open_sheet()
-                ensure_all_sheets(sh)
-                ws_players = sh.worksheet("Players")
-                player_record = get_player_record_by_discord_id(ws_players, uid) or {}
-                nome_salvo = str(player_record.get("nick", "")).strip()
-            except Exception:
-                nome_salvo = ""
-
-            if not nome_salvo or len(nome_salvo.split()) != 2:
-                return await interaction.followup.send(
-                    "⚠️ Seu cadastro não está com Nome e Sobrenome válidos. Refaça o onboarding ou procure um ADM.",
-                    ephemeral=True
-                )
+            nome_salvo = raw
 
             if guild:
                 member = guild.get_member(interaction.user.id)
@@ -2795,23 +2724,34 @@ class OnboardingChoiceView(discord.ui.View):
                         pass
 
             await interaction.followup.send(
-                "✅ Perfeito. Você está marcado como **Jogador**.",
+                "✅ Cadastro concluído com sucesso. Você está marcado como **Jogador**.",
                 ephemeral=True
             )
 
         except Exception:
             try:
-                await interaction.followup.send("✅ Cadastro finalizado.", ephemeral=True)
+                await interaction.followup.send(
+                    "✅ Cadastro salvo com sucesso.",
+                    ephemeral=True
+                )
             except Exception:
                 pass
 
-    @discord.ui.button(label="Assistir", style=discord.ButtonStyle.secondary, custom_id="lhb_onb_watch")
-    async def watch(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+class OnboardingStartView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Iniciar cadastro", style=discord.ButtonStyle.success, custom_id="lhb_onb_start")
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.send_message("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
+            await interaction.response.send_modal(NicknameModal())
         except Exception:
             try:
-                await interaction.followup.send("✅ Tudo certo. Bem-vindo(a)!", ephemeral=True)
+                await interaction.response.send_message(
+                    "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
+                    ephemeral=True
+                )
             except Exception:
                 pass
 
@@ -3681,6 +3621,7 @@ async def drop_adm(interaction: discord.Interaction, season: int, cycle: int, jo
 # BLOCO ORIGINAL: BLOCO 7/12
 # SUB-BLOCO: A/2
 # REVISÃO: debounce nos autocompletes de /pods_ver, melhor montagem dos
+# /meta - meta field
 # chunks e menor custo de leitura/organização sem alterar a lógica funcional.
 # =================================================
 
@@ -3892,6 +3833,62 @@ async def pods_ver(interaction: discord.Interaction, season: int, cycle: int):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /pods_ver: {e}", ephemeral=True)
+
+
+# =========================================================
+# /meta
+# =========================================================
+@client.tree.command(name="meta", description="Mostra o meta field do ciclo.")
+@app_commands.describe(season="Season", cycle="Número do ciclo")
+@app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
+async def meta(interaction: discord.Interaction, season: int, cycle: int):
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=False
+            )
+
+        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        cf = get_cycle_fields(ws_cycles, season, cycle)
+        if cf.get("status") is None:
+            return await interaction.followup.send(
+                f"❌ O ciclo {cycle} não existe na season {season}.",
+                ephemeral=False
+            )
+
+        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
+        ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
+
+        meta_rows, total = _build_meta_rows(ws_decks, season, cycle)
+
+        if total == 0 or not meta_rows:
+            return await interaction.followup.send(
+                f"⚠️ Não há decks cadastrados na **Season {season} / Ciclo {cycle}**.",
+                ephemeral=False
+            )
+
+        lines = [
+            f"📊 **Meta Field LEME HOLANDÊS ⚓🚢 — Season {season} / Ciclo {cycle}**",
+            f"Total de decks registrados: **{total}**",
+            ""
+        ]
+
+        for i, (deck_name, qtd, pct) in enumerate(meta_rows, start=1):
+            pct_txt = f"{pct:.2f}".replace(".", ",")
+            lines.append(f"{i} - **{deck_name}**: {pct_txt}%")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=False)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /meta: {e}",
+            ephemeral=False
+        )
 
 
 # =========================================================
@@ -4191,6 +4188,73 @@ def sheet_float(v, default=0.0):
         return float(s)
     except Exception:
         return default
+
+
+def normalize_text_key(s: str) -> str:
+    import unicodedata
+
+    s = str(s or "").strip().lower()
+
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+    s = " ".join(s.split())
+
+    return s
+
+
+def _build_meta_rows(ws_decks, season: int, cycle: int) -> tuple[list[tuple[str, int, float]], int]:
+    rows = cached_get_all_records(ws_decks, ttl_seconds=10)
+
+    counts: dict[str, int] = {}
+    display_name: dict[str, str] = {}
+
+    total = 0
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season:
+            continue
+
+        if safe_int(r.get("cycle", 0), 0) != cycle:
+            continue
+
+        deck_raw = str(r.get("deck", "")).strip()
+        if not deck_raw:
+            continue
+
+        key = normalize_text_key(deck_raw)
+
+        counts[key] = counts.get(key, 0) + 1
+
+        if key not in display_name:
+            display_name[key] = deck_raw
+
+        total += 1
+
+    if total == 0:
+        return [], 0
+
+    ordered = sorted(
+        counts.items(),
+        key=lambda x: (-x[1], display_name.get(x[0], "").lower())
+    )
+
+    top4 = ordered[:4]
+    other_count = sum(qtd for _, qtd in ordered[4:])
+
+    result: list[tuple[str, int, float]] = []
+
+    for key, qtd in top4:
+        name = display_name.get(key, key)
+        pct = round((qtd / total) * 100.0, 2)
+        result.append((name, qtd, pct))
+
+    if other_count > 0:
+        other_pct = round((other_count / total) * 100.0, 2)
+        result.append(("OUTROS", other_count, other_pct))
+
+    return result, total
+
 
 def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict]:
     vals = ws_standings.get_all_values()
@@ -6178,13 +6242,14 @@ async def inscritos(interaction: discord.Interaction, season: int, cycle: int):
         ]
 
         if inscritos_linhas:
-            lines.append("**Jogadores inscritos:**")
+            lines.append(f"**Jogadores inscritos:** {len(inscritos_linhas)}")
             lines.extend(inscritos_linhas)
         else:
+            lines.append("**Jogadores inscritos:** 0")
             lines.append("Nenhum inscrito.")
 
         lines.append("")
-        lines.append("**Jogadores cadastrados que ainda NÃO se inscreveram:**")
+        lines.append(f"**Jogadores cadastrados que ainda NÃO se inscreveram:** {len(nao_inscritos)}")
 
         if nao_inscritos:
             lines.extend(nao_inscritos[:100])
