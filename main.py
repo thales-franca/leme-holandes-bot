@@ -5739,91 +5739,9 @@ async def cadastrar_player(
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: E/7
-# REVISÃO: consolidação de updates em batch no fechamento do /cadastrar_player,
-# mantendo a mesma lógica funcional e as mesmas regras de layout dos pods.
+# REVISÃO: helpers de layout dos pods para o /start_cycle,
+# mantendo a lógica oficial de distribuição.
 # =================================================
-
-        # =========================
-        # ENROLLMENTS
-        # =========================
-        ws_enr = ensure_worksheet(sh, "Enrollments", ENROLLMENTS_HEADER, rows=20000, cols=25)
-        col_enr = ensure_sheet_columns(ws_enr, ENROLLMENTS_REQUIRED)
-        rows_enr = cached_get_all_values(ws_enr, ttl_seconds=10)
-
-        enr_row = None
-        for i in range(2, len(rows_enr) + 1):
-            r = rows_enr[i - 1]
-            s = safe_int(r[col_enr["season_id"]] if col_enr["season_id"] < len(r) else 0, 0)
-            c = safe_int(r[col_enr["cycle"]] if col_enr["cycle"] < len(r) else 0, 0)
-            p = str(r[col_enr["player_id"]] if col_enr["player_id"] < len(r) else "").strip()
-            if s == season and c == ciclo and p == did:
-                enr_row = i
-                break
-
-        if enr_row is None:
-            ws_enr.append_row(
-                [str(season), str(ciclo), did, "active", nowc, nowc],
-                value_input_option="USER_ENTERED"
-            )
-            msg_parts.append(f"- Inscrição criada na **Season {season} / Ciclo {ciclo}**.")
-        else:
-            ws_enr.batch_update([
-                {
-                    "range": f"{col_letter(col_enr['status'])}{enr_row}",
-                    "values": [["active"]]
-                },
-                {
-                    "range": f"{col_letter(col_enr['updated_at'])}{enr_row}",
-                    "values": [[nowc]]
-                },
-            ])
-            msg_parts.append(f"- Inscrição reativada/confirmada na **Season {season} / Ciclo {ciclo}**.")
-
-        cache_invalidate(ws_enr)
-
-        # =========================
-        # DECKS
-        # =========================
-        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
-        rown = ensure_deck_row(ws_decks, season, ciclo, did)
-        col_deck = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
-
-        nm = str(deck or "").strip()
-        if not nm:
-            return await interaction.followup.send("❌ Informe o deck.", ephemeral=True)
-        if len(nm) > 80:
-            return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
-
-        ok, val = validate_decklist_url(decklist)
-        if not ok:
-            return await interaction.followup.send(f"❌ Decklist inválida: {val}", ephemeral=True)
-
-        ws_decks.batch_update([
-            {
-                "range": f"{col_letter(col_deck['deck'])}{rown}",
-                "values": [[nm]]
-            },
-            {
-                "range": f"{col_letter(col_deck['decklist_url'])}{rown}",
-                "values": [[val]]
-            },
-            {
-                "range": f"{col_letter(col_deck['updated_at'])}{rown}",
-                "values": [[nowc]]
-            },
-        ])
-        cache_invalidate(ws_decks)
-
-        msg_parts.append(f"- Deck setado: **{nm}**")
-        msg_parts.append("- Decklist setada.")
-        msg_parts.append(f"- Referência final: **Season {season} / Ciclo {ciclo}**")
-
-        await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
-        await log_admin(interaction, f"OWNER cadastrar_player: {raw} ({membro.id}) season={season} ciclo={ciclo}")
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro no /cadastrar_player: {e}", ephemeral=True)
-
 
 # =========================================================
 # /start_cycle
@@ -7859,7 +7777,7 @@ except Exception:
 
 
 keep_alive()
-
+client.run(DISCORD_TOKEN)
 
 
 # =================================================
