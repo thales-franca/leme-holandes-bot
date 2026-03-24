@@ -532,10 +532,29 @@ def validate_decklist_url(url: str) -> tuple[bool, str]:
     if host.startswith("www."):
         host = host[4:]
 
-    allowed_hosts = {"moxfield.com", "ligamagic.com", "ligamagic.com.br", "mtgdecks.net", "mtggoldfish.com"}
+#    allowed_hosts = {"lemeholandes.com.br"}
+#    if host not in allowed_hosts:
+#        return False, "Link não permitido. Use apenas lemeholandes.com.br"
+    # LemeHolandes
+#    if "lemeholandes.com.br" in host:
+#        if "/Decklist/" not in (parsed.path or ""):
+#            return False, "Link inválido do Melee. Exemplo: https://lemeholandes.com.br/Decklist/..."
+#    return True, raw
+    
+    allowed_hosts = {"moxfield.com", "ligamagic.com", "ligamagic.com.br", "mtgdecks.net", "mtggoldfish.com", "melee.gg", "mtgtop8.com"}
     if host not in allowed_hosts:
-        return False, "Link não permitido. Use apenas moxfield.com, ligamagic.com(.br), mtggoldfish.com ou mtgdecks.net "
+        return False, "Link não permitido. Use apenas moxfield.com, ligamagic.com(.br), mtggoldfish.com, mtgdecks.net, melee.gg ou mtgtop8.com"
 
+    # Melee
+    if "melee.gg" in host:
+        if "/Decklist/View/" not in (parsed.path or ""):
+            return False, "Link inválido do Melee. Exemplo: https://melee.gg/Decklist/View/..."
+            
+    # Mtgtop8
+    if "mtgtop8.com" in host:
+        if "/event?e=" not in (parsed.path or ""):
+            return False, "Link inválido do Mtgtop8. Exemplo: https://mtgtop8.com/event?e=..."
+            
     # Mtgdecks
     if "mtgdecks.net" in host:
         if "/Modern/" not in (parsed.path or ""):
@@ -2579,7 +2598,8 @@ async def tutorial(interaction: discord.Interaction):
     "• Use **/comando** para ver o que está disponível para você.",
     "",
     "**2. Inscreva-se no ciclo**",
-    "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (moxfield, ligamagic, mtgdecks ou mtggoldfish).",
+    "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (moxfield, ligamagic, mtgdecks, mtggoldfish, melee ou mtgtop8).",
+#    "• Use **/inscrever** Informe o nome do seu deck e o link da sua decklist (lemeholandes).",
     "",
     "**3. Consulte os PODs - Jogadores e Decklist**",
     "• Use **/pods_ver** para ver os grupos do ciclo e suas devidas decklist.",
@@ -5543,7 +5563,8 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
     season="Season para cadastrar",
     ciclo="Ciclo para cadastrar",
     deck="Nome do deck",
-    decklist="Link (moxfield/ligamagic/mtgdecks/mtggoldfish)"
+    decklist="Link (moxfield/ligamagic/mtgdecks/mtggoldfish/melee/mtgtop8)"
+#    decklist="Link (lemeholandes)"
 )
 @app_commands.autocomplete(season=ac_owner_season, ciclo=ac_owner_cycle_for_season)
 async def cadastrar_player(
