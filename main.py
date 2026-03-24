@@ -2157,13 +2157,14 @@ def _get_global_callable(name: str):
 
 async def warm_ram_indexes():
     """
-    Pré-carrega os índices RAM no boot do bot para evitar que o primeiro
-    autocomplete/comando faça leituras pesadas no Google Sheets.
+    Pré-carrega apenas os índices RAM leves no boot do bot para evitar
+    custo alto de inicialização no Render.
 
     Observação:
     - faz best effort
     - não quebra o boot se algum índice ainda não existir
     - mantém compatibilidade com a organização atual por blocos
+    - índices pesados de matches ficam em lazy load no primeiro uso
     """
     try:
         sh = open_sheet()
@@ -2174,8 +2175,6 @@ async def warm_ram_indexes():
         "ensure_player_ram_index",
         "ensure_cycle_ram_index",
         "ensure_season_ram_index",
-        "ensure_match_ram_index",
-        "ensure_match_ac_index",
     ]
 
     for fn_name in warmers:
@@ -2186,7 +2185,6 @@ async def warm_ram_indexes():
             fn(sh)
         except Exception:
             pass
-
 
 # =========================
 # Discord Bot (Client)
@@ -2227,7 +2225,7 @@ class LemeBot(discord.Client):
         except Exception:
             pass
 
-        # Warm cache dos índices RAM
+        # Warm cache dos índices RAM leves
         try:
             await warm_ram_indexes()
         except Exception:
@@ -7847,29 +7845,11 @@ if not DISCORD_TOKEN:
 
 def _final_warmup():
     """
-    Warmup opcional antes do start.
-    Não falha se algo não existir ainda.
+    Warmup final desativado para evitar custo duplicado de inicialização.
+    Os índices leves já são aquecidos no setup_hook.
+    Índices pesados ficam em lazy load no primeiro uso.
     """
-    try:
-        sh = open_sheet()
-    except Exception:
-        return
-
-    warmers = [
-        "ensure_player_ram_index",
-        "ensure_cycle_ram_index",
-        "ensure_season_ram_index",
-        "ensure_match_ram_index",
-        "ensure_match_ac_index",
-    ]
-
-    for name in warmers:
-        try:
-            fn = globals().get(name)
-            if callable(fn):
-                fn(sh)
-        except Exception:
-            pass
+    return
 
 
 try:
@@ -7880,7 +7860,6 @@ except Exception:
 
 keep_alive()
 
-client.run(DISCORD_TOKEN)
 
 
 # =================================================
