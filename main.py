@@ -1,4 +1,4 @@
-    # =================================================
+# =================================================
 # BLOCO ORIGINAL: BLOCO 1/12
 # SUB-BLOCO: A/2
 # REVISÃO FINAL — cache otimizado + RAM index + locks globais mais leves
@@ -3853,18 +3853,37 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
                 ephemeral=False
             )
 
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
+        ws_cycles = ensure_worksheet(
+            sh,
+            "Cycles",
+            CYCLES_HEADER,
+            rows=2000,
+            cols=25
+        )
+
         cf = get_cycle_fields(ws_cycles, season, cycle)
+
         if cf.get("status") is None:
             return await interaction.followup.send(
                 f"❌ O ciclo {cycle} não existe na season {season}.",
                 ephemeral=False
             )
 
-        ws_decks = ensure_worksheet(sh, "Decks", DECKS_HEADER, rows=10000, cols=25)
+        ws_decks = ensure_worksheet(
+            sh,
+            "Decks",
+            DECKS_HEADER,
+            rows=10000,
+            cols=25
+        )
+
         ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
-        meta_rows, total = _build_meta_rows(ws_decks, season, cycle)
+        meta_rows, total = _build_meta_rows(
+            ws_decks,
+            season,
+            cycle
+        )
 
         if total == 0 or not meta_rows:
             return await interaction.followup.send(
@@ -3879,11 +3898,19 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
             ""
         ]
 
-        for i, (deck_name, qtd, pct) in enumerate(meta_rows, start=1):
-            pct_txt = f"{pct:.2f}".replace(".", ",")
-            lines.append(f"{i} - **{deck_name}**: {pct_txt}%")
+         for i, (deck_name, qtd, pct_txt) in enumerate(meta_rows, start=1):
+            lines.append(
+                f"{i} - **{deck_name}**: {pct_txt}%"
+            )
 
-        await interaction.followup.send("\n".join(lines), ephemeral=False)
+        text = "\n".join(lines).strip()
+
+        await send_followup_chunks(
+            interaction,
+            text,
+            ephemeral=False,
+            limit=1900
+        )
 
     except Exception as e:
         await interaction.followup.send(
@@ -4204,7 +4231,7 @@ def normalize_text_key(s: str) -> str:
     return s
 
 
-def _build_meta_rows(ws_decks, season: int, cycle: int) -> tuple[list[tuple[str, int, float]], int]:
+def _build_meta_rows(ws_decks, season: int, cycle: int) -> tuple[list[tuple[str, int, str]], int]:
     rows = cached_get_all_records(ws_decks, ttl_seconds=10)
 
     counts: dict[str, int] = {}
@@ -4240,19 +4267,18 @@ def _build_meta_rows(ws_decks, season: int, cycle: int) -> tuple[list[tuple[str,
         key=lambda x: (-x[1], display_name.get(x[0], "").lower())
     )
 
-    top4 = ordered[:4]
-    other_count = sum(qtd for _, qtd in ordered[4:])
+    result: list[tuple[str, int, str]] = []
 
-    result: list[tuple[str, int, float]] = []
-
-    for key, qtd in top4:
+    for key, qtd in ordered:
         name = display_name.get(key, key)
         pct = round((qtd / total) * 100.0, 2)
-        result.append((name, qtd, pct))
 
-    if other_count > 0:
-        other_pct = round((other_count / total) * 100.0, 2)
-        result.append(("Others", other_count, other_pct))
+        if float(pct).is_integer():
+            pct_txt = str(int(pct))
+        else:
+            pct_txt = f"{pct:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+        result.append((name, qtd, pct_txt))
 
     return result, total
 
