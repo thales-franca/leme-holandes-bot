@@ -3898,7 +3898,7 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
             ""
         ]
 
-         for i, (deck_name, qtd, pct_txt) in enumerate(meta_rows, start=1):
+        for i, (deck_name, qtd, pct_txt) in enumerate(meta_rows, start=1):
             lines.append(
                 f"{i} - **{deck_name}**: {pct_txt}%"
             )
@@ -3917,7 +3917,6 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
             f"❌ Erro no /meta: {e}",
             ephemeral=False
         )
-
 
 # =========================================================
 # /meus_matches
