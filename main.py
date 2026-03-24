@@ -1753,70 +1753,6 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
     except Exception:
         return []
 
-async def ac_owner_season(interaction: discord.Interaction, current: str):
-    try:
-        sh = open_sheet()
-
-        items = get_season_choices_fast(
-            sh,
-            query=str(current or ""),
-            limit=25
-        )
-
-        out = []
-
-        for item in items:
-            sid = int(item["season_id"])
-            label = item["label"]
-
-            out.append(
-                app_commands.Choice(
-                    name=label,
-                    value=sid
-                )
-            )
-
-        return out[:25]
-
-    except Exception:
-        return []
-
-async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: str):
-    try:
-        sh = open_sheet()
-
-        season = interaction.namespace.season
-
-        if not season:
-            return []
-
-        ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER)
-
-        items = list_cycles(ws_cycles, season)
-
-        q = str(current or "").strip()
-
-        out = []
-
-        for c, st in items:
-
-            txt = str(c)
-
-            if q and q not in txt:
-                continue
-
-            out.append(
-                app_commands.Choice(
-                    name=f"Ciclo {c} ({st})",
-                    value=c
-                )
-            )
-
-        return out[:25]
-
-    except Exception:
-        return []
-
 
 # =========================================================
 # [BLOCO 3/12 termina aqui]
@@ -4324,15 +4260,6 @@ def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict
     idx = {name: i for i, name in enumerate(header)}
 
     out = []
-    ...
-
-    if len(vals) <= 1:
-        return []
-
-    header = vals[0]
-    idx = {name: i for i, name in enumerate(header)}
-
-    out = []
 
     for row in vals[1:]:
         def getv(name: str, default=""):
@@ -4351,7 +4278,7 @@ def _read_cycle_standings(ws_standings, season_id: int, cycle: int) -> list[dict
 
         matches_played = safe_int(getv("matches_played", 0), 0)
         match_points = sheet_float(getv("match_points", 0), 0.0)
-        
+
         item = {
             "season_id": r_season,
             "cycle": r_cycle,
@@ -7273,6 +7200,16 @@ _CYCLE_RAM_INDEX_TTL_SECONDS = 60
 #       }
 #   }
 # }
+
+def invalidate_cycle_ram_index():
+    global _CYCLE_RAM_INDEX
+
+    with _CYCLE_RAM_LOCK:
+        _CYCLE_RAM_INDEX = {
+            "ts": 0.0,
+            "by_season": {},
+        }
+
 
 def _cycle_status_label_pt(status: str) -> str:
     st = str(status or "").strip().lower()
