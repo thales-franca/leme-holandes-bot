@@ -4088,6 +4088,20 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         invalidate_match_ram_index()
         invalidate_match_ac_index()
 
+        nick_map = get_player_nick_map_fast(sh)
+
+        player_a_name = nick_map.get(player_a, player_a)
+        player_b_name = nick_map.get(player_b, player_b)
+        reporter_name = nick_map.get(pid, str(interaction.user))
+
+        await log_admin(
+            interaction,
+            f"resultado lançado: {reporter_name} ({pid}) | "
+            f"match={match_id} | "
+            f"{player_a_name} ({player_a}) vs {player_b_name} ({player_b}) | "
+            f"placar={placar}"
+        )
+
         await interaction.followup.send(
             f"✅ Resultado enviado: **{placar}**",
             ephemeral=True
