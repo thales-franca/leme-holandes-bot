@@ -4047,17 +4047,68 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         player_a_name = nick_map.get(player_a, player_a)
         player_b_name = nick_map.get(player_b, player_b)
         reporter_name = nick_map.get(pid, str(interaction.user))
+        opponent_name = nick_map.get(opponent_id, opponent_id)
+
+        dm_sent = False
+
+        try:
+            guild = interaction.guild
+            opponent_member = None
+
+            if guild:
+                opponent_member = guild.get_member(int(opponent_id))
+                if opponent_member is None:
+                    try:
+                        opponent_member = await guild.fetch_member(int(opponent_id))
+                    except Exception:
+                        opponent_member = None
+
+            if opponent_member is None:
+                try:
+                    opponent_member = await client.fetch_user(int(opponent_id))
+                except Exception:
+                    opponent_member = None
+
+            if opponent_member is not None:
+                embed = discord.Embed(
+                    title="Confirmação de resultado pendente",
+                    description=(
+                        "Seu oponente lançou um resultado e sua confirmação é necessária.\n\n"
+                        f"**Match:** `{match_id}`\n"
+                        f"**Confronto:** {player_a_name} vs {player_b_name}\n"
+                        f"**Placar informado:** **{placar}**\n\n"
+                        f"Você pode **Confirmar** ou **Rejeitar** abaixo.\n"
+                        f"Se não houver rejeição em até **{AUTO_CONFIRM_HOURS}h**, o sistema poderá auto-confirmar."
+                    ),
+                )
+                embed.set_footer(text=f"match_id:{match_id}")
+
+                await opponent_member.send(embed=embed, view=ResultConfirmView())
+                dm_sent = True
+
+        except Exception:
+            dm_sent = False
 
         await log_admin(
             interaction,
             f"resultado lançado: {reporter_name} ({pid}) | "
             f"match={match_id} | "
             f"{player_a_name} ({player_a}) vs {player_b_name} ({player_b}) | "
-            f"placar={placar}"
+            f"placar={placar} | "
+            f"dm_oponente={'ok' if dm_sent else 'falhou'}"
         )
 
+        msg = f"✅ Resultado enviado: **{placar}**"
+        if dm_sent:
+            msg += f"\n📨 Oponente notificado por DM: **{opponent_name}**."
+        else:
+            msg += (
+                f"\n⚠️ Não consegui enviar DM para o oponente: **{opponent_name}**.\n"
+                f"Ele ainda pode confirmar manualmente pelo sistema."
+            )
+
         await interaction.followup.send(
-            f"✅ Resultado enviado: **{placar}**",
+            msg,
             ephemeral=True
         )
 
