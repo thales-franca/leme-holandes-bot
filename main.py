@@ -1754,6 +1754,63 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
         return []
 
 
+async def ac_owner_season(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_owner_season"):
+            return []
+
+        sh = open_sheet()
+        q = str(current or "").strip().lower()
+
+        items = get_season_choices_fast(sh, query=q, limit=25)
+
+        out: list[app_commands.Choice[int]] = []
+        for item in items:
+            sid = safe_int(item.get("season_id", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if sid <= 0 or not label:
+                continue
+            out.append(app_commands.Choice(name=label[:100], value=sid))
+
+        return out[:25]
+    except Exception:
+        return []
+
+
+async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_owner_cycle_for_season"):
+            return []
+
+        sh = open_sheet()
+
+        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
+        q = str(current or "").strip().lower()
+
+        if season_selected <= 0:
+            return []
+
+        items = get_cycle_choices_fast(
+            sh,
+            season_id=season_selected,
+            query=q,
+            only_open=False,
+            limit=25
+        )
+
+        out: list[app_commands.Choice[int]] = []
+        for item in items:
+            cyc = safe_int(item.get("value", 0), 0)
+            label = str(item.get("label", "")).strip()
+            if cyc <= 0 or not label:
+                continue
+            out.append(app_commands.Choice(name=label[:100], value=cyc))
+
+        return out[:25]
+    except Exception:
+        return []
+
+
 # =========================================================
 # [BLOCO 3/12 termina aqui]
 # =========================================================
@@ -5471,66 +5528,6 @@ async def closeseason(interaction: discord.Interaction):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /closeseason: {e}", ephemeral=True)
-
-
-# =========================================================
-# HELPERS AUTOCOMPLETE — OWNER /cadastrar_player
-# =========================================================
-async def ac_owner_season(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_owner_season"):
-            return []
-
-        sh = open_sheet()
-        q = str(current or "").strip().lower()
-
-        items = get_season_choices_fast(sh, query=q, limit=25)
-
-        out: list[app_commands.Choice[int]] = []
-        for item in items:
-            sid = safe_int(item.get("season_id", 0), 0)
-            label = str(item.get("label", "")).strip()
-            if sid <= 0 or not label:
-                continue
-            out.append(app_commands.Choice(name=label[:100], value=sid))
-
-        return out[:25]
-    except Exception:
-        return []
-
-
-async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: str):
-    try:
-        if _ac_should_skip(interaction, "ac_owner_cycle_for_season"):
-            return []
-
-        sh = open_sheet()
-
-        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
-        q = str(current or "").strip().lower()
-
-        if season_selected <= 0:
-            return []
-
-        items = get_cycle_choices_fast(
-            sh,
-            season_id=season_selected,
-            query=q,
-            only_open=False,
-            limit=25
-        )
-
-        out: list[app_commands.Choice[int]] = []
-        for item in items:
-            cyc = safe_int(item.get("value", 0), 0)
-            label = str(item.get("label", "")).strip()
-            if cyc <= 0 or not label:
-                continue
-            out.append(app_commands.Choice(name=label[:100], value=cyc))
-
-        return out[:25]
-    except Exception:
-        return []
 
 
 @client.tree.command(name="cadastrar_player", description="(ADM/Organizador/Owner) Cadastra player manualmente com season, ciclo, inscrição, deck e decklist.")
