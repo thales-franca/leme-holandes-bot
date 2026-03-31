@@ -3184,6 +3184,21 @@ DECK_ARQUETIPOS = [
 
 
 # =========================================================
+# HELPERS DE NORMALIZAÇÃO / VALIDAÇÃO
+# =========================================================
+def _normalize_deck_token(s: str) -> str:
+    return " ".join(str(s or "").strip().split()).lower()
+
+
+def _resolve_case_insensitive_choice(raw_value: str, allowed_items: list[str]) -> str:
+    norm = _normalize_deck_token(raw_value)
+    for item in allowed_items:
+        if _normalize_deck_token(item) == norm:
+            return item
+    return ""
+
+
+# =========================================================
 # AUTOCOMPLETE
 # =========================================================
 
@@ -3221,14 +3236,14 @@ async def ac_deck_arquetipo(interaction: discord.Interaction, current: str):
 # =========================================================
 
 def _montar_nome_deck(guilda: str, arquetipo: str) -> str:
-    g = str(guilda or "").strip()
-    a = str(arquetipo or "").strip()
+    g = " ".join(str(guilda or "").strip().split())
+    a = " ".join(str(arquetipo or "").strip().split())
 
     if not a:
         return ""
 
     # regra especial
-    if g.lower() == "Sem Guilda":
+    if g.lower() == "sem guilda":
         return a
 
     return f"{g} {a}".strip()
@@ -3286,14 +3301,16 @@ async def inscrever(interaction: discord.Interaction, guilda: str, arquetipo: st
         if player_active_in_cycle(ws_enr, season, cycle, pid):
             return await interaction.followup.send("❌ Você já está inscrito.", ephemeral=True)
 
-        # validações
-        if guilda not in DECK_GUILDAS:
+        # validações (case insensitive + padronização)
+        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
+        if not guilda_final:
             return await interaction.followup.send("❌ Guilda inválida.", ephemeral=True)
 
-        if arquetipo not in DECK_ARQUETIPOS:
+        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
+        if not arquetipo_final:
             return await interaction.followup.send("❌ Arquétipo inválido.", ephemeral=True)
 
-        nome_deck = _montar_nome_deck(guilda, arquetipo)
+        nome_deck = _montar_nome_deck(guilda_final, arquetipo_final)
 
         if not nome_deck or len(nome_deck) > 80:
             return await interaction.followup.send("❌ Nome de deck inválido.", ephemeral=True)
@@ -4812,15 +4829,15 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
             row_lines.append(
                 f"{i:>3} | "
-                f"{nome[:20]:<20} | "
+                f"{nome[:20]:<25} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>5.2f} | "
-                f"{fmt_compact_num(r['pts']):>3} | "
+                f"{r['score']:>6.2f} | "
+                f"{fmt_compact_num(r['pts']):>5.2} | "
                 f"{r['ppm']:>5.2f} | "
-                f"{r['mwp_percent']:>5.1f} | "
-                f"{r['omw_percent']:>5.1f} | "
-                f"{r['gw_percent']:>5.1f} | "
-                f"{r['ogw_percent']:>5.1f}"
+                f"{r['mwp_percent']:>5.2f} | "
+                f"{r['omw_percent']:>5.2f} | "
+                f"{r['gw_percent']:>5.2f} | "
+                f"{r['ogw_percent']:>5.2f}"
             )
 
         chunk_size = 12
@@ -4878,15 +4895,15 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
 
         out.append(
             f"{i:>3} | "
-            f"{nome[:20]:<20} | "
+            f"{nome[:20]:<25} | "
             f"{safe_int(r.get('j', r.get('matches_played', 0)), 0):>2} | "
-            f"{float(r.get('score', 0) or 0):>5.2f} | "
-            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>3} | "
+            f"{float(r.get('score', 0) or 0):>6.2f} | "
+            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>5.2} | "
             f"{float(r.get('ppm', 0) or 0):>5.2f} | "
-            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>5.1f} | "
-            f"{sheet_float(r.get('omw_percent', 0), 0.0):>5.1f} | "
-            f"{sheet_float(r.get('gw_percent', 0), 0.0):>5.1f} | "
-            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>5.1f}"
+            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>5.2f} | "
+            f"{sheet_float(r.get('omw_percent', 0), 0.0):>5.2f} | "
+            f"{sheet_float(r.get('gw_percent', 0), 0.0):>5.2f} | "
+            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>5.2f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
@@ -5370,15 +5387,15 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
             row_lines.append(
                 f"{i:>3} | "
-                f"{nome[:20]:<20} | "
+                f"{nome[:20]:<25} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>5.2f} | "
-                f"{fmt_compact_num(r['pts']):>3} | "
+                f"{r['score']:>6.2f} | "
+                f"{fmt_compact_num(r['pts']):>5.2} | "
                 f"{r['ppm']:>5.2f} | "
-                f"{r['mwp']*100:>5.1f} | "
-                f"{r['omw']*100:>5.1f} | "
-                f"{r['gw']*100:>5.1f} | "
-                f"{r['ogw']*100:>5.1f}"
+                f"{r['mwp']*100:>5.2f} | "
+                f"{r['omw']*100:>5.2f} | "
+                f"{r['gw']*100:>5.2f} | "
+                f"{r['ogw']*100:>5.2f}"
             )
 
         chunk_size = 12
