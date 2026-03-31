@@ -4731,6 +4731,19 @@ async def recalcular(
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 # =========================================================
+# FORMATADOR NUMÉRICO (ATÉ 2 CASAS, SÓ SE NECESSÁRIO)
+# =========================================================
+def fmt_num2(x) -> str:
+    try:
+        v = float(x)
+        if v.is_integer():
+            return str(int(v))
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
+
+
+# =========================================================
 # /ranking (PADRÃO IDÊNTICO AO /ranking_geral, FILTRADO POR CICLO)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
@@ -4827,17 +4840,25 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
 
+            score_txt = fmt_num2(r["score"])
+            pts_txt = fmt_num2(r["pts"])
+            ppm_txt = fmt_num2(r["ppm"])
+            mwp_txt = fmt_num2(r["mwp_percent"])
+            omw_txt = fmt_num2(r["omw_percent"])
+            gw_txt = fmt_num2(r["gw_percent"])
+            ogw_txt = fmt_num2(r["ogw_percent"])
+
             row_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<22} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>6.2f} | "
-                f"{fmt_compact_num(r['pts']):>6.2} | "
-                f"{r['ppm']:>6.2f} | "
-                f"{r['mwp_percent']:>6.2f} | "
-                f"{r['omw_percent']:>6.2f} | "
-                f"{r['gw_percent']:>6.2f} | "
-                f"{r['ogw_percent']:>6.2f}"
+                f"{score_txt:>6} | "
+                f"{pts_txt:>6} | "
+                f"{ppm_txt:>6} | "
+                f"{mwp_txt:>6} | "
+                f"{omw_txt:>6} | "
+                f"{gw_txt:>6} | "
+                f"{ogw_txt:>6}"
             )
 
         chunk_size = 12
@@ -4893,17 +4914,25 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
         p = r.get("player_id", "")
         nome = nick_map.get(p, p)
 
+        score_txt = fmt_num2(r.get('score', 0))
+        pts_txt = fmt_num2(r.get('pts', r.get('match_points', 0)))
+        ppm_txt = fmt_num2(r.get('ppm', 0))
+        mwp_txt = fmt_num2(sheet_float(r.get('mwp_percent', 0), 0.0))
+        omw_txt = fmt_num2(sheet_float(r.get('omw_percent', 0), 0.0))
+        gw_txt = fmt_num2(sheet_float(r.get('gw_percent', 0), 0.0))
+        ogw_txt = fmt_num2(sheet_float(r.get('ogw_percent', 0), 0.0))
+
         out.append(
             f"{i:>3} | "
             f"{nome[:20]:<22} | "
             f"{safe_int(r.get('j', r.get('matches_played', 0)), 0):>2} | "
-            f"{float(r.get('score', 0) or 0):>6.2f} | "
-            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>6.2} | "
-            f"{float(r.get('ppm', 0) or 0):>6.2f} | "
-            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>6.2f} | "
-            f"{sheet_float(r.get('omw_percent', 0), 0.0):>6.2f} | "
-            f"{sheet_float(r.get('gw_percent', 0), 0.0):>6.2f} | "
-            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>6.2f}"
+            f"{score_txt:>6} | "
+            f"{pts_txt:>6} | "
+            f"{ppm_txt:>6} | "
+            f"{mwp_txt:>6} | "
+            f"{omw_txt:>6} | "
+            f"{gw_txt:>6} | "
+            f"{ogw_txt:>6}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
@@ -5295,7 +5324,6 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
             stats[p]["gdraws"] += game_draws
             stats[p]["gplayed"] += games_played
 
-
             # média ponderada pelos matches do ciclo
             if matches_played > 0:
                 stats[p]["omw_weighted_sum"] += omw_raw * matches_played
@@ -5385,17 +5413,25 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         for i, r in enumerate(table[:top], 1):
             nome = nick_map.get(str(r["p"]), str(r["p"]))
 
+            score_txt = fmt_num2(r["score"])
+            pts_txt = fmt_num2(r["pts"])
+            ppm_txt = fmt_num2(r["ppm"])
+            mwp_txt = fmt_num2(r["mwp"] * 100)
+            omw_txt = fmt_num2(r["omw"] * 100)
+            gw_txt = fmt_num2(r["gw"] * 100)
+            ogw_txt = fmt_num2(r["ogw"] * 100)
+
             row_lines.append(
                 f"{i:>3} | "
                 f"{nome[:20]:<22} | "
                 f"{r['j']:>2} | "
-                f"{r['score']:>6.2f} | "
-                f"{fmt_compact_num(r['pts']):>6.2} | "
-                f"{r['ppm']:>6.2f} | "
-                f"{r['mwp']*100:>6.2f} | "
-                f"{r['omw']*100:>6.2f} | "
-                f"{r['gw']*100:>6.2f} | "
-                f"{r['ogw']*100:>6.2f}"
+                f"{score_txt:>6} | "
+                f"{pts_txt:>6} | "
+                f"{ppm_txt:>6} | "
+                f"{mwp_txt:>6} | "
+                f"{omw_txt:>6} | "
+                f"{gw_txt:>6} | "
+                f"{ogw_txt:>6}"
             )
 
         chunk_size = 12
