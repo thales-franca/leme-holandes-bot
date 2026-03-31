@@ -4819,7 +4819,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
-            f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<22} | {'J':>2} | {'SCORE':>6} | {'PTS':>6} | {'PPM':>6} | {'MWP':>6} | {'OMW':>6} | {'GW':>6} | {'OGW':>6}"
         )
         header_lines.append("-" * 110)
 
@@ -4829,15 +4829,15 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
 
             row_lines.append(
                 f"{i:>3} | "
-                f"{nome[:20]:<25} | "
+                f"{nome[:20]:<22} | "
                 f"{r['j']:>2} | "
                 f"{r['score']:>6.2f} | "
-                f"{fmt_compact_num(r['pts']):>5.2} | "
-                f"{r['ppm']:>5.2f} | "
-                f"{r['mwp_percent']:>5.2f} | "
-                f"{r['omw_percent']:>5.2f} | "
-                f"{r['gw_percent']:>5.2f} | "
-                f"{r['ogw_percent']:>5.2f}"
+                f"{fmt_compact_num(r['pts']):>6.2} | "
+                f"{r['ppm']:>6.2f} | "
+                f"{r['mwp_percent']:>6.2f} | "
+                f"{r['omw_percent']:>6.2f} | "
+                f"{r['gw_percent']:>6.2f} | "
+                f"{r['ogw_percent']:>6.2f}"
             )
 
         chunk_size = 12
@@ -4885,7 +4885,7 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out = []
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
     out.append(
-        f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+        f"{'pos':>3} | {'jogador':<22} | {'J':>2} | {'SCORE':>6} | {'PTS':>6} | {'PPM':>6} | {'MWP':>6} | {'OMW':>6} | {'GW':>6} | {'OGW':>6}"
     )
     out.append("-" * 110)
 
@@ -4895,15 +4895,15 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
 
         out.append(
             f"{i:>3} | "
-            f"{nome[:20]:<25} | "
+            f"{nome[:20]:<22} | "
             f"{safe_int(r.get('j', r.get('matches_played', 0)), 0):>2} | "
             f"{float(r.get('score', 0) or 0):>6.2f} | "
-            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>5.2} | "
-            f"{float(r.get('ppm', 0) or 0):>5.2f} | "
-            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>5.2f} | "
-            f"{sheet_float(r.get('omw_percent', 0), 0.0):>5.2f} | "
-            f"{sheet_float(r.get('gw_percent', 0), 0.0):>5.2f} | "
-            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>5.2f}"
+            f"{safe_int(r.get('pts', r.get('match_points', 0)), 0):>6.2} | "
+            f"{float(r.get('ppm', 0) or 0):>6.2f} | "
+            f"{sheet_float(r.get('mwp_percent', 0), 0.0):>6.2f} | "
+            f"{sheet_float(r.get('omw_percent', 0), 0.0):>6.2f} | "
+            f"{sheet_float(r.get('gw_percent', 0), 0.0):>6.2f} | "
+            f"{sheet_float(r.get('ogw_percent', 0), 0.0):>6.2f}"
         )
 
     return "```txt\n" + "\n".join(out) + "\n```"
@@ -5377,7 +5377,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         header_lines = []
         header_lines.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
         header_lines.append(
-            f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<22} | {'J':>2} | {'SCORE':>6} | {'PTS':>6} | {'PPM':>6} | {'MWP':>6} | {'OMW':>6} | {'GW':>6} | {'OGW':>6}"
         )
         header_lines.append("-" * 110)
 
@@ -5387,15 +5387,15 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 
             row_lines.append(
                 f"{i:>3} | "
-                f"{nome[:20]:<25} | "
+                f"{nome[:20]:<22} | "
                 f"{r['j']:>2} | "
                 f"{r['score']:>6.2f} | "
-                f"{fmt_compact_num(r['pts']):>5.2} | "
-                f"{r['ppm']:>5.2f} | "
-                f"{r['mwp']*100:>5.2f} | "
-                f"{r['omw']*100:>5.2f} | "
-                f"{r['gw']*100:>5.2f} | "
-                f"{r['ogw']*100:>5.2f}"
+                f"{fmt_compact_num(r['pts']):>6.2} | "
+                f"{r['ppm']:>6.2f} | "
+                f"{r['mwp']*100:>6.2f} | "
+                f"{r['omw']*100:>6.2f} | "
+                f"{r['gw']*100:>6.2f} | "
+                f"{r['ogw']*100:>6.2f}"
             )
 
         chunk_size = 12
