@@ -3087,65 +3087,168 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
     vals = cached_get_all_values(ws_decks, ttl_seconds=5)
     return len(vals)
 
+# =========================================================
+# LISTAS PRESETADAS — DECKS (ORDENADAS)
+# =========================================================
+
+DECK_GUILDAS = sorted([
+    "Sem Guilda",
+    "5C",
+    "4C",
+    "Abzan",
+    "Azorius",
+    "Bant",
+    "Boros",
+    "Colorless",
+    "Dimir",
+    "Esper",
+    "Golgari",
+    "Grixis",
+    "Gruul",
+    "Izzet",
+    "Jeskai",
+    "Jund",
+    "Mardu",
+    "Mono Black",
+    "Mono Blue",
+    "Mono Green",
+    "Mono Red",
+    "Mono White",
+    "Naya",
+    "Orzhov",
+    "Rakdos",
+    "Selesnya",
+    "Simic",
+    "Sultai",
+    "Temur",
+    "Tribal",
+])
+
+
+DECK_ARQUETIPOS = sorted([
+    "Affinity",
+    "Aggro",
+    "Amulet Titan",
+    "Asmo Food",
+    "Belcher",
+    "Blink",
+    "Broodscale",
+    "Burn",
+    "Combo",
+    "Control",
+    "Creativity",
+    "Death's Shadow",
+    "Delirium",
+    "Domain Zoo",
+    "Dredge",
+    "Eldrazi",
+    "Eldrazi Aggro",
+    "Eldrazi Breach",
+    "Eldrazi Ramp",
+    "Elementals",
+    "Emry Station",
+    "Goblins",
+    "Goryo's",
+    "Hammer",
+    "Hollow One",
+    "Humans",
+    "Land Destruction",
+    "Living End",
+    "Merfolk",
+    "Metalcraft",
+    "Midrange",
+    "Mill",
+    "Miracles",
+    "Murktide",
+    "Necro",
+    "Neoform",
+    "Omnath",
+    "Prowess",
+    "Reanimator",
+    "Ritual",
+    "Ruby Storm",
+    "Samwise Gamgee Combo",
+    "Scam",
+    "Song of Creation",
+    "Spirits",
+    "Storm",
+    "Tempo",
+    "Through the Breach",
+    "Tron",
+    "Valakut",
+    "Vampire",
+    "Wizards",
+    "Yawgmoth",
+    "Zombies",
+])
+
 
 # =========================================================
-# Helpers autocomplete /inscrever
+# AUTOCOMPLETE
 # =========================================================
-def get_player_row_by_discord_id(ws_players, discord_id: str) -> int | None:
-    rows = cached_get_all_values(ws_players, ttl_seconds=10)
-    col = ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
-    did = str(discord_id).strip()
-    for i in range(2, len(rows) + 1):
-        r = rows[i - 1]
-        val = r[col["discord_id"]] if col["discord_id"] < len(r) else ""
-        if str(val).strip() == did:
-            return i
-    return None
+def _filter_preset_choices(items: list[str], current: str, limit: int = 25) -> list[str]:
+    q = str(current or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    if not q:
+        return items[:limit]
+
+    starts = [x for x in items if x.lower().startswith(q)]
+    contains = [x for x in items if q in x.lower() and x not in starts]
+
+    return (starts + contains)[:limit]
 
 
-def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
-    did = str(discord_id).strip()
-
+async def ac_deck_guilda(interaction: discord.Interaction, current: str):
     try:
-        sh = ws_players.spreadsheet
-        row = get_player_row_fast(sh, did)
-        return row if row else None
+        items = _filter_preset_choices(DECK_GUILDAS, current)
+        return [app_commands.Choice(name=i, value=i) for i in items]
     except Exception:
-        rows = cached_get_all_records(ws_players, ttl_seconds=10)
-        for r in rows:
-            if str(r.get("discord_id", "")).strip() == did:
-                return r
-        return None
+        return []
 
 
-def get_deck_record_by_keys(ws_decks, season_id: int, cycle: int, player_id: str) -> dict | None:
-    rows = cached_get_all_records(ws_decks, ttl_seconds=10)
-    pid = str(player_id).strip()
+async def ac_deck_arquetipo(interaction: discord.Interaction, current: str):
+    try:
+        items = _filter_preset_choices(DECK_ARQUETIPOS, current)
+        return [app_commands.Choice(name=i, value=i) for i in items]
+    except Exception:
+        return []
 
-    for r in rows:
-        if safe_int(r.get("season_id", 0), 0) != season_id:
-            continue
-        if safe_int(r.get("cycle", 0), 0) != cycle:
-            continue
-        if str(r.get("player_id", "")).strip() != pid:
-            continue
-        return r
-
-    return None
 
 # =========================================================
-# /inscrever
+# MONTAGEM DO NOME DO DECK
 # =========================================================
-@client.tree.command(name="inscrever", description="Se inscreve automaticamente no ciclo aberto informando deck e decklist.")
+
+def _montar_nome_deck(guilda: str, arquetipo: str) -> str:
+    g = str(guilda or "").strip()
+    a = str(arquetipo or "").strip()
+
+    if not a:
+        return ""
+
+    # regra especial
+    if g.lower() == "Sem Guilda":
+        return a
+
+    return f"{g} {a}".strip()
+
+
+# =========================================================
+# /inscrever (AJUSTADO)
+# =========================================================
+
+@client.tree.command(name="inscrever", description="Se inscreve no ciclo informando guilda, arquétipo e decklist.")
 @app_commands.describe(
-    nome_deck="Nome do deck",
+    guilda="Base do deck",
+    arquetipo="Arquétipo do deck",
     decklist="Link da decklist"
 )
-async def inscrever(interaction: discord.Interaction, nome_deck: str, decklist: str):
+@app_commands.autocomplete(guilda=ac_deck_guilda, arquetipo=ac_deck_arquetipo)
+async def inscrever(interaction: discord.Interaction, guilda: str, arquetipo: str, decklist: str):
+
     await interaction.response.defer(ephemeral=True)
 
-    # valida decklist
     ok, val = validate_decklist_url(decklist)
     if not ok:
         return await interaction.followup.send(val, ephemeral=True)
@@ -3168,106 +3271,60 @@ async def inscrever(interaction: discord.Interaction, nome_deck: str, decklist: 
 
         player_record = get_player_record_by_discord_id(ws_players, pid)
         if not player_record:
-            return await interaction.followup.send(
-                "❌ Seu cadastro não foi encontrado. Entre em contato com um ADM.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Cadastro não encontrado.", ephemeral=True)
 
         nick_atual = str(player_record.get("nick", "")).strip()
-        if not nick_atual:
-            return await interaction.followup.send(
-                "❌ Seu nick não está cadastrado corretamente. Entre em contato com um ADM.",
-                ephemeral=True
-            )
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(f"❌ A season {season} não existe.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Season {season} não existe.", ephemeral=True)
 
         cf = get_cycle_fields(ws_cycles, season, cycle)
-        if cf.get("status") is None:
-            return await interaction.followup.send(f"❌ O ciclo {cycle} não existe na season {season}.", ephemeral=True)
 
-        status = str(cf.get("status", "")).strip().lower()
-        if status != "open":
-            if status == "locked":
-                return await interaction.followup.send(
-                    "❌ Este ciclo já teve os pods gerados e está fechado para novas inscrições.",
-                    ephemeral=True
-                )
-            return await interaction.followup.send(
-                f"❌ O ciclo não está aberto para inscrições (status: {status}).",
-                ephemeral=True
-            )
+        if str(cf.get("status", "")).lower() != "open":
+            return await interaction.followup.send("❌ Ciclo não está aberto.", ephemeral=True)
 
         if player_active_in_cycle(ws_enr, season, cycle, pid):
-            return await interaction.followup.send(
-                "❌ Você já está inscrito neste ciclo. Entre em contato com um ADM.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Você já está inscrito.", ephemeral=True)
 
-        existing_deck = get_deck_record_by_keys(ws_decks, season, cycle, pid)
-        if existing_deck is not None:
-            if str(existing_deck.get("deck", "")).strip() or str(existing_deck.get("decklist_url", "")).strip():
-                return await interaction.followup.send(
-                    "❌ Já existe informação gravada para sua inscrição neste ciclo. Entre em contato com um ADM.",
-                    ephemeral=True
-                )
+        # validações
+        if guilda not in DECK_GUILDAS:
+            return await interaction.followup.send("❌ Guilda inválida.", ephemeral=True)
 
-        nome_deck = str(nome_deck).strip()
+        if arquetipo not in DECK_ARQUETIPOS:
+            return await interaction.followup.send("❌ Arquétipo inválido.", ephemeral=True)
+
+        nome_deck = _montar_nome_deck(guilda, arquetipo)
+
         if not nome_deck or len(nome_deck) > 80:
-            return await interaction.followup.send(
-                "❌ Nome de deck inválido (1 a 80 caracteres).",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Nome de deck inválido.", ephemeral=True)
 
         nowb = now_br_str()
 
-        # adiciona inscrição
         ws_enr.append_row(
             [str(season), str(cycle), pid, "active", nowb, nowb],
             value_input_option="USER_ENTERED"
         )
         cache_invalidate(ws_enr)
 
-        # registra deck
         rown = ensure_deck_row(ws_decks, season, cycle, pid)
         col_decks = ensure_sheet_columns(ws_decks, DECKS_REQUIRED)
 
         ws_decks.batch_update([
-            {
-                "range": f"{col_letter(col_decks['deck'])}{rown}",
-                "values": [[nome_deck]]
-            },
-            {
-                "range": f"{col_letter(col_decks['decklist_url'])}{rown}",
-                "values": [[val]]
-            },
-            {
-                "range": f"{col_letter(col_decks['updated_at'])}{rown}",
-                "values": [[nowb]]
-            },
+            {"range": f"{col_letter(col_decks['deck'])}{rown}", "values": [[nome_deck]]},
+            {"range": f"{col_letter(col_decks['decklist_url'])}{rown}", "values": [[val]]},
+            {"range": f"{col_letter(col_decks['updated_at'])}{rown}", "values": [[nowb]]},
         ])
         cache_invalidate(ws_decks)
 
         await interaction.followup.send(
-            f"✅ Inscrição confirmada na **Season {season} / Ciclo {cycle}**.\n"
-            f"- Nick: **{nick_atual}**\n"
-            f"- Deck: **{nome_deck}**\n"
-            f"- Decklist: salva com sucesso.",
+            f"✅ Inscrição confirmada\n"
+            f"Season {season} / Ciclo {cycle}\n"
+            f"Deck: **{nome_deck}**",
             ephemeral=True
-        )
-
-        await log_admin(
-            interaction,
-            f"inscrição completa: {interaction.user} S{season} C{cycle}"
         )
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /inscrever: {e}",
-            ephemeral=True
-        )
-
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 
 # =================================================
@@ -3839,6 +3896,7 @@ async def meta(interaction: discord.Interaction, season: int, cycle: int):
 # =========================================================
 # /meus_matches
 # =========================================================
+
 @client.tree.command(name="meus_matches", description="Lista seus matches da season/ciclo.")
 @app_commands.describe(season="Season", cycle="Número do ciclo")
 @app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
@@ -3876,6 +3934,7 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
                 my_score = f"{b_w}-{a_w}-{d_g}"
 
             items.append(
+                f"• **{_player_display_name(nick_map, uid)}** "
                 f"vs **{_player_display_name(nick_map, opp)}** | "
                 f"status: **{_match_status_label(r.get('confirmed_status', ''))}** | "
                 f"placar: **{my_score}**"
