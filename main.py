@@ -1731,25 +1731,35 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
         q = str(current or "").strip().replace(" ", "")
 
         options = [
-            "2-0-0",
-            "2-1-0",
-            "1-0-0",
-            "0-2-0",
-            "1-2-0",
-            "0-1-0",
-            "0-0-1",
-            "1-1-0",
-            "1-1-1",
-            "0-0-3",
+            ("2-0-0", "WIN"),
+            ("2-1-0", "WIN"),
+            ("1-0-0", "WIN"),
+
+            ("0-2-0", "LOSS"),
+            ("1-2-0", "LOSS"),
+            ("0-1-0", "LOSS"),
+
+            ("0-0-1", "DRAW"),
+            ("1-1-0", "DRAW"),
+            ("1-1-1", "DRAW"),
+            ("0-0-3", "DRAW"),
         ]
 
         out = []
-        for s in options:
-            if q and q not in s:
+
+        for score, label in options:
+            if q and q not in score:
                 continue
-            out.append(app_commands.Choice(name=s, value=s))
+
+            out.append(
+                app_commands.Choice(
+                    name=f"{score} ({label})",
+                    value=score  # 🔥 NÃO ALTERAR
+                )
+            )
 
         return out[:25]
+
     except Exception:
         return []
 
@@ -2186,8 +2196,6 @@ class LemeBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True  # necessário para fetch_member / on_member_join
-
-        # MESSAGE CONTENT INTENT já estava ativado no portal (histórico do projeto).
         intents.message_content = True
 
         super().__init__(intents=intents)
@@ -2197,32 +2205,33 @@ class LemeBot(discord.Client):
         # Views persistentes (funcionam após restart quando o bot volta online)
         try:
             self.add_view(OnboardingStartView())
-        except Exception:
-            pass
-
-        # inicia limpeza automática do canal de boas-vindas
-        try:
-            if not cleanup_welcome_channel.is_running():
-                cleanup_welcome_channel.start()
-        except Exception:
-            pass
+            self.add_view(ResultConfirmView())
+            print("SETUP: views persistentes registradas com sucesso.")
+        except Exception as e:
+            print(f"ERRO SETUP add_view: {e}")
+            raise
 
         # Sync commands (guild-scoped quando possível)
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
                 self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                print(f"SETUP: sync guild ok. Comandos sincronizados: {len(synced)}")
             else:
-                await self.tree.sync()
-        except Exception:
-            pass
+                synced = await self.tree.sync()
+                print(f"SETUP: sync global ok. Comandos sincronizados: {len(synced)}")
+        except Exception as e:
+            print(f"ERRO SETUP sync: {e}")
+            raise
 
         # Warm cache dos índices RAM leves
         try:
             await warm_ram_indexes()
-        except Exception:
-            pass
+            print("SETUP: warm_ram_indexes ok.")
+        except Exception as e:
+            print(f"ERRO SETUP warm_ram_indexes: {e}")
+            raise
 
 
 client = LemeBot()
@@ -2251,84 +2260,6 @@ async def log_admin_guild(guild: discord.Guild | None, text: str):
             await ch.send(text)
         except Exception:
             pass
-
-
-# =========================================================
-# Limpeza automática do canal de boas-vindas
-# - apaga TODAS as mensagens do canal a cada 60 minutos
-# - inclui mensagens do bot, owner e qualquer interação
-# - usa purge/bulk delete para mensagens recentes
-# - mensagens com mais de 14 dias são apagadas individualmente
-# =========================================================
-@tasks.loop(minutes=60)
-async def cleanup_welcome_channel():
-    try:
-        if not WELCOME_CHANNEL_ID:
-            return
-
-        channel = client.get_channel(WELCOME_CHANNEL_ID)
-        if channel is None:
-            try:
-                channel = await client.fetch_channel(WELCOME_CHANNEL_ID)
-            except Exception:
-                channel = None
-
-        if channel is None:
-            return
-
-        # coleta mensagens
-        msgs = []
-        async for m in channel.history(limit=500):
-            msgs.append(m)
-
-        if not msgs:
-            return
-
-        nowu = utc_now_dt()
-        recent = []
-        old = []
-
-        for m in msgs:
-            try:
-                age = nowu - m.created_at
-                if age <= timedelta(days=14):
-                    recent.append(m)
-                else:
-                    old.append(m)
-            except Exception:
-                old.append(m)
-
-        # apaga recentes em lote
-        try:
-            if recent:
-                await channel.delete_messages(recent)
-        except Exception:
-            # fallback: apaga uma a uma
-            for m in recent:
-                try:
-                    await m.delete()
-                    await asyncio.sleep(0.35)
-                except Exception:
-                    pass
-
-        # apaga antigas uma a uma
-        for m in old:
-            try:
-                await m.delete()
-                await asyncio.sleep(0.35)
-            except Exception:
-                pass
-
-    except Exception:
-        pass
-
-
-@cleanup_welcome_channel.before_loop
-async def before_cleanup_welcome_channel():
-    try:
-        await client.wait_until_ready()
-    except Exception:
-        pass
 
 
 # =========================================================
@@ -3023,36 +2954,12 @@ class ResultConfirmView(discord.ui.View):
 
 
 # =========================================================
-# Posting do onboarding no canal (evento + comando admin)
+# Posting do onboarding no canal (comando admin)
 # =========================================================
-async def post_onboarding_message(channel: discord.abc.Messageable, member_mention: str | None = None):
+async def post_onboarding_message(channel: discord.abc.Messageable):
     base = "Bem-vindo ao **Leme Holandês**! Para começar, clique no botão abaixo:"
-    if member_mention:
-        base = f"{member_mention}\n" + base
     try:
         await channel.send(base, view=OnboardingStartView())
-    except Exception:
-        pass
-
-
-@client.event
-async def on_member_join(member: discord.Member):
-    try:
-        guild = member.guild
-        ch = None
-
-        if WELCOME_CHANNEL_ID:
-            ch = guild.get_channel(WELCOME_CHANNEL_ID)
-            if not ch:
-                try:
-                    ch = await guild.fetch_channel(WELCOME_CHANNEL_ID)
-                except Exception:
-                    ch = None
-
-        if ch:
-            await post_onboarding_message(ch, member_mention=member.mention)
-            await log_admin_guild(guild, f"🟢 Onboarding postado para {member} ({member.id}) em {ch.mention}")
-
     except Exception:
         pass
 
@@ -3076,7 +2983,7 @@ async def onboarding(interaction: discord.Interaction):
         pass
 
     try:
-        await post_onboarding_message(interaction.channel, member_mention=None)
+        await post_onboarding_message(interaction.channel)
     except Exception:
         pass
 
@@ -3969,7 +3876,6 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
                 my_score = f"{b_w}-{a_w}-{d_g}"
 
             items.append(
-                f"• `{r.get('match_id', '')}` | POD {r.get('pod', '')} | "
                 f"vs **{_player_display_name(nick_map, opp)}** | "
                 f"status: **{_match_status_label(r.get('confirmed_status', ''))}** | "
                 f"placar: **{my_score}**"
