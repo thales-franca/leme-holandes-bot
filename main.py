@@ -3091,7 +3091,7 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
 # LISTAS PRESETADAS — DECKS (ORDENADAS)
 # =========================================================
 
-DECK_GUILDAS = sorted([
+DECK_GUILDAS = [
     "Sem Guilda",
     "5C",
     "4C",
@@ -3122,10 +3122,10 @@ DECK_GUILDAS = sorted([
     "Sultai",
     "Temur",
     "Tribal",
-])
+]
 
 
-DECK_ARQUETIPOS = sorted([
+DECK_ARQUETIPOS = [
     "Affinity",
     "Aggro",
     "Amulet Titan",
@@ -3180,7 +3180,7 @@ DECK_ARQUETIPOS = sorted([
     "Wizards",
     "Yawgmoth",
     "Zombies",
-])
+]
 
 
 # =========================================================
