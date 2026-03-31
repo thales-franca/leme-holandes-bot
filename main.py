@@ -7757,8 +7757,9 @@ def _final_warmup():
 
 try:
     _final_warmup()
-except Exception:
-    pass
+except Exception as e:
+    print(f"ERRO CRÍTICO: {e}")
+    raise
 
 
 keep_alive()
