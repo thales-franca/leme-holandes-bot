@@ -4802,7 +4802,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         header_lines = []
         header_lines.append(f"🏆 Ranking — Season {season} | Ciclo {cycle} (Top {top})")
         header_lines.append(
-            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
         header_lines.append("-" * 110)
 
@@ -4868,7 +4868,7 @@ def _format_standings_text(rows, nick_map, season_id, cycle, top=30):
     out = []
     out.append(f"🏆 Ranking — Season {season_id} | Ciclo {cycle} (Top {top})")
     out.append(
-        f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+        f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
     )
     out.append("-" * 110)
 
@@ -5360,7 +5360,7 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
         header_lines = []
         header_lines.append(f"🏆 Ranking Geral — Season {season} (Top {top})")
         header_lines.append(
-            f"{'pos':>3} | {'jogador':<20} | {'J':>2} | {'SCORE':>5} | {'PTS':>3} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
+            f"{'pos':>3} | {'jogador':<25} | {'J':>2} | {'SCORE':>6} | {'PTS':>5} | {'PPM':>5} | {'MWP':>5} | {'OMW':>5} | {'GW':>5} | {'OGW':>5}"
         )
         header_lines.append("-" * 110)
 
