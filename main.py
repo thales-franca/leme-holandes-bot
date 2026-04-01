@@ -5470,8 +5470,9 @@ async def ranking_geral(interaction: discord.Interaction, season: int, top: int 
 # =================================================
 # BLOCO ORIGINAL: BLOCO 8/12
 # SUB-BLOCO: D/7
-# REVISÃO: redução de leituras repetidas em cadastro manual, invalidação
-# consistente de índices RAM e manutenção integral das regras administrativas.
+# REVISÃO: padronização do /cadastrar_player para o mesmo formato de deck
+# do /inscrever (guilda + arquétipo), com autocomplete correspondente,
+# mantendo integralmente as regras administrativas e a estrutura existente.
 # =================================================
 
 # =========================================================
@@ -5553,17 +5554,24 @@ async def closeseason(interaction: discord.Interaction):
     membro="Selecione o usuário no Discord",
     season="Season para cadastrar",
     ciclo="Ciclo para cadastrar",
-    deck="Nome do deck",
+    guilda="Base do deck",
+    arquetipo="Arquétipo do deck",
     decklist="Link (moxfield/ligamagic/mtgdecks/mtggoldfish/melee/mtgtop8)"
 #    decklist="Link (lemeholandes)"
 )
-@app_commands.autocomplete(season=ac_owner_season, ciclo=ac_owner_cycle_for_season)
+@app_commands.autocomplete(
+    season=ac_owner_season,
+    ciclo=ac_owner_cycle_for_season,
+    guilda=ac_deck_guilda,
+    arquetipo=ac_deck_arquetipo
+)
 async def cadastrar_player(
     interaction: discord.Interaction,
     membro: discord.Member,
     season: int,
     ciclo: int,
-    deck: str,
+    guilda: str,
+    arquetipo: str,
     decklist: str
 ):
     if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
@@ -5590,10 +5598,16 @@ async def cadastrar_player(
         if cf.get("status") is None:
             return await interaction.followup.send(f"❌ O ciclo {ciclo} não existe na season {season}.", ephemeral=True)
 
-        nm = str(deck or "").strip()
-        if not nm:
-            return await interaction.followup.send("❌ Informe o deck.", ephemeral=True)
-        if len(nm) > 80:
+        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
+        if not guilda_final:
+            return await interaction.followup.send("❌ Guilda inválida.", ephemeral=True)
+
+        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
+        if not arquetipo_final:
+            return await interaction.followup.send("❌ Arquétipo inválido.", ephemeral=True)
+
+        nm = _montar_nome_deck(guilda_final, arquetipo_final)
+        if not nm or len(nm) > 80:
             return await interaction.followup.send("❌ Nome de deck inválido (1 a 80 caracteres).", ephemeral=True)
 
         ok, val = validate_decklist_url(decklist)
@@ -5718,7 +5732,7 @@ async def cadastrar_player(
         msg_parts.append(f"- Referência final: **Season {season} / Ciclo {ciclo}**")
 
         await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
-        await log_admin(interaction, f"cadastrar_player: {raw} ({membro.id}) season={season} ciclo={ciclo}")
+        await log_admin(interaction, f"cadastrar_player: {raw} ({membro.id}) season={season} ciclo={ciclo} deck='{nm}'")
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /cadastrar_player: {e}", ephemeral=True)
@@ -7742,6 +7756,4175 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
 
 # =================================================
 # FIM DO BLOCO EXTRA
+# =================================================
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 13/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Estrutura base da Fase Final (FinalStage, FinalParticipants, FinalMatches),
+# validações da season, leitura do ranking geral e definição do TOP (2/4/8/16).
+# Não altera nenhuma lógica existente do sistema de ciclos.
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+# =========================================================
+# HEADERS — FASE FINAL
+# =========================================================
+
+FINAL_STAGE_HEADER = [
+    "season_id",
+    "status",
+    "top_size",
+    "format",
+    "created_at",
+    "updated_at",
+]
+
+FINAL_STAGE_REQUIRED = [
+    "season_id",
+    "status",
+    "top_size",
+]
+
+FINAL_PARTICIPANTS_HEADER = [
+    "season_id",
+    "seed",
+    "player_id",
+    "ranking_position",
+    "status",
+    "created_at",
+    "updated_at",
+]
+
+FINAL_PARTICIPANTS_REQUIRED = [
+    "season_id",
+    "seed",
+    "player_id",
+]
+
+FINAL_MATCHES_HEADER = [
+    "final_match_id",
+    "season_id",
+    "bracket",
+    "round",
+    "match_order",
+    "player_a_id",
+    "player_b_id",
+    "a_games_won",
+    "b_games_won",
+    "result_type",
+    "status",
+    "winner_id",
+    "loser_id",
+    "next_win_match_id",
+    "next_win_slot",
+    "next_lose_match_id",
+    "next_lose_slot",
+    "is_reset_match",
+    "created_at",
+    "updated_at",
+]
+
+FINAL_MATCHES_REQUIRED = [
+    "final_match_id",
+    "season_id",
+    "bracket",
+    "round",
+    "match_order",
+    "player_a_id",
+    "player_b_id",
+    "status",
+]
+
+
+# =========================================================
+# ENSURE — FASE FINAL
+# =========================================================
+
+def ensure_final_sheets(sh):
+    ws_stage = ensure_worksheet(
+        sh,
+        "FinalStage",
+        FINAL_STAGE_HEADER,
+        rows=50,
+        cols=20
+    )
+    ws_participants = ensure_worksheet(
+        sh,
+        "FinalParticipants",
+        FINAL_PARTICIPANTS_HEADER,
+        rows=200,
+        cols=20
+    )
+    ws_matches = ensure_worksheet(
+        sh,
+        "FinalMatches",
+        FINAL_MATCHES_HEADER,
+        rows=2000,
+        cols=25
+    )
+
+    ensure_sheet_columns(ws_stage, FINAL_STAGE_REQUIRED)
+    ensure_sheet_columns(ws_participants, FINAL_PARTICIPANTS_REQUIRED)
+    ensure_sheet_columns(ws_matches, FINAL_MATCHES_REQUIRED)
+
+    return ws_stage, ws_participants, ws_matches
+
+
+# =========================================================
+# HELPERS — FASE FINAL / STAGE
+# =========================================================
+
+def get_final_stage_row(ws_stage, season_id: int) -> int | None:
+    rows = cached_get_all_values(ws_stage, ttl_seconds=10)
+    if len(rows) <= 1:
+        return None
+
+    col = ensure_sheet_columns(ws_stage, FINAL_STAGE_REQUIRED)
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+        sid = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+
+        if sid == season_id:
+            return i
+
+    return None
+
+
+def get_final_stage_fields(ws_stage, season_id: int) -> dict:
+    rows = cached_get_all_values(ws_stage, ttl_seconds=10)
+    col = ensure_sheet_columns(ws_stage, FINAL_STAGE_REQUIRED)
+
+    out = {
+        "season_id": season_id,
+        "status": None,
+        "top_size": 0,
+        "format": "",
+        "created_at": "",
+        "updated_at": "",
+    }
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+        sid = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+
+        if sid != season_id:
+            continue
+
+        out["status"] = str(r[col["status"]] if col["status"] < len(r) else "").strip().lower()
+
+        # colunas opcionais adicionais
+        header = rows[0]
+        idx = {name: j for j, name in enumerate(header)}
+
+        if "top_size" in idx:
+            j = idx["top_size"]
+            out["top_size"] = safe_int(r[j] if j < len(r) else 0, 0)
+
+        if "format" in idx:
+            j = idx["format"]
+            out["format"] = str(r[j] if j < len(r) else "").strip()
+
+        if "created_at" in idx:
+            j = idx["created_at"]
+            out["created_at"] = str(r[j] if j < len(r) else "").strip()
+
+        if "updated_at" in idx:
+            j = idx["updated_at"]
+            out["updated_at"] = str(r[j] if j < len(r) else "").strip()
+
+        return out
+
+    return out
+
+
+def final_stage_exists(ws_stage, season_id: int) -> bool:
+    return get_final_stage_row(ws_stage, season_id) is not None
+
+
+def set_final_stage(
+    ws_stage,
+    season_id: int,
+    status: str,
+    top_size: int,
+    fmt: str = "double_elimination"
+):
+    status = str(status or "").strip().lower()
+    top_size = safe_int(top_size, 0)
+    nowb = now_br_str()
+
+    rown = get_final_stage_row(ws_stage, season_id)
+    header = cached_get_all_values(ws_stage, ttl_seconds=10)
+    idx = {name: i for i, name in enumerate(header[0] if header else FINAL_STAGE_HEADER)}
+
+    if rown is None:
+        ws_stage.append_row(
+            [
+                str(season_id),
+                status,
+                str(top_size),
+                str(fmt),
+                nowb,
+                nowb,
+            ],
+            value_input_option="USER_ENTERED"
+        )
+        cache_invalidate(ws_stage)
+        return
+
+    updates = []
+
+    if "status" in idx:
+        updates.append({
+            "range": f"{col_letter(idx['status'])}{rown}",
+            "values": [[status]]
+        })
+
+    if "top_size" in idx:
+        updates.append({
+            "range": f"{col_letter(idx['top_size'])}{rown}",
+            "values": [[str(top_size)]]
+        })
+
+    if "format" in idx:
+        updates.append({
+            "range": f"{col_letter(idx['format'])}{rown}",
+            "values": [[str(fmt)]]
+        })
+
+    if "updated_at" in idx:
+        updates.append({
+            "range": f"{col_letter(idx['updated_at'])}{rown}",
+            "values": [[nowb]]
+        })
+
+    if updates:
+        ws_stage.batch_update(updates)
+        cache_invalidate(ws_stage)
+
+
+# =========================================================
+# VALIDAÇÕES — FASE FINAL
+# =========================================================
+
+def final_all_cycles_completed(sh, season_id: int) -> bool:
+    """
+    Regra:
+    - a season precisa ter pelo menos 1 ciclo cadastrado
+    - todos os ciclos da season precisam estar completed
+    """
+    ws_cycles = ensure_worksheet(
+        sh,
+        "Cycles",
+        CYCLES_HEADER,
+        rows=2000,
+        cols=25
+    )
+
+    rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
+
+    found_any = False
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        found_any = True
+
+        st = str(r.get("status", "")).strip().lower()
+        if st != "completed":
+            return False
+
+    return found_any
+
+
+# =========================================================
+# LEITURA — RANKING GERAL FINAL DA SEASON
+# BASE OFICIAL PARA CLASSIFICAÇÃO DA FASE FINAL
+# =========================================================
+
+def _final_read_ranking_geral_rows(sh, season_id: int) -> list[dict]:
+    """
+    Retorna a classificação final da season usando a mesma lógica oficial
+    do /ranking_geral, mas em formato estruturado.
+
+    Critério:
+    - considera somente jogadores que aparecem na aba Standings da season
+    - isso representa quem participou competitivamente de algum ciclo
+    """
+    ws_standings = ensure_worksheet(
+        sh,
+        "Standings",
+        STANDINGS_HEADER,
+        rows=50000,
+        cols=30
+    )
+    ensure_sheet_columns(ws_standings, STANDINGS_REQUIRED)
+
+    vals = cached_get_all_values(ws_standings, ttl_seconds=10)
+
+    if len(vals) <= 1:
+        return []
+
+    header = vals[0]
+    idx = {name: i for i, name in enumerate(header)}
+
+    stats = {}
+
+    for row in vals[1:]:
+        def getv(name: str, default=""):
+            i = idx.get(name, -1)
+            if i < 0 or i >= len(row):
+                return default
+            return row[i]
+
+        if safe_int(getv("season_id", 0), 0) != season_id:
+            continue
+
+        pid = str(getv("player_id", "")).strip()
+        if not pid:
+            continue
+
+        if pid not in stats:
+            stats[pid] = {
+                "pts": 0.0,
+                "m": 0,
+                "gwins": 0,
+                "glosses": 0,
+                "gdraws": 0,
+                "gplayed": 0,
+                "omw_weighted_sum": 0.0,
+                "ogw_weighted_sum": 0.0,
+                "omw_weight": 0,
+                "ogw_weight": 0,
+            }
+
+        matches_played = safe_int(getv("matches_played", 0), 0)
+        match_points = sheet_float(getv("match_points", 0), 0.0)
+        game_wins = safe_int(getv("game_wins", 0), 0)
+        game_losses = safe_int(getv("game_losses", 0), 0)
+        game_draws = safe_int(getv("game_draws", 0), 0)
+        games_played = safe_int(getv("games_played", 0), 0)
+
+        omw_raw = sheet_float(getv("omw", 0), 0.0)
+        ogw_raw = sheet_float(getv("ogw", 0), 0.0)
+
+        stats[pid]["pts"] += match_points
+        stats[pid]["m"] += matches_played
+        stats[pid]["gwins"] += game_wins
+        stats[pid]["glosses"] += game_losses
+        stats[pid]["gdraws"] += game_draws
+        stats[pid]["gplayed"] += games_played
+
+        if matches_played > 0:
+            stats[pid]["omw_weighted_sum"] += omw_raw * matches_played
+            stats[pid]["ogw_weighted_sum"] += ogw_raw * matches_played
+            stats[pid]["omw_weight"] += matches_played
+            stats[pid]["ogw_weight"] += matches_played
+
+    if not stats:
+        return []
+
+    K = 3
+    table = []
+
+    for pid, s in stats.items():
+        m = s["m"]
+        pts = sheet_float(s["pts"], 0.0)
+
+        raw_mwp = (pts / (3 * m)) if m else 0.0
+        mwp = max(raw_mwp, 0.333)
+
+        ppm = (pts + K) / (m + K) if m else 0.0
+
+        games = s["gplayed"]
+        raw_gw = ((s["gwins"] + 0.5 * s["gdraws"]) / games) if games else 0.0
+        gw = max(raw_gw, 0.333)
+
+        if s["omw_weight"] > 0:
+            omw = max(s["omw_weighted_sum"] / s["omw_weight"], 0.333)
+        else:
+            omw = 0.333
+
+        if s["ogw_weight"] > 0:
+            ogw = max(s["ogw_weighted_sum"] / s["ogw_weight"], 0.333)
+        else:
+            ogw = 0.333
+
+        peso_pts = m / (m + K) if m > 0 else 0.0
+        peso_ppm = K / (m + K) if m > 0 else 0.0
+        score = pts * peso_pts + ppm * peso_ppm
+
+        table.append({
+            "player_id": pid,
+            "score": round(score, 6),
+            "pts": round(pts, 6),
+            "ppm": round(ppm, 6),
+            "mwp": round(mwp, 6),
+            "omw": round(omw, 6),
+            "gw": round(gw, 6),
+            "ogw": round(ogw, 6),
+            "matches": m,
+        })
+
+    table.sort(
+        key=lambda x: (
+            x["score"],
+            x["ppm"],
+            x["mwp"],
+            x["omw"],
+            x["gw"],
+            x["ogw"],
+        ),
+        reverse=True
+    )
+
+    out = []
+    for pos, item in enumerate(table, start=1):
+        row = dict(item)
+        row["ranking_position"] = pos
+        out.append(row)
+
+    return out
+
+
+# =========================================================
+# DEFINIÇÃO DO TOP DA FASE FINAL
+# REGRA OFICIAL:
+# - até 8 jogadores -> TOP 2
+# - 9 a 15 -> TOP 4
+# - 16 a 31 -> TOP 8
+# - 32+ -> TOP 16
+# =========================================================
+
+def define_final_top_size(total_players: int) -> int:
+    total = safe_int(total_players, 0)
+
+    if total <= 0:
+        return 0
+    if total <= 8:
+        return 2
+    if total <= 15:
+        return 4
+    if total <= 31:
+        return 8
+    return 16
+
+
+def get_final_qualified_players(sh, season_id: int) -> tuple[list[dict], int]:
+    """
+    Retorna:
+    - lista dos classificados (já com seed)
+    - top_size calculado
+
+    Critério:
+    - conta apenas jogadores que aparecem no ranking geral da season
+    """
+    ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
+
+    if not ranking_rows:
+        return [], 0
+
+    total_players = len(ranking_rows)
+    top_size = define_final_top_size(total_players)
+
+    if top_size <= 0:
+        return [], 0
+
+    qualified = ranking_rows[:top_size]
+
+    out = []
+    for seed, r in enumerate(qualified, start=1):
+        out.append({
+            "season_id": season_id,
+            "seed": seed,
+            "player_id": str(r.get("player_id", "")).strip(),
+            "ranking_position": safe_int(r.get("ranking_position", seed), seed),
+            "score": sheet_float(r.get("score", 0), 0.0),
+            "pts": sheet_float(r.get("pts", 0), 0.0),
+            "ppm": sheet_float(r.get("ppm", 0), 0.0),
+            "mwp": sheet_float(r.get("mwp", 0), 0.0),
+            "omw": sheet_float(r.get("omw", 0), 0.0),
+            "gw": sheet_float(r.get("gw", 0), 0.0),
+            "ogw": sheet_float(r.get("ogw", 0), 0.0),
+            "matches": safe_int(r.get("matches", 0), 0),
+        })
+
+    return out, top_size
+
+
+# =========================================================
+# HELPERS — PARTICIPANTES DA FASE FINAL
+# =========================================================
+
+def clear_final_participants_for_season(ws_participants, season_id: int):
+    """
+    Remove todos os participantes da season e preserva outras seasons.
+    """
+    vals = cached_get_all_values(ws_participants, ttl_seconds=10)
+
+    if not vals:
+        ws_participants.append_row(FINAL_PARTICIPANTS_HEADER)
+        cache_invalidate(ws_participants)
+        return
+
+    header = vals[0]
+    kept = [header]
+
+    idx = {name: i for i, name in enumerate(header)}
+    sid_idx = idx.get("season_id", 0)
+
+    for row in vals[1:]:
+        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
+        if sid == season_id:
+            continue
+        kept.append(row)
+
+    ws_participants.clear()
+    ws_participants.append_rows(kept, value_input_option="RAW")
+    cache_invalidate(ws_participants)
+
+
+def save_final_participants(ws_participants, season_id: int, qualified_rows: list[dict]):
+    """
+    Salva os classificados da fase final da season.
+    Sempre regrava a season por completo para garantir consistência.
+    """
+    clear_final_participants_for_season(ws_participants, season_id)
+
+    if not qualified_rows:
+        return
+
+    nowb = now_br_str()
+    rows_to_add = []
+
+    for r in qualified_rows:
+        rows_to_add.append([
+            str(season_id),
+            str(safe_int(r.get("seed", 0), 0)),
+            str(r.get("player_id", "")).strip(),
+            str(safe_int(r.get("ranking_position", 0), 0)),
+            "active",
+            nowb,
+            nowb,
+        ])
+
+    if rows_to_add:
+        ws_participants.append_rows(
+            rows_to_add,
+            value_input_option="USER_ENTERED"
+        )
+        cache_invalidate(ws_participants)
+
+
+def get_final_participants_rows(ws_participants, season_id: int) -> list[dict]:
+    rows = cached_get_all_records(ws_participants, ttl_seconds=10)
+
+    out = []
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        out.append({
+            "season_id": season_id,
+            "seed": safe_int(r.get("seed", 0), 0),
+            "player_id": str(r.get("player_id", "")).strip(),
+            "ranking_position": safe_int(r.get("ranking_position", 0), 0),
+            "status": str(r.get("status", "")).strip().lower(),
+            "created_at": str(r.get("created_at", "")).strip(),
+            "updated_at": str(r.get("updated_at", "")).strip(),
+        })
+
+    out.sort(key=lambda x: safe_int(x.get("seed", 0), 999999))
+    return out
+
+
+# =========================================================
+# HELPERS — MATCHES DA FASE FINAL (LEITURA BASE)
+# =========================================================
+
+def get_final_matches_rows(ws_matches, season_id: int) -> list[dict]:
+    rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+    out = []
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+
+        out.append({
+            "final_match_id": str(r.get("final_match_id", "")).strip(),
+            "season_id": safe_int(r.get("season_id", 0), 0),
+            "bracket": str(r.get("bracket", "")).strip().lower(),
+            "round": safe_int(r.get("round", 0), 0),
+            "match_order": safe_int(r.get("match_order", 0), 0),
+            "player_a_id": str(r.get("player_a_id", "")).strip(),
+            "player_b_id": str(r.get("player_b_id", "")).strip(),
+            "a_games_won": safe_int(r.get("a_games_won", 0), 0),
+            "b_games_won": safe_int(r.get("b_games_won", 0), 0),
+            "result_type": str(r.get("result_type", "")).strip().lower(),
+            "status": str(r.get("status", "")).strip().lower(),
+            "winner_id": str(r.get("winner_id", "")).strip(),
+            "loser_id": str(r.get("loser_id", "")).strip(),
+            "next_win_match_id": str(r.get("next_win_match_id", "")).strip(),
+            "next_win_slot": str(r.get("next_win_slot", "")).strip(),
+            "next_lose_match_id": str(r.get("next_lose_match_id", "")).strip(),
+            "next_lose_slot": str(r.get("next_lose_slot", "")).strip(),
+            "is_reset_match": as_bool(r.get("is_reset_match", "FALSE")),
+            "created_at": str(r.get("created_at", "")).strip(),
+            "updated_at": str(r.get("updated_at", "")).strip(),
+        })
+
+    out.sort(
+        key=lambda x: (
+            str(x.get("bracket", "")),
+            safe_int(x.get("round", 0), 0),
+            safe_int(x.get("match_order", 0), 0),
+            str(x.get("final_match_id", "")).lower(),
+        )
+    )
+
+    return out
+
+
+# =================================================
+# FIM DO BLOCO 13/12
+# =================================================
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 14/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Índices RAM da Fase Final (FinalStage, FinalParticipants,
+# FinalMatches e FinalDecks), com helpers *_fast, invalidação consistente
+# e leitura otimizada para os próximos comandos e geração do chaveamento.
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+# =========================================================
+# HEADERS — FINAL DECKS
+# =========================================================
+
+FINAL_DECKS_HEADER = [
+    "season_id",
+    "player_id",
+    "deck",
+    "decklist_url",
+    "created_at",
+    "updated_at",
+]
+
+FINAL_DECKS_REQUIRED = [
+    "season_id",
+    "player_id",
+    "deck",
+    "decklist_url",
+]
+
+
+# =========================================================
+# ENSURE — FINAL DECKS
+# =========================================================
+
+def ensure_final_decks_sheet(sh):
+    ws = ensure_worksheet(
+        sh,
+        "FinalDecks",
+        FINAL_DECKS_HEADER,
+        rows=500,
+        cols=20
+    )
+    ensure_sheet_columns(ws, FINAL_DECKS_REQUIRED)
+    return ws
+
+
+# =========================================================
+# LOCKS GLOBAIS — FASE FINAL
+# =========================================================
+
+_FINAL_STAGE_RAM_INDEX = {
+    "ts": 0.0,
+    "by_season": {},
+}
+_FINAL_STAGE_RAM_INDEX_LOCK = threading.Lock()
+_FINAL_STAGE_RAM_INDEX_BUILD_LOCK = threading.Lock()
+_FINAL_STAGE_RAM_INDEX_TTL_SECONDS = 60
+
+_FINAL_PARTICIPANTS_RAM_INDEX = {
+    "ts": 0.0,
+    "by_season": {},
+    "by_player": {},
+}
+_FINAL_PARTICIPANTS_RAM_INDEX_LOCK = threading.Lock()
+_FINAL_PARTICIPANTS_RAM_INDEX_BUILD_LOCK = threading.Lock()
+_FINAL_PARTICIPANTS_RAM_INDEX_TTL_SECONDS = 60
+
+_FINAL_MATCHES_RAM_INDEX = {
+    "ts": 0.0,
+    "by_season": {},
+    "by_match_id": {},
+    "by_player": {},
+}
+_FINAL_MATCHES_RAM_INDEX_LOCK = threading.Lock()
+_FINAL_MATCHES_RAM_INDEX_BUILD_LOCK = threading.Lock()
+_FINAL_MATCHES_RAM_INDEX_TTL_SECONDS = 60
+
+_FINAL_DECKS_RAM_INDEX = {
+    "ts": 0.0,
+    "by_season": {},
+    "by_player": {},
+}
+_FINAL_DECKS_RAM_INDEX_LOCK = threading.Lock()
+_FINAL_DECKS_RAM_INDEX_BUILD_LOCK = threading.Lock()
+_FINAL_DECKS_RAM_INDEX_TTL_SECONDS = 60
+
+
+# =========================================================
+# INVALIDATE — FASE FINAL
+# =========================================================
+
+def invalidate_final_stage_ram_index():
+    with _FINAL_STAGE_RAM_INDEX_LOCK:
+        _FINAL_STAGE_RAM_INDEX["ts"] = 0.0
+        _FINAL_STAGE_RAM_INDEX["by_season"] = {}
+
+
+def invalidate_final_participants_ram_index():
+    with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+        _FINAL_PARTICIPANTS_RAM_INDEX["ts"] = 0.0
+        _FINAL_PARTICIPANTS_RAM_INDEX["by_season"] = {}
+        _FINAL_PARTICIPANTS_RAM_INDEX["by_player"] = {}
+
+
+def invalidate_final_matches_ram_index():
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        _FINAL_MATCHES_RAM_INDEX["ts"] = 0.0
+        _FINAL_MATCHES_RAM_INDEX["by_season"] = {}
+        _FINAL_MATCHES_RAM_INDEX["by_match_id"] = {}
+        _FINAL_MATCHES_RAM_INDEX["by_player"] = {}
+
+
+def invalidate_final_decks_ram_index():
+    with _FINAL_DECKS_RAM_INDEX_LOCK:
+        _FINAL_DECKS_RAM_INDEX["ts"] = 0.0
+        _FINAL_DECKS_RAM_INDEX["by_season"] = {}
+        _FINAL_DECKS_RAM_INDEX["by_player"] = {}
+
+
+def invalidate_all_final_ram_indexes():
+    invalidate_final_stage_ram_index()
+    invalidate_final_participants_ram_index()
+    invalidate_final_matches_ram_index()
+    invalidate_final_decks_ram_index()
+
+
+# =========================================================
+# NORMALIZADORES — FASE FINAL
+# =========================================================
+
+def _normalize_final_stage_row(raw: dict) -> dict:
+    return {
+        "season_id": safe_int(raw.get("season_id", 0), 0),
+        "status": str(raw.get("status", "")).strip().lower(),
+        "top_size": safe_int(raw.get("top_size", 0), 0),
+        "format": str(raw.get("format", "")).strip(),
+        "created_at": str(raw.get("created_at", "")).strip(),
+        "updated_at": str(raw.get("updated_at", "")).strip(),
+    }
+
+
+def _normalize_final_participant_row(raw: dict) -> dict:
+    return {
+        "season_id": safe_int(raw.get("season_id", 0), 0),
+        "seed": safe_int(raw.get("seed", 0), 0),
+        "player_id": str(raw.get("player_id", "")).strip(),
+        "ranking_position": safe_int(raw.get("ranking_position", 0), 0),
+        "status": str(raw.get("status", "")).strip().lower(),
+        "created_at": str(raw.get("created_at", "")).strip(),
+        "updated_at": str(raw.get("updated_at", "")).strip(),
+    }
+
+
+def _normalize_final_match_row(raw: dict) -> dict:
+    return {
+        "final_match_id": str(raw.get("final_match_id", "")).strip(),
+        "season_id": safe_int(raw.get("season_id", 0), 0),
+        "bracket": str(raw.get("bracket", "")).strip().lower(),
+        "round": safe_int(raw.get("round", 0), 0),
+        "match_order": safe_int(raw.get("match_order", 0), 0),
+        "player_a_id": str(raw.get("player_a_id", "")).strip(),
+        "player_b_id": str(raw.get("player_b_id", "")).strip(),
+        "a_games_won": safe_int(raw.get("a_games_won", 0), 0),
+        "b_games_won": safe_int(raw.get("b_games_won", 0), 0),
+        "result_type": str(raw.get("result_type", "")).strip().lower(),
+        "status": str(raw.get("status", "")).strip().lower(),
+        "winner_id": str(raw.get("winner_id", "")).strip(),
+        "loser_id": str(raw.get("loser_id", "")).strip(),
+        "next_win_match_id": str(raw.get("next_win_match_id", "")).strip(),
+        "next_win_slot": str(raw.get("next_win_slot", "")).strip(),
+        "next_lose_match_id": str(raw.get("next_lose_match_id", "")).strip(),
+        "next_lose_slot": str(raw.get("next_lose_slot", "")).strip(),
+        "is_reset_match": as_bool(raw.get("is_reset_match", "FALSE")),
+        "created_at": str(raw.get("created_at", "")).strip(),
+        "updated_at": str(raw.get("updated_at", "")).strip(),
+    }
+
+
+def _normalize_final_deck_row(raw: dict) -> dict:
+    return {
+        "season_id": safe_int(raw.get("season_id", 0), 0),
+        "player_id": str(raw.get("player_id", "")).strip(),
+        "deck": str(raw.get("deck", "")).strip(),
+        "decklist_url": str(raw.get("decklist_url", "")).strip(),
+        "created_at": str(raw.get("created_at", "")).strip(),
+        "updated_at": str(raw.get("updated_at", "")).strip(),
+    }
+
+
+def _final_match_sort_key(r: dict):
+    bracket_order = {
+        "winners": 1,
+        "losers": 2,
+        "grand_final": 3,
+    }
+    return (
+        bracket_order.get(str(r.get("bracket", "")).strip().lower(), 999),
+        safe_int(r.get("round", 0), 0),
+        safe_int(r.get("match_order", 0), 0),
+        str(r.get("final_match_id", "")).lower(),
+    )
+
+
+def _final_participant_sort_key(r: dict):
+    return (
+        safe_int(r.get("seed", 0), 999999),
+        safe_int(r.get("ranking_position", 0), 999999),
+        str(r.get("player_id", "")).lower(),
+    )
+
+
+# =========================================================
+# BUILD — FINAL STAGE RAM INDEX
+# =========================================================
+
+def _build_final_stage_ram_index(sh) -> dict:
+    ws_stage, _, _ = ensure_final_sheets(sh)
+    rows = cached_get_all_records(ws_stage, ttl_seconds=10)
+
+    by_season = {}
+
+    for raw in rows:
+        r = _normalize_final_stage_row(raw)
+        sid = r["season_id"]
+        if sid <= 0:
+            continue
+
+        by_season[sid] = r
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+    }
+
+
+def ensure_final_stage_ram_index(sh, max_age_seconds: int = _FINAL_STAGE_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _FINAL_STAGE_RAM_INDEX_LOCK:
+        ts = float(_FINAL_STAGE_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    with _FINAL_STAGE_RAM_INDEX_BUILD_LOCK:
+        now = _cache_now()
+
+        with _FINAL_STAGE_RAM_INDEX_LOCK:
+            ts = float(_FINAL_STAGE_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_final_stage_ram_index(sh)
+
+        with _FINAL_STAGE_RAM_INDEX_LOCK:
+            _FINAL_STAGE_RAM_INDEX["ts"] = built["ts"]
+            _FINAL_STAGE_RAM_INDEX["by_season"] = built["by_season"]
+
+
+def get_final_stage_fast(sh, season_id: int) -> dict | None:
+    ensure_final_stage_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return None
+
+    with _FINAL_STAGE_RAM_INDEX_LOCK:
+        row = _FINAL_STAGE_RAM_INDEX.get("by_season", {}).get(sid)
+        return dict(row) if row else None
+
+
+def get_final_stage_ram_index_snapshot() -> dict:
+    with _FINAL_STAGE_RAM_INDEX_LOCK:
+        return {
+            "ts": _FINAL_STAGE_RAM_INDEX.get("ts", 0.0),
+            "seasons_indexed": len(_FINAL_STAGE_RAM_INDEX.get("by_season", {})),
+        }
+
+
+# =========================================================
+# BUILD — FINAL PARTICIPANTS RAM INDEX
+# =========================================================
+
+def _build_final_participants_ram_index(sh) -> dict:
+    _, ws_participants, _ = ensure_final_sheets(sh)
+    rows = cached_get_all_records(ws_participants, ttl_seconds=10)
+
+    by_season = {}
+    by_player = {}
+
+    for raw in rows:
+        r = _normalize_final_participant_row(raw)
+
+        sid = r["season_id"]
+        pid = r["player_id"]
+
+        if sid <= 0 or not pid:
+            continue
+
+        by_season.setdefault(sid, []).append(r)
+        by_player.setdefault((sid, pid), r)
+
+    for sid in by_season:
+        by_season[sid].sort(key=_final_participant_sort_key)
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+        "by_player": by_player,
+    }
+
+
+def ensure_final_participants_ram_index(sh, max_age_seconds: int = _FINAL_PARTICIPANTS_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+        ts = float(_FINAL_PARTICIPANTS_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    with _FINAL_PARTICIPANTS_RAM_INDEX_BUILD_LOCK:
+        now = _cache_now()
+
+        with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+            ts = float(_FINAL_PARTICIPANTS_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_final_participants_ram_index(sh)
+
+        with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+            _FINAL_PARTICIPANTS_RAM_INDEX["ts"] = built["ts"]
+            _FINAL_PARTICIPANTS_RAM_INDEX["by_season"] = built["by_season"]
+            _FINAL_PARTICIPANTS_RAM_INDEX["by_player"] = built["by_player"]
+
+
+def get_final_participants_fast(sh, season_id: int) -> list[dict]:
+    ensure_final_participants_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+        rows = list(_FINAL_PARTICIPANTS_RAM_INDEX.get("by_season", {}).get(sid, []))
+
+    return [dict(r) for r in rows]
+
+
+def get_final_participant_by_player_fast(sh, season_id: int, player_id: str) -> dict | None:
+    ensure_final_participants_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    pid = str(player_id or "").strip()
+
+    if sid <= 0 or not pid:
+        return None
+
+    with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+        row = _FINAL_PARTICIPANTS_RAM_INDEX.get("by_player", {}).get((sid, pid))
+        return dict(row) if row else None
+
+
+def get_final_participants_ram_index_snapshot() -> dict:
+    with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
+        by_season = _FINAL_PARTICIPANTS_RAM_INDEX.get("by_season", {})
+        total = sum(len(v) for v in by_season.values())
+        return {
+            "ts": _FINAL_PARTICIPANTS_RAM_INDEX.get("ts", 0.0),
+            "seasons_indexed": len(by_season),
+            "participants_indexed": total,
+        }
+
+
+# =========================================================
+# BUILD — FINAL MATCHES RAM INDEX
+# =========================================================
+
+def _build_final_matches_ram_index(sh) -> dict:
+    _, _, ws_matches = ensure_final_sheets(sh)
+    rows = cached_get_all_records(ws_matches, ttl_seconds=10)
+
+    by_season = {}
+    by_match_id = {}
+    by_player = {}
+
+    for raw in rows:
+        r = _normalize_final_match_row(raw)
+
+        sid = r["season_id"]
+        mid = r["final_match_id"]
+
+        if sid <= 0 or not mid:
+            continue
+
+        by_season.setdefault(sid, []).append(r)
+        by_match_id[mid] = r
+
+        a = r["player_a_id"]
+        b = r["player_b_id"]
+
+        if a:
+            by_player.setdefault((sid, a), []).append(r)
+        if b:
+            by_player.setdefault((sid, b), []).append(r)
+
+    for sid in by_season:
+        by_season[sid].sort(key=_final_match_sort_key)
+
+    for key in by_player:
+        by_player[key].sort(key=_final_match_sort_key)
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+        "by_match_id": by_match_id,
+        "by_player": by_player,
+    }
+
+
+def ensure_final_matches_ram_index(sh, max_age_seconds: int = _FINAL_MATCHES_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        ts = float(_FINAL_MATCHES_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    with _FINAL_MATCHES_RAM_INDEX_BUILD_LOCK:
+        now = _cache_now()
+
+        with _FINAL_MATCHES_RAM_INDEX_LOCK:
+            ts = float(_FINAL_MATCHES_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_final_matches_ram_index(sh)
+
+        with _FINAL_MATCHES_RAM_INDEX_LOCK:
+            _FINAL_MATCHES_RAM_INDEX["ts"] = built["ts"]
+            _FINAL_MATCHES_RAM_INDEX["by_season"] = built["by_season"]
+            _FINAL_MATCHES_RAM_INDEX["by_match_id"] = built["by_match_id"]
+            _FINAL_MATCHES_RAM_INDEX["by_player"] = built["by_player"]
+
+
+def get_final_matches_fast(sh, season_id: int) -> list[dict]:
+    ensure_final_matches_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        rows = list(_FINAL_MATCHES_RAM_INDEX.get("by_season", {}).get(sid, []))
+
+    return [dict(r) for r in rows]
+
+
+def get_final_match_by_id_fast(sh, final_match_id: str) -> dict | None:
+    ensure_final_matches_ram_index(sh)
+
+    mid = str(final_match_id or "").strip()
+    if not mid:
+        return None
+
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        row = _FINAL_MATCHES_RAM_INDEX.get("by_match_id", {}).get(mid)
+        return dict(row) if row else None
+
+
+def get_final_matches_for_player_fast(sh, season_id: int, player_id: str) -> list[dict]:
+    ensure_final_matches_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    pid = str(player_id or "").strip()
+
+    if sid <= 0 or not pid:
+        return []
+
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        rows = list(_FINAL_MATCHES_RAM_INDEX.get("by_player", {}).get((sid, pid), []))
+
+    return [dict(r) for r in rows]
+
+
+def get_final_matches_ram_index_snapshot() -> dict:
+    with _FINAL_MATCHES_RAM_INDEX_LOCK:
+        by_season = _FINAL_MATCHES_RAM_INDEX.get("by_season", {})
+        total = sum(len(v) for v in by_season.values())
+        return {
+            "ts": _FINAL_MATCHES_RAM_INDEX.get("ts", 0.0),
+            "seasons_indexed": len(by_season),
+            "matches_indexed": total,
+            "match_ids_indexed": len(_FINAL_MATCHES_RAM_INDEX.get("by_match_id", {})),
+        }
+
+
+# =========================================================
+# BUILD — FINAL DECKS RAM INDEX
+# =========================================================
+
+def _build_final_decks_ram_index(sh) -> dict:
+    ws_decks = ensure_final_decks_sheet(sh)
+    rows = cached_get_all_records(ws_decks, ttl_seconds=10)
+
+    by_season = {}
+    by_player = {}
+
+    for raw in rows:
+        r = _normalize_final_deck_row(raw)
+
+        sid = r["season_id"]
+        pid = r["player_id"]
+
+        if sid <= 0 or not pid:
+            continue
+
+        by_season.setdefault(sid, []).append(r)
+        by_player[(sid, pid)] = r
+
+    for sid in by_season:
+        by_season[sid].sort(
+            key=lambda x: (
+                str(x.get("deck", "")).lower(),
+                str(x.get("player_id", "")).lower(),
+            )
+        )
+
+    return {
+        "ts": _cache_now(),
+        "by_season": by_season,
+        "by_player": by_player,
+    }
+
+
+def ensure_final_decks_ram_index(sh, max_age_seconds: int = _FINAL_DECKS_RAM_INDEX_TTL_SECONDS):
+    now = _cache_now()
+
+    with _FINAL_DECKS_RAM_INDEX_LOCK:
+        ts = float(_FINAL_DECKS_RAM_INDEX.get("ts", 0.0) or 0.0)
+        if ts > 0 and (now - ts) <= max_age_seconds:
+            return
+
+    with _FINAL_DECKS_RAM_INDEX_BUILD_LOCK:
+        now = _cache_now()
+
+        with _FINAL_DECKS_RAM_INDEX_LOCK:
+            ts = float(_FINAL_DECKS_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_final_decks_ram_index(sh)
+
+        with _FINAL_DECKS_RAM_INDEX_LOCK:
+            _FINAL_DECKS_RAM_INDEX["ts"] = built["ts"]
+            _FINAL_DECKS_RAM_INDEX["by_season"] = built["by_season"]
+            _FINAL_DECKS_RAM_INDEX["by_player"] = built["by_player"]
+
+
+def get_final_decks_fast(sh, season_id: int) -> list[dict]:
+    ensure_final_decks_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    with _FINAL_DECKS_RAM_INDEX_LOCK:
+        rows = list(_FINAL_DECKS_RAM_INDEX.get("by_season", {}).get(sid, []))
+
+    return [dict(r) for r in rows]
+
+
+def get_final_deck_by_player_fast(sh, season_id: int, player_id: str) -> dict | None:
+    ensure_final_decks_ram_index(sh)
+
+    sid = safe_int(season_id, 0)
+    pid = str(player_id or "").strip()
+
+    if sid <= 0 or not pid:
+        return None
+
+    with _FINAL_DECKS_RAM_INDEX_LOCK:
+        row = _FINAL_DECKS_RAM_INDEX.get("by_player", {}).get((sid, pid))
+        return dict(row) if row else None
+
+
+def get_final_decks_ram_index_snapshot() -> dict:
+    with _FINAL_DECKS_RAM_INDEX_LOCK:
+        by_season = _FINAL_DECKS_RAM_INDEX.get("by_season", {})
+        total = sum(len(v) for v in by_season.values())
+        return {
+            "ts": _FINAL_DECKS_RAM_INDEX.get("ts", 0.0),
+            "seasons_indexed": len(by_season),
+            "decks_indexed": total,
+        }
+
+
+# =========================================================
+# HELPERS RÁPIDOS — ELEGIBILIDADE / DISPONIBILIDADE
+# =========================================================
+
+def get_final_eligible_players_fast(sh, season_id: int) -> list[dict]:
+    """
+    Reaproveita o helper do BLOCO 13 e retorna os elegíveis pelo ranking geral.
+    """
+    qualified, _top_size = get_final_qualified_players(sh, season_id)
+    return [dict(r) for r in qualified]
+
+
+def get_next_final_eligible_players_fast(sh, season_id: int, already_selected_ids: list[str] | set[str]) -> list[dict]:
+    """
+    Retorna a fila completa do ranking geral removendo os já selecionados.
+    Útil para substituir classificados que não poderão participar.
+    """
+    ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
+    selected = {str(x).strip() for x in list(already_selected_ids or [])}
+
+    out = []
+    for row in ranking_rows:
+        pid = str(row.get("player_id", "")).strip()
+        if not pid or pid in selected:
+            continue
+
+        out.append({
+            "player_id": pid,
+            "ranking_position": safe_int(row.get("ranking_position", 0), 0),
+            "score": sheet_float(row.get("score", 0), 0.0),
+            "pts": sheet_float(row.get("pts", 0), 0.0),
+            "ppm": sheet_float(row.get("ppm", 0), 0.0),
+            "mwp": sheet_float(row.get("mwp", 0), 0.0),
+            "omw": sheet_float(row.get("omw", 0), 0.0),
+            "gw": sheet_float(row.get("gw", 0), 0.0),
+            "ogw": sheet_float(row.get("ogw", 0), 0.0),
+            "matches": safe_int(row.get("matches", 0), 0),
+        })
+
+    return out
+
+
+# =========================================================
+# AUTOCOMPLETE — JOGADORES DA FASE FINAL
+# =========================================================
+
+async def ac_final_player(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_final_player"):
+            return []
+
+        sh = open_sheet()
+        season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
+        if season_selected <= 0:
+            return []
+
+        q = str(current or "").strip().lower()
+        nick_map = get_player_nick_map_fast(sh)
+        items = get_final_participants_fast(sh, season_selected)
+
+        out: list[app_commands.Choice[str]] = []
+
+        for item in items:
+            pid = str(item.get("player_id", "")).strip()
+            if not pid:
+                continue
+
+            nick = nick_map.get(pid, pid)
+            seed = safe_int(item.get("seed", 0), 0)
+            label = f"Seed {seed} | {nick}"
+
+            search = f"{pid} {nick} {label}".lower()
+            if q and q not in search:
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=pid))
+
+            if len(out) >= 25:
+                break
+
+        return out[:25]
+
+    except Exception:
+        return []
+
+
+async def ac_final_player_any(interaction: discord.Interaction, current: str):
+    """
+    Autocomplete amplo de jogador para /cadastrar_final.
+    Usa o índice RAM geral de Players.
+    """
+    try:
+        if _ac_should_skip(interaction, "ac_final_player_any"):
+            return []
+
+        sh = open_sheet()
+        items = get_player_choices_fast(sh, query=str(current or "").strip().lower(), limit=25)
+
+        out: list[app_commands.Choice[str]] = []
+        for item in items:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+
+            if not label or not value:
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=value))
+
+        return out[:25]
+
+    except Exception:
+        return []
+
+
+# =================================================
+# FIM DO BLOCO 14/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 15/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Geração completa do chaveamento da fase final (dupla eliminação),
+# com estrutura integral de winners, losers e grand final/reset,
+# incluindo links de progressão para winner e loser.
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+
+# =========================================================
+# HELPERS — IDS E MATCHES DA FASE FINAL
+# =========================================================
+
+def _final_match_id(season_id: int, bracket: str, round_num: int, order: int) -> str:
+    return f"FS{season_id}-{str(bracket).upper()}-R{round_num}-M{order}"
+
+
+def _build_final_match_row_dict(
+    season_id: int,
+    bracket: str,
+    round_num: int,
+    match_order: int,
+    player_a_id: str = "",
+    player_b_id: str = "",
+    next_win_match_id: str = "",
+    next_win_slot: str = "",
+    next_lose_match_id: str = "",
+    next_lose_slot: str = "",
+    is_reset_match: bool = False,
+) -> dict:
+    nowu = now_iso_utc()
+
+    return {
+        "final_match_id": _final_match_id(season_id, bracket, round_num, match_order),
+        "season_id": season_id,
+        "bracket": str(bracket).strip().lower(),
+        "round": round_num,
+        "match_order": match_order,
+        "player_a_id": str(player_a_id or "").strip(),
+        "player_b_id": str(player_b_id or "").strip(),
+        "a_games_won": 0,
+        "b_games_won": 0,
+        "result_type": "final",
+        "status": "open",
+        "winner_id": "",
+        "loser_id": "",
+        "next_win_match_id": str(next_win_match_id or "").strip(),
+        "next_win_slot": str(next_win_slot or "").strip(),
+        "next_lose_match_id": str(next_lose_match_id or "").strip(),
+        "next_lose_slot": str(next_lose_slot or "").strip(),
+        "is_reset_match": bool(is_reset_match),
+        "created_at": nowu,
+        "updated_at": nowu,
+    }
+
+
+def _final_match_row_dict_to_sheet_row(r: dict) -> list:
+    return [
+        str(r.get("final_match_id", "")).strip(),
+        str(safe_int(r.get("season_id", 0), 0)),
+        str(r.get("bracket", "")).strip().lower(),
+        str(safe_int(r.get("round", 0), 0)),
+        str(safe_int(r.get("match_order", 0), 0)),
+        str(r.get("player_a_id", "")).strip(),
+        str(r.get("player_b_id", "")).strip(),
+        str(safe_int(r.get("a_games_won", 0), 0)),
+        str(safe_int(r.get("b_games_won", 0), 0)),
+        str(r.get("result_type", "")).strip().lower(),
+        str(r.get("status", "")).strip().lower(),
+        str(r.get("winner_id", "")).strip(),
+        str(r.get("loser_id", "")).strip(),
+        str(r.get("next_win_match_id", "")).strip(),
+        str(r.get("next_win_slot", "")).strip(),
+        str(r.get("next_lose_match_id", "")).strip(),
+        str(r.get("next_lose_slot", "")).strip(),
+        "TRUE" if as_bool(r.get("is_reset_match", False)) else "FALSE",
+        str(r.get("created_at", "")).strip(),
+        str(r.get("updated_at", "")).strip(),
+    ]
+
+
+# =========================================================
+# HELPERS — SEEDING
+# =========================================================
+
+def _build_seed_pairings(top_size: int) -> list[tuple[int, int]]:
+    """
+    Pareamento inicial:
+    2  -> 1x2
+    4  -> 1x4 / 2x3
+    8  -> 1x8 / 4x5 / 2x7 / 3x6
+    16 -> 1x16 / 8x9 / 4x13 / 5x12 / 2x15 / 7x10 / 3x14 / 6x11
+    """
+    if top_size == 2:
+        return [(1, 2)]
+    if top_size == 4:
+        return [(1, 4), (2, 3)]
+    if top_size == 8:
+        return [(1, 8), (4, 5), (2, 7), (3, 6)]
+    if top_size == 16:
+        return [
+            (1, 16), (8, 9), (4, 13), (5, 12),
+            (2, 15), (7, 10), (3, 14), (6, 11),
+        ]
+    return []
+
+
+# =========================================================
+# TEMPLATE — TOP 2
+# =========================================================
+
+def _generate_final_bracket_top2(season_id: int, participants: list[dict]) -> list[dict]:
+    seed_map = {safe_int(p.get("seed", 0), 0): str(p.get("player_id", "")).strip() for p in participants}
+
+    gf1 = _build_final_match_row_dict(
+        season_id=season_id,
+        bracket="grand_final",
+        round_num=1,
+        match_order=1,
+        player_a_id=seed_map.get(1, ""),
+        player_b_id=seed_map.get(2, ""),
+        next_win_match_id="",
+        next_win_slot="",
+        next_lose_match_id="",
+        next_lose_slot="",
+        is_reset_match=False,
+    )
+
+    return [gf1]
+
+
+# =========================================================
+# TEMPLATE — TOP 4
+# =========================================================
+
+def _generate_final_bracket_top4(season_id: int, participants: list[dict]) -> list[dict]:
+    seed_map = {safe_int(p.get("seed", 0), 0): str(p.get("player_id", "")).strip() for p in participants}
+
+    # Winners
+    w1 = _build_final_match_row_dict(
+        season_id, "winners", 1, 1,
+        seed_map.get(1, ""), seed_map.get(4, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 1),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 1),
+        next_lose_slot="A",
+    )
+    w2 = _build_final_match_row_dict(
+        season_id, "winners", 1, 2,
+        seed_map.get(2, ""), seed_map.get(3, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 1),
+        next_win_slot="B",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 1),
+        next_lose_slot="B",
+    )
+    wf = _build_final_match_row_dict(
+        season_id, "winners", 2, 1,
+        "",
+        "",
+        next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 2, 1),
+        next_lose_slot="B",
+    )
+
+    # Losers
+    l1 = _build_final_match_row_dict(
+        season_id, "losers", 1, 1,
+        "",
+        "",
+        next_win_match_id=_final_match_id(season_id, "losers", 2, 1),
+        next_win_slot="A",
+    )
+    lf = _build_final_match_row_dict(
+        season_id, "losers", 2, 1,
+        "",
+        "",
+        next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+        next_win_slot="B",
+    )
+
+    # Grand Final + Reset
+    gf1 = _build_final_match_row_dict(
+        season_id, "grand_final", 1, 1,
+        "", "",
+        is_reset_match=False
+    )
+    gf2 = _build_final_match_row_dict(
+        season_id, "grand_final", 2, 1,
+        "", "",
+        is_reset_match=True
+    )
+
+    return [w1, w2, wf, l1, lf, gf1, gf2]
+
+
+# =========================================================
+# TEMPLATE — TOP 8
+# =========================================================
+
+def _generate_final_bracket_top8(season_id: int, participants: list[dict]) -> list[dict]:
+    seed_map = {safe_int(p.get("seed", 0), 0): str(p.get("player_id", "")).strip() for p in participants}
+
+    # Winners R1
+    w11 = _build_final_match_row_dict(
+        season_id, "winners", 1, 1,
+        seed_map.get(1, ""), seed_map.get(8, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 1),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 1),
+        next_lose_slot="A",
+    )
+    w12 = _build_final_match_row_dict(
+        season_id, "winners", 1, 2,
+        seed_map.get(4, ""), seed_map.get(5, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 1),
+        next_win_slot="B",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 1),
+        next_lose_slot="B",
+    )
+    w13 = _build_final_match_row_dict(
+        season_id, "winners", 1, 3,
+        seed_map.get(2, ""), seed_map.get(7, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 2),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 2),
+        next_lose_slot="A",
+    )
+    w14 = _build_final_match_row_dict(
+        season_id, "winners", 1, 4,
+        seed_map.get(3, ""), seed_map.get(6, ""),
+        next_win_match_id=_final_match_id(season_id, "winners", 2, 2),
+        next_win_slot="B",
+        next_lose_match_id=_final_match_id(season_id, "losers", 1, 2),
+        next_lose_slot="B",
+    )
+
+    # Winners R2
+    w21 = _build_final_match_row_dict(
+        season_id, "winners", 2, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "winners", 3, 1),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 2, 2),
+        next_lose_slot="B",
+    )
+    w22 = _build_final_match_row_dict(
+        season_id, "winners", 2, 2,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "winners", 3, 1),
+        next_win_slot="B",
+        next_lose_match_id=_final_match_id(season_id, "losers", 2, 1),
+        next_lose_slot="B",
+    )
+
+    # Winners Final
+    wf = _build_final_match_row_dict(
+        season_id, "winners", 3, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+        next_win_slot="A",
+        next_lose_match_id=_final_match_id(season_id, "losers", 4, 1),
+        next_lose_slot="B",
+    )
+
+    # Losers R1
+    l11 = _build_final_match_row_dict(
+        season_id, "losers", 1, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "losers", 2, 1),
+        next_win_slot="A",
+    )
+    l12 = _build_final_match_row_dict(
+        season_id, "losers", 1, 2,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "losers", 2, 2),
+        next_win_slot="A",
+    )
+
+    # Losers R2
+    l21 = _build_final_match_row_dict(
+        season_id, "losers", 2, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "losers", 3, 1),
+        next_win_slot="A",
+    )
+    l22 = _build_final_match_row_dict(
+        season_id, "losers", 2, 2,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "losers", 3, 1),
+        next_win_slot="B",
+    )
+
+    # Losers R3
+    l31 = _build_final_match_row_dict(
+        season_id, "losers", 3, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "losers", 4, 1),
+        next_win_slot="A",
+    )
+
+    # Losers Final
+    lf = _build_final_match_row_dict(
+        season_id, "losers", 4, 1,
+        "", "",
+        next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+        next_win_slot="B",
+    )
+
+    # Grand Final + Reset
+    gf1 = _build_final_match_row_dict(
+        season_id, "grand_final", 1, 1,
+        "", "",
+        is_reset_match=False
+    )
+    gf2 = _build_final_match_row_dict(
+        season_id, "grand_final", 2, 1,
+        "", "",
+        is_reset_match=True
+    )
+
+    return [
+        w11, w12, w13, w14,
+        w21, w22, wf,
+        l11, l12, l21, l22, l31, lf,
+        gf1, gf2
+    ]
+
+
+# =========================================================
+# TEMPLATE — TOP 16
+# =========================================================
+
+def _generate_final_bracket_top16(season_id: int, participants: list[dict]) -> list[dict]:
+    """
+    Estrutura robusta de TOP 16:
+    - winners: 8 + 4 + 2 + 1
+    - losers: 4 + 4 + 2 + 2 + 1 + 1
+    - gf1 + gf2
+    """
+    seed_map = {safe_int(p.get("seed", 0), 0): str(p.get("player_id", "")).strip() for p in participants}
+    rows = []
+
+    # Winners R1
+    pairings = _build_seed_pairings(16)
+    for i, (s1, s2) in enumerate(pairings, start=1):
+        next_match = 1 if i in (1, 2) else 2 if i in (3, 4) else 3 if i in (5, 6) else 4
+        next_slot = "A" if i % 2 == 1 else "B"
+        lose_match = 1 if i in (1, 2) else 2 if i in (3, 4) else 3 if i in (5, 6) else 4
+        lose_slot = "A" if i % 2 == 1 else "B"
+
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "winners", 1, i,
+                seed_map.get(s1, ""), seed_map.get(s2, ""),
+                next_win_match_id=_final_match_id(season_id, "winners", 2, next_match),
+                next_win_slot=next_slot,
+                next_lose_match_id=_final_match_id(season_id, "losers", 1, lose_match),
+                next_lose_slot=lose_slot,
+            )
+        )
+
+    # Winners R2
+    for i in range(1, 5):
+        next_match = 1 if i in (1, 2) else 2
+        next_slot = "A" if i % 2 == 1 else "B"
+        lose_match = i
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "winners", 2, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "winners", 3, next_match),
+                next_win_slot=next_slot,
+                next_lose_match_id=_final_match_id(season_id, "losers", 2, lose_match),
+                next_lose_slot="B",
+            )
+        )
+
+    # Winners R3
+    for i in range(1, 3):
+        next_slot = "A" if i == 1 else "B"
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "winners", 3, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "winners", 4, 1),
+                next_win_slot=next_slot,
+                next_lose_match_id=_final_match_id(season_id, "losers", 4, i),
+                next_lose_slot="B",
+            )
+        )
+
+    # Winners Final
+    rows.append(
+        _build_final_match_row_dict(
+            season_id, "winners", 4, 1,
+            "", "",
+            next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+            next_win_slot="A",
+            next_lose_match_id=_final_match_id(season_id, "losers", 6, 1),
+            next_lose_slot="B",
+        )
+    )
+
+    # Losers R1 (4)
+    for i in range(1, 5):
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "losers", 1, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "losers", 2, i),
+                next_win_slot="A",
+            )
+        )
+
+    # Losers R2 (4)
+    for i in range(1, 5):
+        next_match = 1 if i in (1, 2) else 2 if i in (3, 4) else 1
+        next_slot = "A" if i % 2 == 1 else "B"
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "losers", 2, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "losers", 3, 1 if i in (1, 2) else 2),
+                next_win_slot=next_slot,
+            )
+        )
+
+    # Losers R3 (2)
+    for i in range(1, 3):
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "losers", 3, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "losers", 4, i),
+                next_win_slot="A",
+            )
+        )
+
+    # Losers R4 (2)
+    for i in range(1, 3):
+        rows.append(
+            _build_final_match_row_dict(
+                season_id, "losers", 4, i,
+                "", "",
+                next_win_match_id=_final_match_id(season_id, "losers", 5, 1),
+                next_win_slot="A" if i == 1 else "B",
+            )
+        )
+
+    # Losers R5 (1)
+    rows.append(
+        _build_final_match_row_dict(
+            season_id, "losers", 5, 1,
+            "", "",
+            next_win_match_id=_final_match_id(season_id, "losers", 6, 1),
+            next_win_slot="A",
+        )
+    )
+
+    # Losers Final (R6)
+    rows.append(
+        _build_final_match_row_dict(
+            season_id, "losers", 6, 1,
+            "", "",
+            next_win_match_id=_final_match_id(season_id, "grand_final", 1, 1),
+            next_win_slot="B",
+        )
+    )
+
+    # Grand Final + Reset
+    rows.append(
+        _build_final_match_row_dict(
+            season_id, "grand_final", 1, 1,
+            "", "",
+            is_reset_match=False
+        )
+    )
+    rows.append(
+        _build_final_match_row_dict(
+            season_id, "grand_final", 2, 1,
+            "", "",
+            is_reset_match=True
+        )
+    )
+
+    return rows
+
+
+# =========================================================
+# MASTER — GERAÇÃO COMPLETA
+# =========================================================
+
+def build_final_bracket_rows(season_id: int, participants: list[dict]) -> list[dict]:
+    items = [dict(x) for x in participants]
+    items.sort(key=lambda x: safe_int(x.get("seed", 0), 999999))
+
+    top_size = len(items)
+
+    if top_size == 2:
+        return _generate_final_bracket_top2(season_id, items)
+
+    if top_size == 4:
+        return _generate_final_bracket_top4(season_id, items)
+
+    if top_size == 8:
+        return _generate_final_bracket_top8(season_id, items)
+
+    if top_size == 16:
+        return _generate_final_bracket_top16(season_id, items)
+
+    raise RuntimeError("Top size inválido para geração da fase final.")
+
+
+def generate_final_bracket(sh, season_id: int):
+    participants = get_final_participants_fast(sh, season_id)
+
+    if not participants:
+        raise RuntimeError("Nenhum participante na fase final.")
+
+    top_size = len(participants)
+    if top_size not in (2, 4, 8, 16):
+        raise RuntimeError("Tamanho inválido da fase final.")
+
+    ws_matches = ensure_worksheet(
+        sh,
+        "FinalMatches",
+        FINAL_MATCHES_HEADER,
+        rows=5000,
+        cols=30
+    )
+    ensure_sheet_columns(ws_matches, FINAL_MATCHES_REQUIRED)
+
+    rows_dict = build_final_bracket_rows(season_id, participants)
+    rows_sheet = [_final_match_row_dict_to_sheet_row(r) for r in rows_dict]
+
+    if rows_sheet:
+        ws_matches.append_rows(rows_sheet, value_input_option="USER_ENTERED")
+        cache_invalidate(ws_matches)
+        invalidate_final_matches_ram_index()
+
+    return len(rows_sheet)
+
+
+def get_final_bracket_summary(sh, season_id: int) -> dict:
+    rows = get_final_matches_fast(sh, season_id)
+
+    return {
+        "total_matches": len(rows),
+        "winners": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "winners"]),
+        "losers": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "losers"]),
+        "grand_final": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "grand_final"]),
+    }
+
+
+# =================================================
+# FIM DO BLOCO 15/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 16/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Comandos administrativos da Fase Final:
+# /fase_final (OWNER) para gerar a fase final da season
+# e /cadastrar_final (ADM) para cadastrar manualmente jogador
+# na fase final com deck/decklist no padrão Guilda + Arquétipo.
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+# =========================================================
+# HELPERS — FINAL DECKS
+# =========================================================
+
+def get_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int | None:
+    rows = cached_get_all_values(ws_final_decks, ttl_seconds=10)
+    if len(rows) <= 1:
+        return None
+
+    col = ensure_sheet_columns(ws_final_decks, FINAL_DECKS_REQUIRED)
+    pid = str(player_id or "").strip()
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+
+        s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        p = str(r[col["player_id"]] if col["player_id"] < len(r) else "").strip()
+
+        if s == season_id and p == pid:
+            return i
+
+    return None
+
+
+def ensure_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int:
+    rown = get_final_deck_row(ws_final_decks, season_id, player_id)
+    if rown is not None:
+        return rown
+
+    nowb = now_br_str()
+
+    ws_final_decks.append_row(
+        [
+            str(season_id),
+            str(player_id).strip(),
+            "",
+            "",
+            nowb,
+            nowb,
+        ],
+        value_input_option="USER_ENTERED"
+    )
+    cache_invalidate(ws_final_decks)
+    invalidate_final_decks_ram_index()
+
+    vals = cached_get_all_values(ws_final_decks, ttl_seconds=5)
+    return len(vals)
+
+
+def upsert_final_deck(
+    ws_final_decks,
+    season_id: int,
+    player_id: str,
+    deck_name: str,
+    decklist_url: str
+):
+    rown = ensure_final_deck_row(ws_final_decks, season_id, player_id)
+    col = ensure_sheet_columns(ws_final_decks, FINAL_DECKS_REQUIRED)
+    nowb = now_br_str()
+
+    updates = []
+
+    updates.append({
+        "range": f"{col_letter(col['deck'])}{rown}",
+        "values": [[str(deck_name or "").strip()]]
+    })
+    updates.append({
+        "range": f"{col_letter(col['decklist_url'])}{rown}",
+        "values": [[str(decklist_url or "").strip()]]
+    })
+
+    header_vals = cached_get_all_values(ws_final_decks, ttl_seconds=10)
+    idx = {name: i for i, name in enumerate(header_vals[0] if header_vals else FINAL_DECKS_HEADER)}
+
+    if "updated_at" in idx:
+        updates.append({
+            "range": f"{col_letter(idx['updated_at'])}{rown}",
+            "values": [[nowb]]
+        })
+
+    if updates:
+        ws_final_decks.batch_update(updates)
+        cache_invalidate(ws_final_decks)
+        invalidate_final_decks_ram_index()
+
+
+# =========================================================
+# HELPERS — PARTICIPANTES DA FASE FINAL
+# =========================================================
+
+def get_final_participant_row(ws_participants, season_id: int, player_id: str) -> int | None:
+    rows = cached_get_all_values(ws_participants, ttl_seconds=10)
+    if len(rows) <= 1:
+        return None
+
+    col = ensure_sheet_columns(ws_participants, FINAL_PARTICIPANTS_REQUIRED)
+    header = rows[0]
+    idx = {name: i for i, name in enumerate(header)}
+
+    pid = str(player_id or "").strip()
+
+    for i in range(2, len(rows) + 1):
+        r = rows[i - 1]
+
+        s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        p = str(r[col["player_id"]] if col["player_id"] < len(r) else "").strip()
+
+        if s == season_id and p == pid:
+            return i
+
+    return None
+
+
+def get_next_final_seed(ws_participants, season_id: int) -> int:
+    rows = cached_get_all_records(ws_participants, ttl_seconds=10)
+    mx = 0
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        mx = max(mx, safe_int(r.get("seed", 0), 0))
+
+    return mx + 1 if mx > 0 else 1
+
+
+def save_single_final_participant(
+    ws_participants,
+    season_id: int,
+    player_id: str,
+    ranking_position: int,
+    status: str = "active"
+) -> int:
+    """
+    Adiciona um único jogador à FinalParticipants.
+    Retorna a seed atribuída.
+    Se já existir, apenas reativa/atualiza.
+    """
+    pid = str(player_id or "").strip()
+    if not pid:
+        raise RuntimeError("player_id inválido.")
+
+    existing = get_final_participant_row(ws_participants, season_id, pid)
+    nowb = now_br_str()
+
+    header_vals = cached_get_all_values(ws_participants, ttl_seconds=10)
+    idx = {name: i for i, name in enumerate(header_vals[0] if header_vals else FINAL_PARTICIPANTS_HEADER)}
+
+    if existing is not None:
+        seed_val = 0
+
+        rows = cached_get_all_values(ws_participants, ttl_seconds=10)
+        if 0 < existing <= len(rows):
+            row = rows[existing - 1]
+            if "seed" in idx:
+                j = idx["seed"]
+                seed_val = safe_int(row[j] if j < len(row) else 0, 0)
+
+        updates = []
+
+        if "ranking_position" in idx:
+            updates.append({
+                "range": f"{col_letter(idx['ranking_position'])}{existing}",
+                "values": [[str(safe_int(ranking_position, 0))]]
+            })
+        if "status" in idx:
+            updates.append({
+                "range": f"{col_letter(idx['status'])}{existing}",
+                "values": [[str(status or 'active').strip().lower()]]
+            })
+        if "updated_at" in idx:
+            updates.append({
+                "range": f"{col_letter(idx['updated_at'])}{existing}",
+                "values": [[nowb]]
+            })
+
+        if updates:
+            ws_participants.batch_update(updates)
+            cache_invalidate(ws_participants)
+            invalidate_final_participants_ram_index()
+
+        return seed_val
+
+    seed = get_next_final_seed(ws_participants, season_id)
+
+    ws_participants.append_row(
+        [
+            str(season_id),
+            str(seed),
+            pid,
+            str(safe_int(ranking_position, 0)),
+            str(status or "active").strip().lower(),
+            nowb,
+            nowb,
+        ],
+        value_input_option="USER_ENTERED"
+    )
+
+    cache_invalidate(ws_participants)
+    invalidate_final_participants_ram_index()
+
+    return seed
+
+
+# =========================================================
+# HELPERS — ELEGIBILIDADE / COMPLEMENTAÇÃO DA FILA
+# =========================================================
+
+def build_final_player_pool(sh, season_id: int) -> tuple[list[dict], int]:
+    """
+    Monta a lista final de classificados automática para a fase final.
+
+    Regra:
+    - base = ranking geral da season
+    - top_size é definido pelo número total de jogadores no ranking geral
+    - se algum dos top seeds já estiver indisponível futuramente, a fila de
+      reposição sempre vem do ranking geral logo abaixo
+    """
+    ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
+
+    if not ranking_rows:
+        return [], 0
+
+    total_players = len(ranking_rows)
+    top_size = define_final_top_size(total_players)
+
+    if top_size <= 0:
+        return [], 0
+
+    selected = ranking_rows[:top_size]
+
+    out = []
+    for seed, r in enumerate(selected, start=1):
+        out.append({
+            "season_id": season_id,
+            "seed": seed,
+            "player_id": str(r.get("player_id", "")).strip(),
+            "ranking_position": safe_int(r.get("ranking_position", seed), seed),
+            "score": sheet_float(r.get("score", 0), 0.0),
+            "pts": sheet_float(r.get("pts", 0), 0.0),
+            "ppm": sheet_float(r.get("ppm", 0), 0.0),
+            "mwp": sheet_float(r.get("mwp", 0), 0.0),
+            "omw": sheet_float(r.get("omw", 0), 0.0),
+            "gw": sheet_float(r.get("gw", 0), 0.0),
+            "ogw": sheet_float(r.get("ogw", 0), 0.0),
+            "matches": safe_int(r.get("matches", 0), 0),
+        })
+
+    return out, top_size
+
+
+def clear_final_matches_for_season(ws_matches, season_id: int):
+    vals = cached_get_all_values(ws_matches, ttl_seconds=10)
+
+    if not vals:
+        ws_matches.append_row(FINAL_MATCHES_HEADER)
+        cache_invalidate(ws_matches)
+        invalidate_final_matches_ram_index()
+        return
+
+    header = vals[0]
+    kept = [header]
+
+    idx = {name: i for i, name in enumerate(header)}
+    sid_idx = idx.get("season_id", 1)
+
+    for row in vals[1:]:
+        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
+        if sid == season_id:
+            continue
+        kept.append(row)
+
+    ws_matches.clear()
+    ws_matches.append_rows(kept, value_input_option="RAW")
+    cache_invalidate(ws_matches)
+    invalidate_final_matches_ram_index()
+
+
+def clear_final_stage_for_season(ws_stage, season_id: int):
+    vals = cached_get_all_values(ws_stage, ttl_seconds=10)
+
+    if not vals:
+        ws_stage.append_row(FINAL_STAGE_HEADER)
+        cache_invalidate(ws_stage)
+        invalidate_final_stage_ram_index()
+        return
+
+    header = vals[0]
+    kept = [header]
+
+    idx = {name: i for i, name in enumerate(header)}
+    sid_idx = idx.get("season_id", 0)
+
+    for row in vals[1:]:
+        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
+        if sid == season_id:
+            continue
+        kept.append(row)
+
+    ws_stage.clear()
+    ws_stage.append_rows(kept, value_input_option="RAW")
+    cache_invalidate(ws_stage)
+    invalidate_final_stage_ram_index()
+
+
+def clear_final_decks_for_season(ws_final_decks, season_id: int):
+    vals = cached_get_all_values(ws_final_decks, ttl_seconds=10)
+
+    if not vals:
+        ws_final_decks.append_row(FINAL_DECKS_HEADER)
+        cache_invalidate(ws_final_decks)
+        invalidate_final_decks_ram_index()
+        return
+
+    header = vals[0]
+    kept = [header]
+
+    idx = {name: i for i, name in enumerate(header)}
+    sid_idx = idx.get("season_id", 0)
+
+    for row in vals[1:]:
+        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
+        if sid == season_id:
+            continue
+        kept.append(row)
+
+    ws_final_decks.clear()
+    ws_final_decks.append_rows(kept, value_input_option="RAW")
+    cache_invalidate(ws_final_decks)
+    invalidate_final_decks_ram_index()
+
+
+# =========================================================
+# /fase_final
+# =========================================================
+
+@client.tree.command(
+    name="fase_final",
+    description="(OWNER) Gera a fase final da season após todos os ciclos completed."
+)
+@app_commands.describe(season="Season para gerar a fase final")
+@app_commands.autocomplete(season=ac_owner_season)
+async def fase_final(interaction: discord.Interaction, season: int):
+    if not await is_owner_only(interaction):
+        return await interaction.response.send_message(
+            "❌ Apenas o OWNER do servidor pode usar.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        ensure_all_sheets(sh)
+        ensure_final_sheets(sh)
+        ws_final_decks = ensure_final_decks_sheet(sh)
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        if not final_all_cycles_completed(sh, season):
+            return await interaction.followup.send(
+                "❌ A fase final só pode ser gerada quando todos os ciclos da season estiverem completed.",
+                ephemeral=True
+            )
+
+        ranking_rows = _final_read_ranking_geral_rows(sh, season)
+        if not ranking_rows:
+            return await interaction.followup.send(
+                "❌ Não há ranking geral válido para esta season.",
+                ephemeral=True
+            )
+
+        qualified_rows, top_size = build_final_player_pool(sh, season)
+        if not qualified_rows or top_size <= 0:
+            return await interaction.followup.send(
+                "❌ Não foi possível determinar os classificados da fase final.",
+                ephemeral=True
+            )
+
+        ws_stage, ws_participants, ws_matches = ensure_final_sheets(sh)
+
+        # Regeneração controlada:
+        # limpa apenas a season alvo e regrava tudo.
+        clear_final_stage_for_season(ws_stage, season)
+        clear_final_participants_for_season(ws_participants, season)
+        clear_final_matches_for_season(ws_matches, season)
+        clear_final_decks_for_season(ws_final_decks, season)
+
+        # grava stage
+        set_final_stage(
+            ws_stage=ws_stage,
+            season_id=season,
+            status="generated",
+            top_size=top_size,
+            fmt="double_elimination"
+        )
+        invalidate_final_stage_ram_index()
+
+        # grava participantes
+        save_final_participants(
+            ws_participants=ws_participants,
+            season_id=season,
+            qualified_rows=qualified_rows
+        )
+
+        # gera bracket
+        total_matches = generate_final_bracket(sh, season)
+        invalidate_final_matches_ram_index()
+
+        nick_map = get_player_nick_map_fast(sh)
+
+        lines = [
+            f"✅ Fase final gerada com sucesso.",
+            f"- Season: **{season}**",
+            f"- Top definido: **TOP {top_size}**",
+            f"- Participantes: **{len(qualified_rows)}**",
+            f"- Matches geradas: **{total_matches}**",
+            "",
+            "**Classificados:**"
+        ]
+
+        for r in qualified_rows:
+            pid = str(r.get("player_id", "")).strip()
+            seed = safe_int(r.get("seed", 0), 0)
+            ranking_position = safe_int(r.get("ranking_position", 0), 0)
+            lines.append(
+                f"- Seed {seed}: **{nick_map.get(pid, pid)}** (ranking geral #{ranking_position})"
+            )
+
+        await send_followup_chunks(
+            interaction,
+            "\n".join(lines),
+            ephemeral=True,
+            limit=1800
+        )
+
+        await log_admin(
+            interaction,
+            f"fase_final: season={season} top={top_size} participants={len(qualified_rows)} matches={total_matches}"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /fase_final: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# /cadastrar_final
+# =========================================================
+
+@client.tree.command(
+    name="cadastrar_final",
+    description="(ADM) Cadastra manualmente jogador na fase final com deck e decklist."
+)
+@app_commands.describe(
+    season="Season da fase final",
+    jogador="Jogador para cadastrar na fase final",
+    guilda="Base do deck",
+    arquetipo="Arquétipo do deck",
+    decklist="Link da decklist"
+)
+@app_commands.autocomplete(
+    season=ac_owner_season,
+    jogador=ac_final_player_any,
+    guilda=ac_deck_guilda,
+    arquetipo=ac_deck_arquetipo
+)
+async def cadastrar_final(
+    interaction: discord.Interaction,
+    season: int,
+    jogador: str,
+    guilda: str,
+    arquetipo: str,
+    decklist: str
+):
+    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+        return await interaction.response.send_message(
+            "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        ensure_final_sheets(sh)
+        ws_final_decks = ensure_final_decks_sheet(sh)
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        stage = get_final_stage_fast(sh, season)
+        if not stage:
+            return await interaction.followup.send(
+                "❌ A fase final desta season ainda não foi gerada.",
+                ephemeral=True
+            )
+
+        pid = resolve_player_id_fast(sh, jogador)
+        if not pid:
+            pid = str(jogador or "").strip()
+
+        if not pid:
+            return await interaction.followup.send(
+                "❌ Jogador inválido.",
+                ephemeral=True
+            )
+
+        player_row = get_player_row_fast(sh, pid)
+        if not player_row:
+            return await interaction.followup.send(
+                "❌ Jogador não encontrado no cadastro geral.",
+                ephemeral=True
+            )
+
+        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
+        if not guilda_final:
+            return await interaction.followup.send(
+                "❌ Guilda inválida.",
+                ephemeral=True
+            )
+
+        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
+        if not arquetipo_final:
+            return await interaction.followup.send(
+                "❌ Arquétipo inválido.",
+                ephemeral=True
+            )
+
+        nome_deck = _montar_nome_deck(guilda_final, arquetipo_final)
+        if not nome_deck or len(nome_deck) > 80:
+            return await interaction.followup.send(
+                "❌ Nome de deck inválido.",
+                ephemeral=True
+            )
+
+        ok, decklist_val = validate_decklist_url(decklist)
+        if not ok:
+            return await interaction.followup.send(
+                f"❌ Decklist inválida: {decklist_val}",
+                ephemeral=True
+            )
+
+        ranking_rows = _final_read_ranking_geral_rows(sh, season)
+
+        ranking_position = 999999
+        for r in ranking_rows:
+            if str(r.get("player_id", "")).strip() == pid:
+                ranking_position = safe_int(r.get("ranking_position", 999999), 999999)
+                break
+
+        ws_stage, ws_participants, _ws_matches = ensure_final_sheets(sh)
+
+        # cadastra/reativa participante
+        seed_assigned = save_single_final_participant(
+            ws_participants=ws_participants,
+            season_id=season,
+            player_id=pid,
+            ranking_position=ranking_position,
+            status="active"
+        )
+
+        # deck da fase final
+        upsert_final_deck(
+            ws_final_decks=ws_final_decks,
+            season_id=season,
+            player_id=pid,
+            deck_name=nome_deck,
+            decklist_url=decklist_val
+        )
+
+        invalidate_final_participants_ram_index()
+        invalidate_final_decks_ram_index()
+
+        nick = str(player_row.get("nick", "")).strip() or pid
+
+        lines = [
+            f"✅ Jogador cadastrado/atualizado na fase final.",
+            f"- Season: **{season}**",
+            f"- Jogador: **{nick}**",
+            f"- Seed atual: **{seed_assigned}**",
+            f"- Ranking geral: **#{ranking_position if ranking_position < 999999 else '-'}**",
+            f"- Deck: **{nome_deck}**",
+            f"- Decklist: definida com sucesso.",
+        ]
+
+        await interaction.followup.send(
+            "\n".join(lines),
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"cadastrar_final: season={season} player={nick} ({pid}) seed={seed_assigned} deck='{nome_deck}'"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /cadastrar_final: {e}",
+            ephemeral=True
+        )
+
+
+# =================================================
+# FIM DO BLOCO 16/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 17/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Execução da Fase Final:
+# - autocomplete de matches e placares MD5
+# - /chaveamento para visualização do bracket
+# - /resultado_final para report definitivo sem confirmação/rejeição
+# - progressão automática winner/loser via links do bracket
+# - suporte a Grand Final com reset (GF2)
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+FINAL_MD5_SCORE_OPTIONS = [
+    ("3-0-0", "WIN"),
+    ("3-1-0", "WIN"),
+    ("3-2-0", "WIN"),
+    ("0-3-0", "LOSS"),
+    ("1-3-0", "LOSS"),
+    ("2-3-0", "LOSS"),
+]
+
+
+# =========================================================
+# HELPERS — AUTOCOMPLETE / MATCHES DA FASE FINAL
+# =========================================================
+
+def _final_match_visual_label(r: dict, nick_map: dict[str, str], my_pid: str) -> str:
+    a = str(r.get("player_a_id", "")).strip()
+    b = str(r.get("player_b_id", "")).strip()
+    mid = str(r.get("final_match_id", "")).strip()
+    bracket = str(r.get("bracket", "")).strip().lower()
+    round_num = safe_int(r.get("round", 0), 0)
+    status = str(r.get("status", "")).strip().lower()
+
+    opp = b if my_pid == a else a
+    opp_name = nick_map.get(opp, opp) if opp else "Aguardando"
+
+    status_pt = "aberta"
+    if status == "completed":
+        status_pt = "concluída"
+
+    bracket_pt = {
+        "winners": "W",
+        "losers": "L",
+        "grand_final": "GF",
+    }.get(bracket, bracket.upper() if bracket else "-")
+
+    return f"{opp_name} | {bracket_pt} R{round_num} | {status_pt} | {mid}"[:100]
+
+
+async def ac_final_match_user_open(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_final_match_user_open"):
+            return []
+
+        sh = open_sheet()
+        season = safe_int(getattr(interaction.namespace, "season", 0), 0)
+        if season <= 0:
+            return []
+
+        pid = str(interaction.user.id).strip()
+        q = str(current or "").strip().lower()
+
+        rows = get_final_matches_for_player_fast(sh, season, pid)
+        nick_map = get_player_nick_map_fast(sh)
+
+        out: list[app_commands.Choice[str]] = []
+        seen = set()
+
+        for r in rows:
+            if str(r.get("status", "")).strip().lower() != "open":
+                continue
+
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+
+            # só oferece quando ambos os slots já estão preenchidos
+            if not a or not b:
+                continue
+
+            mid = str(r.get("final_match_id", "")).strip()
+            label = _final_match_visual_label(r, nick_map, pid)
+
+            search = f"{mid} {label}".lower()
+            if q and q not in search:
+                continue
+
+            if mid in seen:
+                continue
+
+            out.append(app_commands.Choice(name=label[:100], value=mid))
+            seen.add(mid)
+
+            if len(out) >= 25:
+                break
+
+        return out[:25]
+
+    except Exception:
+        return []
+
+
+async def ac_score_final_md5(interaction: discord.Interaction, current: str):
+    try:
+        if _ac_should_skip(interaction, "ac_score_final_md5"):
+            return []
+
+        q = str(current or "").strip().replace(" ", "")
+        out = []
+
+        for score, label in FINAL_MD5_SCORE_OPTIONS:
+            if q and q not in score:
+                continue
+
+            out.append(
+                app_commands.Choice(
+                    name=f"{score} ({label})",
+                    value=score
+                )
+            )
+
+        return out[:25]
+
+    except Exception:
+        return []
+
+
+# =========================================================
+# HELPERS — SHEETS / MATCHES DA FASE FINAL
+# =========================================================
+
+def find_final_match_sheet_row(ws_final_matches, final_match_id: str) -> tuple[int | None, list | None]:
+    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+    if len(vals) <= 1:
+        return None, None
+
+    header = vals[0]
+    idx = {name: i for i, name in enumerate(header)}
+    mid_idx = idx.get("final_match_id", 0)
+
+    target = str(final_match_id or "").strip()
+
+    for rown in range(2, len(vals) + 1):
+        row = vals[rown - 1]
+        mid = str(row[mid_idx] if mid_idx < len(row) else "").strip()
+        if mid == target:
+            return rown, row
+
+    return None, None
+
+
+def _final_sheet_getv(row: list, idx: dict, name: str, default=""):
+    ci = idx.get(name, -1)
+    if ci < 0 or ci >= len(row):
+        return default
+    return row[ci]
+
+
+def _set_final_match_slot(ws_final_matches, final_match_id: str, slot: str, player_id: str):
+    rown, row = find_final_match_sheet_row(ws_final_matches, final_match_id)
+    if rown is None or row is None:
+        raise RuntimeError(f"Match final destino não encontrada: {final_match_id}")
+
+    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+    header = vals[0] if vals else FINAL_MATCHES_HEADER
+    idx = {name: i for i, name in enumerate(header)}
+
+    slot = str(slot or "").strip().upper()
+    pid = str(player_id or "").strip()
+
+    if slot not in ("A", "B"):
+        raise RuntimeError("Slot inválido. Use A ou B.")
+
+    col_name = "player_a_id" if slot == "A" else "player_b_id"
+    current = str(_final_sheet_getv(row, idx, col_name, "")).strip()
+
+    if current == pid:
+        return
+
+    updated_at = now_iso_utc()
+
+    ws_final_matches.batch_update([
+        {
+            "range": f"{col_letter(idx[col_name])}{rown}",
+            "values": [[pid]]
+        },
+        {
+            "range": f"{col_letter(idx['updated_at'])}{rown}",
+            "values": [[updated_at]]
+        },
+    ])
+    cache_invalidate(ws_final_matches)
+    invalidate_final_matches_ram_index()
+
+
+def _complete_final_stage_if_needed(sh, season_id: int, final_match: dict, winner_id: str, loser_id: str):
+    """
+    Regras:
+    - TOP 2: GF1 concluída encerra a fase final
+    - GF1:
+        * player_a é o campeão da winners
+        * player_b é o campeão da losers
+        * se player_a vencer, encerra
+        * se player_b vencer, preenche GF2 (reset)
+    - GF2: encerra sempre
+    """
+    ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+
+    bracket = str(final_match.get("bracket", "")).strip().lower()
+    round_num = safe_int(final_match.get("round", 0), 0)
+
+    if bracket != "grand_final":
+        return
+
+    player_a = str(final_match.get("player_a_id", "")).strip()
+    player_b = str(final_match.get("player_b_id", "")).strip()
+
+    # TOP 2 ou GF1 com vitória do campeão da winners
+    if round_num == 1:
+        if winner_id == player_a:
+            set_final_stage(
+                ws_stage=ws_stage,
+                season_id=season_id,
+                status="completed",
+                top_size=safe_int(get_final_stage_fields(ws_stage, season_id).get("top_size", 0), 0),
+                fmt="double_elimination"
+            )
+            invalidate_final_stage_ram_index()
+            return
+
+        # vitória do campeão da losers -> ativa GF2
+        gf2_id = _final_match_id(season_id, "grand_final", 2, 1)
+
+        _set_final_match_slot(ws_final_matches, gf2_id, "A", player_a)
+        _set_final_match_slot(ws_final_matches, gf2_id, "B", player_b)
+
+        set_final_stage(
+            ws_stage=ws_stage,
+            season_id=season_id,
+            status="in_progress",
+            top_size=safe_int(get_final_stage_fields(ws_stage, season_id).get("top_size", 0), 0),
+            fmt="double_elimination"
+        )
+        invalidate_final_stage_ram_index()
+        return
+
+    if round_num == 2:
+        set_final_stage(
+            ws_stage=ws_stage,
+            season_id=season_id,
+            status="completed",
+            top_size=safe_int(get_final_stage_fields(ws_stage, season_id).get("top_size", 0), 0),
+            fmt="double_elimination"
+        )
+        invalidate_final_stage_ram_index()
+        return
+
+
+def _propagate_final_match_result(sh, final_match: dict, winner_id: str, loser_id: str):
+    """
+    Usa os links gravados no bracket:
+    - next_win_match_id + next_win_slot
+    - next_lose_match_id + next_lose_slot
+    """
+    ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+
+    next_win_match_id = str(final_match.get("next_win_match_id", "")).strip()
+    next_win_slot = str(final_match.get("next_win_slot", "")).strip().upper()
+    next_lose_match_id = str(final_match.get("next_lose_match_id", "")).strip()
+    next_lose_slot = str(final_match.get("next_lose_slot", "")).strip().upper()
+
+    if next_win_match_id and next_win_slot and winner_id:
+        _set_final_match_slot(ws_final_matches, next_win_match_id, next_win_slot, winner_id)
+
+    if next_lose_match_id and next_lose_slot and loser_id:
+        _set_final_match_slot(ws_final_matches, next_lose_match_id, next_lose_slot, loser_id)
+
+    _complete_final_stage_if_needed(
+        sh=sh,
+        season_id=safe_int(final_match.get("season_id", 0), 0),
+        final_match=final_match,
+        winner_id=winner_id,
+        loser_id=loser_id
+    )
+
+    current_stage = get_final_stage_fast(sh, safe_int(final_match.get("season_id", 0), 0))
+    if current_stage and str(current_stage.get("status", "")).strip().lower() == "generated":
+        set_final_stage(
+            ws_stage=ws_stage,
+            season_id=safe_int(final_match.get("season_id", 0), 0),
+            status="in_progress",
+            top_size=safe_int(current_stage.get("top_size", 0), 0),
+            fmt="double_elimination"
+        )
+        invalidate_final_stage_ram_index()
+
+
+# =========================================================
+# HELPERS — RESULTADO FINAL
+# =========================================================
+
+def parse_final_md5_score(score: str) -> tuple[int, int, int] | None:
+    parsed = parse_score_3parts(score)
+    if not parsed:
+        return None
+
+    a, b, d = parsed
+
+    # Fase final: sem draw
+    if d != 0:
+        return None
+
+    allowed = {
+        (3, 0, 0),
+        (3, 1, 0),
+        (3, 2, 0),
+        (0, 3, 0),
+        (1, 3, 0),
+        (2, 3, 0),
+    }
+
+    if (a, b, d) not in allowed:
+        return None
+
+    return (a, b, d)
+
+
+def _final_match_score_text(r: dict, viewer_pid: str = "") -> str:
+    a_w = safe_int(r.get("a_games_won", 0), 0)
+    b_w = safe_int(r.get("b_games_won", 0), 0)
+    d_g = safe_int(r.get("draw_games", 0), 0) if "draw_games" in r else 0
+
+    a = str(r.get("player_a_id", "")).strip()
+    b = str(r.get("player_b_id", "")).strip()
+    pid = str(viewer_pid or "").strip()
+
+    if pid and pid == b:
+        return f"{b_w}-{a_w}-{d_g}"
+
+    return f"{a_w}-{b_w}-{d_g}"
+
+
+# =========================================================
+# HELPERS — VISUALIZAÇÃO DO CHAVEAMENTO
+# =========================================================
+
+def _final_bracket_title(bracket: str) -> str:
+    b = str(bracket or "").strip().lower()
+    if b == "winners":
+        return "WINNERS BRACKET"
+    if b == "losers":
+        return "LOSERS BRACKET"
+    if b == "grand_final":
+        return "GRAND FINAL"
+    return b.upper()
+
+
+def _final_match_status_pt(status: str) -> str:
+    st = str(status or "").strip().lower()
+    if st == "completed":
+        return "concluída"
+    return "aberta"
+
+
+def _format_final_match_line(r: dict, nick_map: dict[str, str]) -> str:
+    mid = str(r.get("final_match_id", "")).strip()
+    a = str(r.get("player_a_id", "")).strip()
+    b = str(r.get("player_b_id", "")).strip()
+    bracket = str(r.get("bracket", "")).strip().lower()
+    round_num = safe_int(r.get("round", 0), 0)
+    status = _final_match_status_pt(r.get("status", ""))
+
+    a_name = nick_map.get(a, a) if a else "Aguardando"
+    b_name = nick_map.get(b, b) if b else "Aguardando"
+
+    if str(r.get("status", "")).strip().lower() == "completed":
+        score = f"{safe_int(r.get('a_games_won', 0), 0)}-{safe_int(r.get('b_games_won', 0), 0)}"
+        return f"`{mid}` | {a_name} vs {b_name} | placar: **{score}** | {status}"
+
+    return f"`{mid}` | {a_name} vs {b_name} | {status}"
+
+
+# =========================================================
+# /chaveamento
+# =========================================================
+
+@client.tree.command(
+    name="chaveamento",
+    description="Mostra o chaveamento da fase final da season."
+)
+@app_commands.describe(season="Season da fase final")
+@app_commands.autocomplete(season=ac_owner_season)
+async def chaveamento(interaction: discord.Interaction, season: int):
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=False
+            )
+
+        stage = get_final_stage_fast(sh, season)
+        if not stage:
+            return await interaction.followup.send(
+                "⚠️ A fase final desta season ainda não foi gerada.",
+                ephemeral=False
+            )
+
+        rows = get_final_matches_fast(sh, season)
+        if not rows:
+            return await interaction.followup.send(
+                "⚠️ Não há matches de fase final nesta season.",
+                ephemeral=False
+            )
+
+        nick_map = get_player_nick_map_fast(sh)
+
+        groups: dict[str, dict[int, list[dict]]] = {}
+        for r in rows:
+            bracket = str(r.get("bracket", "")).strip().lower()
+            round_num = safe_int(r.get("round", 0), 0)
+            groups.setdefault(bracket, {}).setdefault(round_num, []).append(r)
+
+        lines = [
+            f"🏆 **Chaveamento da Fase Final — Season {season}**",
+            f"Status: **{str(stage.get('status', '')).strip().lower()}** | Top: **{safe_int(stage.get('top_size', 0), 0)}**",
+            ""
+        ]
+
+        for bracket_key in ("winners", "losers", "grand_final"):
+            if bracket_key not in groups:
+                continue
+
+            lines.append(f"**{_final_bracket_title(bracket_key)}**")
+
+            rounds = groups[bracket_key]
+            for round_num in sorted(rounds.keys()):
+                lines.append(f"Round {round_num}")
+                round_rows = sorted(
+                    rounds[round_num],
+                    key=lambda x: safe_int(x.get("match_order", 0), 0)
+                )
+
+                for r in round_rows:
+                    lines.append(_format_final_match_line(r, nick_map))
+
+                lines.append("")
+
+        await send_followup_chunks(
+            interaction,
+            "\n".join(lines).strip(),
+            ephemeral=False,
+            limit=1800
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /chaveamento: {e}",
+            ephemeral=False
+        )
+
+
+# =========================================================
+# /resultado_final
+# =========================================================
+
+@client.tree.command(
+    name="resultado_final",
+    description="Reporta resultado de uma match da fase final (MD5, sem draw)."
+)
+@app_commands.describe(
+    season="Season da fase final",
+    match_id="Selecione sua match da fase final",
+    placar="Formato MD5 sem draw (ex: 3-1-0)"
+)
+@app_commands.autocomplete(
+    season=ac_owner_season,
+    match_id=ac_final_match_user_open,
+    placar=ac_score_final_md5
+)
+async def resultado_final(interaction: discord.Interaction, season: int, match_id: str, placar: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        stage = get_final_stage_fast(sh, season)
+        if not stage:
+            return await interaction.followup.send(
+                "❌ A fase final desta season ainda não foi gerada.",
+                ephemeral=True
+            )
+
+        stage_status = str(stage.get("status", "")).strip().lower()
+        if stage_status == "completed":
+            return await interaction.followup.send(
+                "❌ A fase final desta season já foi concluída.",
+                ephemeral=True
+            )
+
+        parsed = parse_final_md5_score(placar)
+        if not parsed:
+            return await interaction.followup.send(
+                "❌ Placar inválido para a fase final. Use apenas MD5 sem draw, por exemplo: 3-0-0, 3-1-0 ou 3-2-0.",
+                ephemeral=True
+            )
+
+        my_v, my_d, my_e = parsed
+        uid = str(interaction.user.id).strip()
+
+        final_match = get_final_match_by_id_fast(sh, match_id)
+        if not final_match:
+            return await interaction.followup.send(
+                "❌ Match da fase final não encontrada.",
+                ephemeral=True
+            )
+
+        if safe_int(final_match.get("season_id", 0), 0) != season:
+            return await interaction.followup.send(
+                "❌ Esta match não pertence à season informada.",
+                ephemeral=True
+            )
+
+        status = str(final_match.get("status", "")).strip().lower()
+        if status != "open":
+            return await interaction.followup.send(
+                "❌ Esta match da fase final já foi concluída.",
+                ephemeral=True
+            )
+
+        a = str(final_match.get("player_a_id", "")).strip()
+        b = str(final_match.get("player_b_id", "")).strip()
+
+        if not a or not b:
+            return await interaction.followup.send(
+                "❌ Esta match ainda não está pronta. Aguarde definição dos participantes.",
+                ephemeral=True
+            )
+
+        if uid not in (a, b):
+            return await interaction.followup.send(
+                "❌ Você não participa desta match da fase final.",
+                ephemeral=True
+            )
+
+        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+
+        rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
+        if rown is None:
+            return await interaction.followup.send(
+                "❌ Não encontrei a linha da match da fase final na planilha.",
+                ephemeral=True
+            )
+
+        vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+        header = vals[0] if vals else FINAL_MATCHES_HEADER
+        idx = {name: i for i, name in enumerate(header)}
+
+        if uid == a:
+            a_w, b_w, _ = my_v, my_d, my_e
+        else:
+            a_w, b_w, _ = my_d, my_v, my_e
+
+        if a_w > b_w:
+            winner_id = a
+            loser_id = b
+        else:
+            winner_id = b
+            loser_id = a
+
+        updated_at = now_iso_utc()
+
+        updates = [
+            {
+                "range": f"{col_letter(idx['a_games_won'])}{rown}",
+                "values": [[str(a_w)]]
+            },
+            {
+                "range": f"{col_letter(idx['b_games_won'])}{rown}",
+                "values": [[str(b_w)]]
+            },
+            {
+                "range": f"{col_letter(idx['result_type'])}{rown}",
+                "values": [["final"]]
+            },
+            {
+                "range": f"{col_letter(idx['status'])}{rown}",
+                "values": [["completed"]]
+            },
+            {
+                "range": f"{col_letter(idx['winner_id'])}{rown}",
+                "values": [[winner_id]]
+            },
+            {
+                "range": f"{col_letter(idx['loser_id'])}{rown}",
+                "values": [[loser_id]]
+            },
+            {
+                "range": f"{col_letter(idx['updated_at'])}{rown}",
+                "values": [[updated_at]]
+            },
+        ]
+
+        ws_final_matches.batch_update(updates)
+        cache_invalidate(ws_final_matches)
+        invalidate_final_matches_ram_index()
+
+        # recarrega já concluída para propagar corretamente
+        final_match_done = get_final_match_by_id_fast(sh, match_id)
+        if not final_match_done:
+            final_match_done = dict(final_match)
+            final_match_done["a_games_won"] = a_w
+            final_match_done["b_games_won"] = b_w
+            final_match_done["winner_id"] = winner_id
+            final_match_done["loser_id"] = loser_id
+            final_match_done["status"] = "completed"
+
+        _propagate_final_match_result(
+            sh=sh,
+            final_match=final_match_done,
+            winner_id=winner_id,
+            loser_id=loser_id
+        )
+
+        nick_map = get_player_nick_map_fast(sh)
+        winner_name = nick_map.get(winner_id, winner_id)
+        loser_name = nick_map.get(loser_id, loser_id)
+
+        await interaction.followup.send(
+            f"✅ Resultado da fase final registrado com sucesso.\n"
+            f"- Match: **{match_id}**\n"
+            f"- Placar: **{placar}**\n"
+            f"- Vencedor: **{winner_name}**\n"
+            f"- Derrotado: **{loser_name}**",
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"resultado_final: season={season} match={match_id} placar={placar} winner={winner_name} loser={loser_name}"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /resultado_final: {e}",
+            ephemeral=True
+        )
+
+
+# =================================================
+# FIM DO BLOCO 17/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 18/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Administração da Fase Final:
+# - /admin_resultado_final_editar
+# - /admin_resultado_final_cancelar
+# com rollback controlado de progressão derivada e reabertura da match.
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+# =========================================================
+# HELPERS — ROLLBACK / LIMPEZA DE PROGRESSÃO
+# =========================================================
+
+def _final_get_downstream_match_ids_from_row(match_row: dict) -> list[str]:
+    out = []
+
+    nwm = str(match_row.get("next_win_match_id", "")).strip()
+    nlm = str(match_row.get("next_lose_match_id", "")).strip()
+
+    if nwm:
+        out.append(nwm)
+    if nlm and nlm not in out:
+        out.append(nlm)
+
+    return out
+
+
+def _final_clear_match_and_descendants(
+    ws_final_matches,
+    season_id: int,
+    root_match_id: str,
+    preserve_root_players: bool = False
+):
+    """
+    Limpa a match informada e todas as matches descendentes conectadas
+    pelos campos next_win_match_id / next_lose_match_id.
+
+    Regras:
+    - zera placar, winner/loser e status=open
+    - limpa slots derivados nas matches filhas
+    - se preserve_root_players=True, mantém player_a_id / player_b_id
+      apenas na raiz
+    - nas descendentes, limpa player_a_id / player_b_id
+    """
+    rows = get_final_matches_rows(ws_final_matches, season_id)
+    by_id = {str(r.get("final_match_id", "")).strip(): r for r in rows}
+
+    if root_match_id not in by_id:
+        raise RuntimeError("Match raiz não encontrada para rollback.")
+
+    visited = set()
+    stack = [root_match_id]
+    ordered = []
+
+    while stack:
+        mid = stack.pop()
+        if mid in visited:
+            continue
+        visited.add(mid)
+
+        r = by_id.get(mid)
+        if not r:
+            continue
+
+        ordered.append(mid)
+
+        children = _final_get_downstream_match_ids_from_row(r)
+        for child in children:
+            if child and child not in visited:
+                stack.append(child)
+
+    # Processa primeiro os descendentes mais profundos, depois sobe
+    ordered.reverse()
+
+    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+    if len(vals) <= 1:
+        return 0
+
+    header = vals[0]
+    idx = {name: i for i, name in enumerate(header)}
+
+    row_map = {}
+    for rown in range(2, len(vals) + 1):
+        row = vals[rown - 1]
+        mid = str(row[idx["final_match_id"]] if idx["final_match_id"] < len(row) else "").strip()
+        if mid:
+            row_map[mid] = rown
+
+    updated_at = now_iso_utc()
+    updates = []
+
+    for mid in ordered:
+        rown = row_map.get(mid)
+        if not rown:
+            continue
+
+        keep_players = preserve_root_players and (mid == root_match_id)
+
+        if not keep_players:
+            updates.append({
+                "range": f"{col_letter(idx['player_a_id'])}{rown}",
+                "values": [[""]]
+            })
+            updates.append({
+                "range": f"{col_letter(idx['player_b_id'])}{rown}",
+                "values": [[""]]
+            })
+
+        updates.extend([
+            {
+                "range": f"{col_letter(idx['a_games_won'])}{rown}",
+                "values": [["0"]]
+            },
+            {
+                "range": f"{col_letter(idx['b_games_won'])}{rown}",
+                "values": [["0"]]
+            },
+            {
+                "range": f"{col_letter(idx['result_type'])}{rown}",
+                "values": [["final"]]
+            },
+            {
+                "range": f"{col_letter(idx['status'])}{rown}",
+                "values": [["open"]]
+            },
+            {
+                "range": f"{col_letter(idx['winner_id'])}{rown}",
+                "values": [[""]]
+            },
+            {
+                "range": f"{col_letter(idx['loser_id'])}{rown}",
+                "values": [[""]]
+            },
+            {
+                "range": f"{col_letter(idx['updated_at'])}{rown}",
+                "values": [[updated_at]]
+            },
+        ])
+
+    if updates:
+        ws_final_matches.batch_update(updates)
+        cache_invalidate(ws_final_matches)
+        invalidate_final_matches_ram_index()
+
+    return len(ordered)
+
+
+def _final_reopen_stage_if_completed(ws_stage, season_id: int):
+    fields = get_final_stage_fields(ws_stage, season_id)
+    status = str(fields.get("status", "")).strip().lower()
+    top_size = safe_int(fields.get("top_size", 0), 0)
+
+    if status == "completed":
+        set_final_stage(
+            ws_stage=ws_stage,
+            season_id=season_id,
+            status="in_progress",
+            top_size=top_size,
+            fmt="double_elimination"
+        )
+        invalidate_final_stage_ram_index()
+
+
+def _final_apply_match_result_direct(
+    sh,
+    ws_final_matches,
+    season_id: int,
+    match_id: str,
+    a_w: int,
+    b_w: int
+):
+    """
+    Aplica resultado diretamente numa match da fase final e propaga.
+    Usado pelo admin editar.
+    """
+    rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
+    if rown is None or row is None:
+        raise RuntimeError("Match da fase final não encontrada.")
+
+    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+    header = vals[0] if vals else FINAL_MATCHES_HEADER
+    idx = {name: i for i, name in enumerate(header)}
+
+    player_a = str(_final_sheet_getv(row, idx, "player_a_id", "")).strip()
+    player_b = str(_final_sheet_getv(row, idx, "player_b_id", "")).strip()
+
+    if not player_a or not player_b:
+        raise RuntimeError("Esta match ainda não possui os dois jogadores definidos.")
+
+    if a_w == b_w:
+        raise RuntimeError("Placar inválido. A fase final não permite empate.")
+
+    winner_id = player_a if a_w > b_w else player_b
+    loser_id = player_b if a_w > b_w else player_a
+
+    updated_at = now_iso_utc()
+
+    ws_final_matches.batch_update([
+        {
+            "range": f"{col_letter(idx['a_games_won'])}{rown}",
+            "values": [[str(a_w)]]
+        },
+        {
+            "range": f"{col_letter(idx['b_games_won'])}{rown}",
+            "values": [[str(b_w)]]
+        },
+        {
+            "range": f"{col_letter(idx['result_type'])}{rown}",
+            "values": [["final"]]
+        },
+        {
+            "range": f"{col_letter(idx['status'])}{rown}",
+            "values": [["completed"]]
+        },
+        {
+            "range": f"{col_letter(idx['winner_id'])}{rown}",
+            "values": [[winner_id]]
+        },
+        {
+            "range": f"{col_letter(idx['loser_id'])}{rown}",
+            "values": [[loser_id]]
+        },
+        {
+            "range": f"{col_letter(idx['updated_at'])}{rown}",
+            "values": [[updated_at]]
+        },
+    ])
+
+    cache_invalidate(ws_final_matches)
+    invalidate_final_matches_ram_index()
+
+    final_match_done = get_final_match_by_id_fast(sh, match_id)
+    if not final_match_done:
+        final_match_done = {
+            "final_match_id": match_id,
+            "season_id": season_id,
+            "player_a_id": player_a,
+            "player_b_id": player_b,
+            "a_games_won": a_w,
+            "b_games_won": b_w,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "status": "completed",
+        }
+
+    _propagate_final_match_result(
+        sh=sh,
+        final_match=final_match_done,
+        winner_id=winner_id,
+        loser_id=loser_id
+    )
+
+    return {
+        "winner_id": winner_id,
+        "loser_id": loser_id,
+    }
+
+
+# =========================================================
+# /admin_resultado_final_editar
+# =========================================================
+
+@client.tree.command(
+    name="admin_resultado_final_editar",
+    description="(ADM) Edita resultado de uma match da fase final e repropaga o chaveamento."
+)
+@app_commands.describe(
+    season="Season da fase final",
+    match_id="ID da match da fase final",
+    placar="Formato MD5 sem draw (ex: 3-1-0)"
+)
+@app_commands.autocomplete(
+    season=ac_owner_season,
+    placar=ac_score_final_md5
+)
+async def admin_resultado_final_editar(
+    interaction: discord.Interaction,
+    season: int,
+    match_id: str,
+    placar: str
+):
+    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+        return await interaction.response.send_message(
+            "❌ Sem permissão.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        stage = get_final_stage_fast(sh, season)
+        if not stage:
+            return await interaction.followup.send(
+                "❌ A fase final desta season ainda não foi gerada.",
+                ephemeral=True
+            )
+
+        parsed = parse_final_md5_score(placar)
+        if not parsed:
+            return await interaction.followup.send(
+                "❌ Placar inválido para a fase final. Use apenas MD5 sem draw, por exemplo: 3-0-0, 3-1-0 ou 3-2-0.",
+                ephemeral=True
+            )
+
+        score_a, score_b, _ = parsed
+
+        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+
+        current_match = get_final_match_by_id_fast(sh, match_id)
+        if not current_match:
+            return await interaction.followup.send(
+                "❌ Match da fase final não encontrada.",
+                ephemeral=True
+            )
+
+        if safe_int(current_match.get("season_id", 0), 0) != season:
+            return await interaction.followup.send(
+                "❌ Esta match não pertence à season informada.",
+                ephemeral=True
+            )
+
+        player_a = str(current_match.get("player_a_id", "")).strip()
+        player_b = str(current_match.get("player_b_id", "")).strip()
+
+        if not player_a or not player_b:
+            return await interaction.followup.send(
+                "❌ Esta match ainda não possui os dois jogadores definidos.",
+                ephemeral=True
+            )
+
+        # rollback da match e de tudo que depende dela
+        affected = _final_clear_match_and_descendants(
+            ws_final_matches=ws_final_matches,
+            season_id=season,
+            root_match_id=match_id,
+            preserve_root_players=True
+        )
+
+        _final_reopen_stage_if_completed(ws_stage, season)
+
+        result = _final_apply_match_result_direct(
+            sh=sh,
+            ws_final_matches=ws_final_matches,
+            season_id=season,
+            match_id=match_id,
+            a_w=score_a,
+            b_w=score_b
+        )
+
+        nick_map = get_player_nick_map_fast(sh)
+        winner_name = nick_map.get(result["winner_id"], result["winner_id"])
+        loser_name = nick_map.get(result["loser_id"], result["loser_id"])
+
+        await interaction.followup.send(
+            f"✅ Resultado da fase final editado com sucesso.\n"
+            f"- Match: **{match_id}**\n"
+            f"- Novo placar: **{placar}**\n"
+            f"- Vencedor: **{winner_name}**\n"
+            f"- Derrotado: **{loser_name}**\n"
+            f"- Matches recalculadas/limpas na cadeia: **{affected}**",
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"admin_resultado_final_editar: season={season} match={match_id} placar={placar} "
+            f"winner={winner_name} loser={loser_name} affected={affected}"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /admin_resultado_final_editar: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# /admin_resultado_final_cancelar
+# =========================================================
+
+@client.tree.command(
+    name="admin_resultado_final_cancelar",
+    description="(ADM) Cancela um resultado da fase final, reabre a match e limpa sua progressão derivada."
+)
+@app_commands.describe(
+    season="Season da fase final",
+    match_id="ID da match da fase final"
+)
+async def admin_resultado_final_cancelar(
+    interaction: discord.Interaction,
+    season: int,
+    match_id: str
+):
+    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+        return await interaction.response.send_message(
+            "❌ Sem permissão.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        stage = get_final_stage_fast(sh, season)
+        if not stage:
+            return await interaction.followup.send(
+                "❌ A fase final desta season ainda não foi gerada.",
+                ephemeral=True
+            )
+
+        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+
+        current_match = get_final_match_by_id_fast(sh, match_id)
+        if not current_match:
+            return await interaction.followup.send(
+                "❌ Match da fase final não encontrada.",
+                ephemeral=True
+            )
+
+        if safe_int(current_match.get("season_id", 0), 0) != season:
+            return await interaction.followup.send(
+                "❌ Esta match não pertence à season informada.",
+                ephemeral=True
+            )
+
+        player_a = str(current_match.get("player_a_id", "")).strip()
+        player_b = str(current_match.get("player_b_id", "")).strip()
+
+        affected = _final_clear_match_and_descendants(
+            ws_final_matches=ws_final_matches,
+            season_id=season,
+            root_match_id=match_id,
+            preserve_root_players=True
+        )
+
+        _final_reopen_stage_if_completed(ws_stage, season)
+
+        nick_map = get_player_nick_map_fast(sh)
+        a_name = nick_map.get(player_a, player_a) if player_a else "-"
+        b_name = nick_map.get(player_b, player_b) if player_b else "-"
+
+        await interaction.followup.send(
+            f"✅ Resultado da fase final cancelado.\n"
+            f"- Match: **{match_id}**\n"
+            f"- Confronto reaberto: **{a_name}** vs **{b_name}**\n"
+            f"- Matches limpas na cadeia: **{affected}**",
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"admin_resultado_final_cancelar: season={season} match={match_id} affected={affected}"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /admin_resultado_final_cancelar: {e}",
+            ephemeral=True
+        )
+
+
+# =================================================
+# FIM DO BLOCO 18/12
+# =================================================
+
+
+# =================================================
+# BLOCO ORIGINAL: BLOCO 19/12
+# SUB-BLOCO: ÚNICO
+# RESUMO: Diagnóstico, consistência e inspeção administrativa da Fase Final:
+# - snapshots e resumo operacional
+# - validação de integridade do bracket
+# - comando /status_final
+# - helpers para detectar seeds duplicados, players repetidos,
+#   matches órfãs, links inválidos e inconsistências gerais
+# INSERIR ANTES DO BLOCO 12/12 — START FINAL
+# =================================================
+
+
+# =========================================================
+# HELPERS — STATUS / DIAGNÓSTICO DA FASE FINAL
+# =========================================================
+
+def _final_stage_status_pt(status: str) -> str:
+    st = str(status or "").strip().lower()
+    if st == "generated":
+        return "gerada"
+    if st == "in_progress":
+        return "em_andamento"
+    if st == "completed":
+        return "concluída"
+    return st or "não_gerada"
+
+
+def _final_bracket_pt(bracket: str) -> str:
+    b = str(bracket or "").strip().lower()
+    if b == "winners":
+        return "winners"
+    if b == "losers":
+        return "losers"
+    if b == "grand_final":
+        return "grand_final"
+    return b or "-"
+
+
+def _final_match_open_ready(r: dict) -> bool:
+    if str(r.get("status", "")).strip().lower() != "open":
+        return False
+
+    a = str(r.get("player_a_id", "")).strip()
+    b = str(r.get("player_b_id", "")).strip()
+
+    return bool(a and b)
+
+
+def _final_match_open_waiting(r: dict) -> bool:
+    if str(r.get("status", "")).strip().lower() != "open":
+        return False
+
+    a = str(r.get("player_a_id", "")).strip()
+    b = str(r.get("player_b_id", "")).strip()
+
+    return not (a and b)
+
+
+def _final_group_matches_by_bracket_and_round(rows: list[dict]) -> dict[str, dict[int, list[dict]]]:
+    out: dict[str, dict[int, list[dict]]] = {}
+
+    for r in rows:
+        bracket = str(r.get("bracket", "")).strip().lower()
+        round_num = safe_int(r.get("round", 0), 0)
+
+        out.setdefault(bracket, {}).setdefault(round_num, []).append(r)
+
+    for bracket in out:
+        for round_num in out[bracket]:
+            out[bracket][round_num].sort(key=lambda x: safe_int(x.get("match_order", 0), 0))
+
+    return out
+
+
+# =========================================================
+# VALIDAÇÃO — PARTICIPANTES
+# =========================================================
+
+def final_validate_participants_integrity(sh, season_id: int) -> dict:
+    participants = get_final_participants_fast(sh, season_id)
+
+    issues = []
+    warnings = []
+
+    if not participants:
+        warnings.append("Nenhum participante encontrado na fase final.")
+        return {
+            "ok": False,
+            "issues": issues,
+            "warnings": warnings,
+            "participants_count": 0,
+            "seed_duplicates": [],
+            "player_duplicates": [],
+        }
+
+    seed_seen = {}
+    player_seen = {}
+    seed_duplicates = []
+    player_duplicates = []
+
+    for r in participants:
+        seed = safe_int(r.get("seed", 0), 0)
+        pid = str(r.get("player_id", "")).strip()
+
+        if seed <= 0:
+            issues.append(f"Seed inválida encontrada para player_id={pid or '-'}.")
+
+        if not pid:
+            issues.append(f"Participante com seed {seed} sem player_id.")
+            continue
+
+        if seed in seed_seen:
+            seed_duplicates.append(seed)
+        else:
+            seed_seen[seed] = pid
+
+        if pid in player_seen:
+            player_duplicates.append(pid)
+        else:
+            player_seen[pid] = seed
+
+    if seed_duplicates:
+        issues.append(f"Seeds duplicadas: {sorted(set(seed_duplicates))}")
+
+    if player_duplicates:
+        issues.append(f"Players repetidos na fase final: {sorted(set(player_duplicates))}")
+
+    expected_top = len(participants)
+    if expected_top not in (2, 4, 8, 16):
+        warnings.append(f"Quantidade atual de participantes fora do padrão competitivo: {expected_top}")
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "warnings": warnings,
+        "participants_count": len(participants),
+        "seed_duplicates": sorted(set(seed_duplicates)),
+        "player_duplicates": sorted(set(player_duplicates)),
+    }
+
+
+# =========================================================
+# VALIDAÇÃO — MATCHES / LINKS
+# =========================================================
+
+def final_validate_matches_integrity(sh, season_id: int) -> dict:
+    rows = get_final_matches_fast(sh, season_id)
+
+    issues = []
+    warnings = []
+
+    if not rows:
+        warnings.append("Nenhuma match da fase final encontrada.")
+        return {
+            "ok": False,
+            "issues": issues,
+            "warnings": warnings,
+            "matches_count": 0,
+            "orphan_links": [],
+            "invalid_slots": [],
+            "duplicate_ids": [],
+        }
+
+    by_id = {}
+    duplicate_ids = []
+
+    for r in rows:
+        mid = str(r.get("final_match_id", "")).strip()
+        if not mid:
+            issues.append("Existe match da fase final sem final_match_id.")
+            continue
+
+        if mid in by_id:
+            duplicate_ids.append(mid)
+        else:
+            by_id[mid] = r
+
+    if duplicate_ids:
+        issues.append(f"IDs de matches duplicados: {sorted(set(duplicate_ids))}")
+
+    orphan_links = []
+    invalid_slots = []
+
+    for r in rows:
+        mid = str(r.get("final_match_id", "")).strip()
+
+        next_win_match_id = str(r.get("next_win_match_id", "")).strip()
+        next_win_slot = str(r.get("next_win_slot", "")).strip().upper()
+
+        next_lose_match_id = str(r.get("next_lose_match_id", "")).strip()
+        next_lose_slot = str(r.get("next_lose_slot", "")).strip().upper()
+
+        if next_win_match_id:
+            if next_win_match_id not in by_id:
+                orphan_links.append((mid, "next_win_match_id", next_win_match_id))
+            if next_win_slot and next_win_slot not in ("A", "B"):
+                invalid_slots.append((mid, "next_win_slot", next_win_slot))
+
+        if next_lose_match_id:
+            if next_lose_match_id not in by_id:
+                orphan_links.append((mid, "next_lose_match_id", next_lose_match_id))
+            if next_lose_slot and next_lose_slot not in ("A", "B"):
+                invalid_slots.append((mid, "next_lose_slot", next_lose_slot))
+
+        status = str(r.get("status", "")).strip().lower()
+        if status not in ("open", "completed"):
+            issues.append(f"Match {mid} com status inválido: {status or '-'}")
+
+        bracket = str(r.get("bracket", "")).strip().lower()
+        if bracket not in ("winners", "losers", "grand_final"):
+            issues.append(f"Match {mid} com bracket inválido: {bracket or '-'}")
+
+        round_num = safe_int(r.get("round", 0), 0)
+        if round_num <= 0:
+            issues.append(f"Match {mid} com round inválido: {round_num}")
+
+        match_order = safe_int(r.get("match_order", 0), 0)
+        if match_order <= 0:
+            issues.append(f"Match {mid} com match_order inválido: {match_order}")
+
+    if orphan_links:
+        issues.append(f"Links órfãos detectados: {len(orphan_links)}")
+
+    if invalid_slots:
+        issues.append(f"Slots inválidos detectados: {len(invalid_slots)}")
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "warnings": warnings,
+        "matches_count": len(rows),
+        "orphan_links": orphan_links,
+        "invalid_slots": invalid_slots,
+        "duplicate_ids": sorted(set(duplicate_ids)),
+    }
+
+
+# =========================================================
+# VALIDAÇÃO — CONSISTÊNCIA OPERACIONAL
+# =========================================================
+
+def final_validate_operational_integrity(sh, season_id: int) -> dict:
+    """
+    Faz uma leitura prática do estado atual da fase final para detectar:
+    - match completed sem winner/loser
+    - winner/loser fora dos players da match
+    - match open com score preenchido
+    - GF2 preenchida antes da hora
+    """
+    rows = get_final_matches_fast(sh, season_id)
+
+    issues = []
+    warnings = []
+
+    if not rows:
+        return {
+            "ok": False,
+            "issues": ["Nenhuma match da fase final encontrada."],
+            "warnings": warnings,
+        }
+
+    gf1_id = _final_match_id(season_id, "grand_final", 1, 1)
+    gf2_id = _final_match_id(season_id, "grand_final", 2, 1)
+
+    by_id = {str(r.get("final_match_id", "")).strip(): r for r in rows}
+
+    gf1 = by_id.get(gf1_id)
+    gf2 = by_id.get(gf2_id)
+
+    for r in rows:
+        mid = str(r.get("final_match_id", "")).strip()
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
+        winner = str(r.get("winner_id", "")).strip()
+        loser = str(r.get("loser_id", "")).strip()
+        status = str(r.get("status", "")).strip().lower()
+
+        a_w = safe_int(r.get("a_games_won", 0), 0)
+        b_w = safe_int(r.get("b_games_won", 0), 0)
+
+        if status == "completed":
+            if not winner or not loser:
+                issues.append(f"Match {mid} concluída sem winner_id/loser_id.")
+
+            if winner and winner not in (a, b):
+                issues.append(f"Match {mid} com winner_id fora dos players da match.")
+
+            if loser and loser not in (a, b):
+                issues.append(f"Match {mid} com loser_id fora dos players da match.")
+
+            if a_w == b_w:
+                issues.append(f"Match {mid} concluída com placar empatado.")
+
+        if status == "open":
+            if a_w > 0 or b_w > 0:
+                warnings.append(f"Match {mid} aberta com placar preenchido ({a_w}-{b_w}).")
+
+    if gf2:
+        gf2_a = str(gf2.get("player_a_id", "")).strip()
+        gf2_b = str(gf2.get("player_b_id", "")).strip()
+
+        if gf2_a or gf2_b:
+            if not gf1:
+                issues.append("GF2 preenchida sem existir GF1.")
+            else:
+                gf1_status = str(gf1.get("status", "")).strip().lower()
+                gf1_winner = str(gf1.get("winner_id", "")).strip()
+                gf1_a = str(gf1.get("player_a_id", "")).strip()
+
+                # Regra do projeto atual:
+                # GF2 só deveria existir quando GF1 foi concluída e o campeão da losers venceu GF1
+                if gf1_status != "completed":
+                    issues.append("GF2 preenchida antes da conclusão da GF1.")
+                elif gf1_winner and gf1_winner == gf1_a:
+                    issues.append("GF2 preenchida mesmo com vitória do campeão da winners na GF1.")
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "warnings": warnings,
+    }
+
+
+# =========================================================
+# SNAPSHOT — RESUMO DA FASE FINAL
+# =========================================================
+
+def get_final_status_snapshot(sh, season_id: int) -> dict:
+    stage = get_final_stage_fast(sh, season_id)
+    participants = get_final_participants_fast(sh, season_id)
+    matches = get_final_matches_fast(sh, season_id)
+    final_decks = get_final_decks_fast(sh, season_id)
+
+    if not stage:
+        return {
+            "season_id": season_id,
+            "exists": False,
+            "status": "não_gerada",
+            "top_size": 0,
+            "participants": 0,
+            "matches_total": 0,
+            "matches_open_ready": 0,
+            "matches_open_waiting": 0,
+            "matches_completed": 0,
+            "final_decks": 0,
+            "winners": 0,
+            "losers": 0,
+            "grand_final": 0,
+        }
+
+    matches_open_ready = sum(1 for r in matches if _final_match_open_ready(r))
+    matches_open_waiting = sum(1 for r in matches if _final_match_open_waiting(r))
+    matches_completed = sum(1 for r in matches if str(r.get("status", "")).strip().lower() == "completed")
+
+    winners_count = sum(1 for r in matches if str(r.get("bracket", "")).strip().lower() == "winners")
+    losers_count = sum(1 for r in matches if str(r.get("bracket", "")).strip().lower() == "losers")
+    grand_final_count = sum(1 for r in matches if str(r.get("bracket", "")).strip().lower() == "grand_final")
+
+    return {
+        "season_id": season_id,
+        "exists": True,
+        "status": str(stage.get("status", "")).strip().lower(),
+        "top_size": safe_int(stage.get("top_size", 0), 0),
+        "participants": len(participants),
+        "matches_total": len(matches),
+        "matches_open_ready": matches_open_ready,
+        "matches_open_waiting": matches_open_waiting,
+        "matches_completed": matches_completed,
+        "final_decks": len(final_decks),
+        "winners": winners_count,
+        "losers": losers_count,
+        "grand_final": grand_final_count,
+    }
+
+
+# =========================================================
+# /status_final
+# =========================================================
+
+@client.tree.command(
+    name="status_final",
+    description="(ADM) Mostra diagnóstico e consistência da fase final."
+)
+@app_commands.describe(season="Season da fase final")
+@app_commands.autocomplete(season=ac_owner_season)
+async def status_final(interaction: discord.Interaction, season: int):
+    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
+        return await interaction.response.send_message(
+            "❌ Sem permissão.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+
+        if not season_exists(sh, season):
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
+
+        snapshot = get_final_status_snapshot(sh, season)
+        participants_check = final_validate_participants_integrity(sh, season)
+        matches_check = final_validate_matches_integrity(sh, season)
+        operational_check = final_validate_operational_integrity(sh, season)
+
+        lines = [
+            f"📘 **Status da Fase Final** | Season {season}",
+            f"Existente: **{'SIM' if snapshot.get('exists') else 'NÃO'}**",
+            f"Status: **{_final_stage_status_pt(snapshot.get('status', ''))}**",
+            f"Top Size: **{safe_int(snapshot.get('top_size', 0), 0)}**",
+            f"Participantes: **{safe_int(snapshot.get('participants', 0), 0)}**",
+            f"Decks cadastrados: **{safe_int(snapshot.get('final_decks', 0), 0)}**",
+            "",
+            f"Matches totais: **{safe_int(snapshot.get('matches_total', 0), 0)}**",
+            f"Matches abertas prontas: **{safe_int(snapshot.get('matches_open_ready', 0), 0)}**",
+            f"Matches abertas aguardando slots: **{safe_int(snapshot.get('matches_open_waiting', 0), 0)}**",
+            f"Matches concluídas: **{safe_int(snapshot.get('matches_completed', 0), 0)}**",
+            "",
+            f"Winners: **{safe_int(snapshot.get('winners', 0), 0)}**",
+            f"Losers: **{safe_int(snapshot.get('losers', 0), 0)}**",
+            f"Grand Final: **{safe_int(snapshot.get('grand_final', 0), 0)}**",
+            "",
+            f"Integridade participantes: **{'OK' if participants_check.get('ok') else 'FALHA'}**",
+            f"Integridade matches: **{'OK' if matches_check.get('ok') else 'FALHA'}**",
+            f"Integridade operacional: **{'OK' if operational_check.get('ok') else 'FALHA'}**",
+        ]
+
+        # warnings e issues
+        all_warnings = []
+        all_warnings.extend(participants_check.get("warnings", []))
+        all_warnings.extend(matches_check.get("warnings", []))
+        all_warnings.extend(operational_check.get("warnings", []))
+
+        all_issues = []
+        all_issues.extend(participants_check.get("issues", []))
+        all_issues.extend(matches_check.get("issues", []))
+        all_issues.extend(operational_check.get("issues", []))
+
+        if all_warnings:
+            lines.append("")
+            lines.append("⚠️ **Warnings:**")
+            for w in all_warnings[:30]:
+                lines.append(f"- {w}")
+
+        if all_issues:
+            lines.append("")
+            lines.append("❌ **Issues:**")
+            for issue in all_issues[:40]:
+                lines.append(f"- {issue}")
+
+        # detalhes resumidos de links órfãos
+        orphan_links = matches_check.get("orphan_links", [])
+        if orphan_links:
+            lines.append("")
+            lines.append("🔗 **Links órfãos (amostra):**")
+            for mid, field_name, ref in orphan_links[:15]:
+                lines.append(f"- {mid} | {field_name} -> {ref}")
+
+        invalid_slots = matches_check.get("invalid_slots", [])
+        if invalid_slots:
+            lines.append("")
+            lines.append("🎯 **Slots inválidos (amostra):**")
+            for mid, field_name, slot in invalid_slots[:15]:
+                lines.append(f"- {mid} | {field_name} = {slot}")
+
+        await send_followup_chunks(
+            interaction,
+            "\n".join(lines),
+            ephemeral=True,
+            limit=1800
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /status_final: {e}",
+            ephemeral=True
+        )
+
+
+# =================================================
+# FIM DO BLOCO 19/12
 # =================================================
 
 
