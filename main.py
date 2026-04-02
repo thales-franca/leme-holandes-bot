@@ -3103,6 +3103,7 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
 
 DECK_GUILDAS = [
     "Sem Guilda",
+    "Tribal",
     "5C",
     "4C",
     "Abzan",
@@ -3131,7 +3132,6 @@ DECK_GUILDAS = [
     "Simic",
     "Sultai",
     "Temur",
-    "Tribal",
 ]
 
 
@@ -3157,6 +3157,7 @@ DECK_ARQUETIPOS = [
     "Eldrazi Ramp",
     "Elementals",
     "Emry Station",
+    "Energy",
     "Goblins",
     "Goryo's",
     "Hammer",
