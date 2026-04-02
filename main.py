@@ -35,10 +35,6 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-@app.get("/")
-def home():
-    return "LEME HOLANDÊS BOT online", 200
-
 
 def _run_web():
     port = int(os.environ.get("PORT", "10000"))
