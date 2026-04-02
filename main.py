@@ -11703,6 +11703,8 @@ async def status_final(interaction: discord.Interaction, season: int):
 # - refaz seeds
 # - recria o chaveamento completo do zero
 # - formato atual: MD5 mata-mata simples
+# CORREÇÃO CRÍTICA:
+# - impede que o jogador removido seja recolocado como suplente
 # =========================================================
 
 
@@ -11776,6 +11778,9 @@ def build_reseeded_final_participants_after_removal(
     2) completa a vaga com o próximo do ranking geral
     3) reatribui as seeds de acordo com a ordem do ranking geral
 
+    Regra crítica:
+    - o player removido NÃO pode retornar na mesma recomposição
+
     Retorna:
     - lista final re-seeded
     - next_added_player_id (ou "" se não houve reposição)
@@ -11798,13 +11803,15 @@ def build_reseeded_final_participants_after_removal(
     if not ranking_rows:
         raise RuntimeError("Ranking geral não encontrado para recompor a fase final.")
 
-    # remove o player informado
+    # remove o player informado da composição atual
     remaining_current = []
     selected_ids = set()
 
     for r in current_participants:
         pid = str(r.get("player_id", "")).strip()
-        if not pid or pid == removed_pid:
+        if not pid:
+            continue
+        if pid == removed_pid:
             continue
 
         remaining_current.append({
@@ -11816,10 +11823,15 @@ def build_reseeded_final_participants_after_removal(
     next_added_player_id = ""
 
     # completa até o top_size com a ordem do ranking geral
+    # CORREÇÃO: removed_pid não pode voltar
     if len(remaining_current) < top_size:
         for r in ranking_rows:
             pid = str(r.get("player_id", "")).strip()
-            if not pid or pid in selected_ids:
+            if not pid:
+                continue
+            if pid == removed_pid:
+                continue
+            if pid in selected_ids:
                 continue
 
             remaining_current.append({
@@ -11951,6 +11963,15 @@ def execute_final_abdication(sh, season_id: int, target_player_id: str) -> dict:
             f"Não foi possível recompor a fase final até o TOP {top_size}. "
             f"Participantes resultantes: {len(new_rows)}."
         )
+
+    # segurança extra: removido não pode existir no resultado final
+    resulting_ids = {
+        str(r.get("player_id", "")).strip()
+        for r in new_rows
+        if str(r.get("player_id", "")).strip()
+    }
+    if pid in resulting_ids:
+        raise RuntimeError("Falha de segurança: o jogador removido reapareceu na recomposição da fase final.")
 
     rebuild_final_bracket_after_roster_change(
         sh=sh,
@@ -12530,15 +12551,124 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 # =================================================
 
 
-# =================================================
+# =========================================================
 # BLOCO ORIGINAL: BLOCO 22/22
 # SUB-BLOCO: ÚNICO
-# RESUMO: Inicialização final do bot Discord.
+# REVISÃO: Inicialização final com instrumentação de diagnóstico,
+# healthcheck real e captura de exceções fatais do processo principal.
 # Deve ficar no FINAL ABSOLUTO do main.py.
-# Mantém keep_alive e client.run após todos os blocos,
-# garantindo que índices RAM, comandos e caches
-# estejam carregados antes do bot iniciar.
-# =================================================
+# =========================================================
+
+import sys
+import traceback
+
+
+# =========================================================
+# HEALTH STATE GLOBAL
+# =========================================================
+_APP_BOOT_STARTED_AT = now_iso_utc()
+_APP_BOOT_COMPLETED_AT = ""
+_LAST_FATAL_ERROR_AT = ""
+_LAST_FATAL_ERROR_TEXT = ""
+
+
+def _set_fatal_error(err_text: str):
+    global _LAST_FATAL_ERROR_AT, _LAST_FATAL_ERROR_TEXT
+    _LAST_FATAL_ERROR_AT = now_iso_utc()
+    _LAST_FATAL_ERROR_TEXT = str(err_text or "").strip()[:4000]
+
+
+def _mark_boot_completed():
+    global _APP_BOOT_COMPLETED_AT
+    _APP_BOOT_COMPLETED_AT = now_iso_utc()
+
+
+def get_runtime_health_snapshot() -> dict:
+    """
+    Snapshot leve do estado atual do serviço.
+    """
+    try:
+        discord_logged_in = bool(getattr(client, "is_logged_in", lambda: False)())
+    except Exception:
+        discord_logged_in = False
+
+    try:
+        discord_ready = bool(client.is_ready())
+    except Exception:
+        discord_ready = False
+
+    try:
+        guild_count = len(getattr(client, "guilds", []) or [])
+    except Exception:
+        guild_count = 0
+
+    return {
+        "service": "LEME HOLANDÊS BOT",
+        "boot_started_at": _APP_BOOT_STARTED_AT,
+        "boot_completed_at": _APP_BOOT_COMPLETED_AT,
+        "discord_logged_in": discord_logged_in,
+        "discord_ready": discord_ready,
+        "guild_count": guild_count,
+        "last_fatal_error_at": _LAST_FATAL_ERROR_AT,
+        "last_fatal_error_text": _LAST_FATAL_ERROR_TEXT,
+    }
+
+
+# =========================================================
+# HTTP keep-alive / healthcheck real
+# OBS:
+# - substitui a rota anterior "/" do bloco 1 pelo comportamento final
+# - readiness real: só responde 200 quando o bot está ready
+# =========================================================
+
+@app.get("/")
+def home():
+    snap = get_runtime_health_snapshot()
+
+    if snap["discord_ready"]:
+        return {
+            "ok": True,
+            "status": "ready",
+            **snap,
+        }, 200
+
+    return {
+        "ok": False,
+        "status": "starting",
+        **snap,
+    }, 503
+
+
+@app.get("/healthz")
+def healthz():
+    snap = get_runtime_health_snapshot()
+
+    if snap["discord_ready"]:
+        return {
+            "ok": True,
+            "status": "healthy",
+            **snap,
+        }, 200
+
+    return {
+        "ok": False,
+        "status": "not_ready",
+        **snap,
+    }, 503
+
+
+@app.get("/ping")
+def ping():
+    """
+    Endpoint simples para diagnóstico da instância HTTP.
+    Não garante que o bot esteja pronto no Discord.
+    """
+    snap = get_runtime_health_snapshot()
+    return {
+        "ok": True,
+        "status": "http_alive",
+        **snap,
+    }, 200
 
 
 # =========================================================
@@ -12558,14 +12688,127 @@ def _final_warmup():
     return
 
 
+def _install_global_exception_hooks():
+    """
+    Captura exceções fatais fora do fluxo normal para melhorar diagnóstico no Render.
+    """
+
+    def _handle_exception(exc_type, exc_value, exc_tb):
+        try:
+            tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        except Exception:
+            tb_text = f"{exc_type}: {exc_value}"
+
+        _set_fatal_error(tb_text)
+
+        print("\n" + "=" * 80)
+        print("FATAL EXCEPTION CAPTURED BY sys.excepthook")
+        print(tb_text)
+        print("=" * 80 + "\n")
+
+        # mantém comportamento padrão
+        try:
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _handle_exception
+
+    # Python 3.8+: captura exceções fatais em threads
+    def _threading_excepthook(args):
+        try:
+            tb_text = "".join(
+                traceback.format_exception(
+                    args.exc_type,
+                    args.exc_value,
+                    args.exc_traceback
+                )
+            )
+        except Exception:
+            tb_text = f"{args.exc_type}: {args.exc_value}"
+
+        _set_fatal_error(tb_text)
+
+        print("\n" + "=" * 80)
+        print("FATAL THREAD EXCEPTION CAPTURED BY threading.excepthook")
+        print(tb_text)
+        print("=" * 80 + "\n")
+
+    try:
+        threading.excepthook = _threading_excepthook
+    except Exception:
+        pass
+
+
+@client.event
+async def on_ready():
+    try:
+        _mark_boot_completed()
+    except Exception:
+        pass
+
+    try:
+        print("\n" + "=" * 80)
+        print("LEME HOLANDÊS BOT READY")
+        print(f"User: {client.user}")
+        print(f"Guilds carregadas: {len(client.guilds)}")
+        print(f"Ready at (UTC): {_APP_BOOT_COMPLETED_AT}")
+        print("=" * 80 + "\n")
+    except Exception:
+        pass
+
+
+try:
+    _install_global_exception_hooks()
+except Exception as e:
+    print(f"ERRO instalando exception hooks globais: {e}")
+
 try:
     _final_warmup()
+except Exception as e:
+    print(f"ERRO no _final_warmup: {e}")
+
+try:
+    print("\n" + "=" * 80)
+    print("INICIANDO LEME HOLANDÊS BOT")
+    print(f"Boot started at (UTC): {_APP_BOOT_STARTED_AT}")
+    print("Subindo servidor HTTP de healthcheck...")
+    print("=" * 80 + "\n")
 except Exception:
     pass
 
 
-keep_alive()
-client.run(DISCORD_TOKEN)
+try:
+    keep_alive()
+except Exception as e:
+    tb_text = traceback.format_exc()
+    _set_fatal_error(tb_text)
+    print("\n" + "=" * 80)
+    print("FALHA AO SUBIR keep_alive()")
+    print(tb_text)
+    print("=" * 80 + "\n")
+    raise
+
+
+try:
+    print("\n" + "=" * 80)
+    print("INICIANDO CLIENT.DISCORD.RUN()")
+    print("=" * 80 + "\n")
+    client.run(DISCORD_TOKEN)
+except KeyboardInterrupt:
+    print("\n" + "=" * 80)
+    print("PROCESSO ENCERRADO MANUALMENTE (KeyboardInterrupt)")
+    print("=" * 80 + "\n")
+    raise
+except Exception:
+    tb_text = traceback.format_exc()
+    _set_fatal_error(tb_text)
+
+    print("\n" + "=" * 80)
+    print("FALHA FATAL NO client.run(DISCORD_TOKEN)")
+    print(tb_text)
+    print("=" * 80 + "\n")
+    raise
 
 
 # =================================================
