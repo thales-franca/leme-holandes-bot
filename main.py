@@ -2418,6 +2418,7 @@ COMMANDS_CATALOG = [
     ("jogador", "/drop", "Sai do ciclo escolhido."),
     ("jogador", "/historico_confronto", "Mostra histórico de confrontos entre dois jogadores."),
     ("jogador", "/inscrever", "Se inscreve automaticamente no ciclo aberto com deck e decklist."),
+    ("jogador", "/inscrever_final", "Se inscreve automaticamente na Fase Final do Ciclo TOP4, TOP8 ou TOP16, apenas se estiver classifcado."),
     ("jogador", "/meuid", "Mostra seu ID do Discord."),
     ("jogador", "/meus_matches", "Lista seus matches da season/ciclo."),
     ("jogador", "/meta", "Mostra o meta field da season e ciclo indicado."),
@@ -2556,6 +2557,7 @@ async def tutorial(interaction: discord.Interaction):
             "• Use **/drop** para sair do ciclo escolhido.",
             "",
             "**8. Se você se classificar para a fase final**",
+            "• Use **/inscrever_final** para se inscrever.",
             "• Use **/chaveamento** para acompanhar o mata-mata.",
             "• Use **/resultado_final** para reportar sua match da fase final.",
             "• Antes do início oficial, você pode usar **/abdicar_final** se precisar sair.",
@@ -9456,6 +9458,8 @@ def get_final_bracket_summary(sh, season_id: int) -> dict:
 # mata-mata simples.
 # - /fase_final gera bracket single elimination
 # - /cadastrar_final atualiza deck/decklist apenas de participante já classificado
+# - /inscrever_final permite ao próprio jogador elegível cadastrar deck/decklist
+#   na última final válida
 # =========================================================
 
 # =========================================================
@@ -9786,6 +9790,66 @@ def clear_final_decks_for_season(ws_final_decks, season_id: int):
 
 
 # =========================================================
+# HELPERS — FINAL STAGE / TEMPORADA ATIVA DA FINAL
+# =========================================================
+
+def get_latest_valid_final_stage(sh) -> dict | None:
+    """
+    Retorna a última FinalStage válida com prioridade para seasons mais altas
+    e status utilizáveis no fluxo atual.
+    Status válidos aqui:
+    - generated
+    - waiting_confirmation
+    - in_progress
+    - completed
+
+    O objetivo do /inscrever_final é localizar automaticamente a final
+    mais recente já criada.
+    """
+    ws_stage, _, _ = ensure_final_sheets(sh)
+    rows = cached_get_all_records(ws_stage, ttl_seconds=10)
+
+    valid = []
+
+    for raw in rows:
+        r = _normalize_final_stage_row(raw)
+        sid = safe_int(r.get("season_id", 0), 0)
+        status = str(r.get("status", "")).strip().lower()
+
+        if sid <= 0:
+            continue
+
+        if status not in ("generated", "waiting_confirmation", "in_progress", "completed"):
+            continue
+
+        valid.append(r)
+
+    if not valid:
+        return None
+
+    valid.sort(
+        key=lambda x: (
+            safe_int(x.get("season_id", 0), 0),
+            str(x.get("updated_at", "")).strip(),
+            str(x.get("created_at", "")).strip(),
+        ),
+        reverse=True
+    )
+
+    return dict(valid[0])
+
+
+def final_stage_allows_player_deck_registration(status: str) -> bool:
+    """
+    Permite inscrição/atualização do deck da final enquanto a final estiver
+    gerada, aguardando início oficial ou até mesmo em andamento.
+    Não permite após concluída.
+    """
+    st = str(status or "").strip().lower()
+    return st in ("generated", "waiting_confirmation", "in_progress")
+
+
+# =========================================================
 # /fase_final
 # =========================================================
 
@@ -10046,6 +10110,143 @@ async def cadastrar_final(
     except Exception as e:
         await interaction.followup.send(
             f"❌ Erro no /cadastrar_final: {e}",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# /inscrever_final
+# =========================================================
+
+@client.tree.command(
+    name="inscrever_final",
+    description="Define seu deck e decklist na última fase final válida em que você estiver classificado."
+)
+@app_commands.describe(
+    guilda="Base do deck",
+    arquetipo="Arquétipo do deck",
+    decklist="Link da decklist"
+)
+@app_commands.autocomplete(
+    guilda=ac_deck_guilda,
+    arquetipo=ac_deck_arquetipo
+)
+async def inscrever_final(
+    interaction: discord.Interaction,
+    guilda: str,
+    arquetipo: str,
+    decklist: str
+):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sh = open_sheet()
+        ensure_final_sheets(sh)
+        ws_final_decks = ensure_final_decks_sheet(sh)
+
+        stage = get_latest_valid_final_stage(sh)
+        if not stage:
+            return await interaction.followup.send(
+                "❌ Não existe fase final válida para inscrição neste momento.",
+                ephemeral=True
+            )
+
+        season = safe_int(stage.get("season_id", 0), 0)
+        stage_status = str(stage.get("status", "")).strip().lower()
+
+        if season <= 0:
+            return await interaction.followup.send(
+                "❌ Não consegui identificar a season da fase final atual.",
+                ephemeral=True
+            )
+
+        if not final_stage_allows_player_deck_registration(stage_status):
+            return await interaction.followup.send(
+                "❌ A fase final encontrada não está disponível para inscrição de deck.",
+                ephemeral=True
+            )
+
+        pid = str(interaction.user.id).strip()
+
+        participant = get_final_participant_by_player_fast(sh, season, pid)
+        if not participant:
+            return await interaction.followup.send(
+                "❌ Você não está classificado na última fase final válida.",
+                ephemeral=True
+            )
+
+        player_row = get_player_row_fast(sh, pid)
+        if not player_row:
+            return await interaction.followup.send(
+                "❌ Seu cadastro geral não foi encontrado.",
+                ephemeral=True
+            )
+
+        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
+        if not guilda_final:
+            return await interaction.followup.send(
+                "❌ Guilda inválida.",
+                ephemeral=True
+            )
+
+        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
+        if not arquetipo_final:
+            return await interaction.followup.send(
+                "❌ Arquétipo inválido.",
+                ephemeral=True
+            )
+
+        nome_deck = _montar_nome_deck(guilda_final, arquetipo_final)
+        if not nome_deck or len(nome_deck) > 80:
+            return await interaction.followup.send(
+                "❌ Nome de deck inválido.",
+                ephemeral=True
+            )
+
+        ok, decklist_val = validate_decklist_url(decklist)
+        if not ok:
+            return await interaction.followup.send(
+                f"❌ Decklist inválida: {decklist_val}",
+                ephemeral=True
+            )
+
+        upsert_final_deck(
+            ws_final_decks=ws_final_decks,
+            season_id=season,
+            player_id=pid,
+            deck_name=nome_deck,
+            decklist_url=decklist_val
+        )
+
+        invalidate_final_decks_ram_index()
+
+        nick = str(player_row.get("nick", "")).strip() or pid
+        seed = safe_int(participant.get("seed", 0), 0)
+        ranking_position = safe_int(participant.get("ranking_position", 0), 0)
+
+        lines = [
+            f"✅ Sua inscrição na fase final foi atualizada com sucesso.",
+            f"- Season: **{season}**",
+            f"- Jogador: **{nick}**",
+            f"- Seed: **{seed}**",
+            f"- Ranking geral: **#{ranking_position if ranking_position > 0 else '-'}**",
+            f"- Deck: **{nome_deck}**",
+            f"- Decklist: definida com sucesso.",
+        ]
+
+        await interaction.followup.send(
+            "\n".join(lines),
+            ephemeral=True
+        )
+
+        await log_admin(
+            interaction,
+            f"inscrever_final: season={season} player={nick} ({pid}) seed={seed} deck='{nome_deck}'"
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erro no /inscrever_final: {e}",
             ephemeral=True
         )
 
