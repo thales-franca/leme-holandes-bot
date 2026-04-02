@@ -7771,13 +7771,16 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
 # FIM DO BLOCO 11/22
 # =================================================
 
-# =================================================
+
+# =========================================================
 # BLOCO ORIGINAL: BLOCO 12/22
 # SUB-BLOCO: ÚNICO
-# RESUMO: Estrutura base da Fase Final (FinalStage, FinalParticipants, FinalMatches),
+# REVISÃO: Estrutura base da Fase Final (FinalStage, FinalParticipants, FinalMatches),
 # validações da season, leitura do ranking geral e definição do TOP (2/4/8/16).
-# Não altera nenhuma lógica existente do sistema de ciclos.
-# =================================================
+# CORREÇÃO CRÍTICA:
+# - invalidação correta do índice RAM de FinalParticipants
+# - rebuild da fase final passa a refletir o estado real do Sheets
+# =========================================================
 
 # =========================================================
 # HEADERS — FASE FINAL
@@ -7926,7 +7929,6 @@ def get_final_stage_fields(ws_stage, season_id: int) -> dict:
 
         out["status"] = str(r[col["status"]] if col["status"] < len(r) else "").strip().lower()
 
-        # colunas opcionais adicionais
         header = rows[0]
         idx = {name: j for j, name in enumerate(header)}
 
@@ -7960,7 +7962,7 @@ def set_final_stage(
     season_id: int,
     status: str,
     top_size: int,
-    fmt: str = "double_elimination"
+    fmt: str = "single_elimination"
 ):
     status = str(status or "").strip().lower()
     top_size = safe_int(top_size, 0)
@@ -7983,6 +7985,10 @@ def set_final_stage(
             value_input_option="USER_ENTERED"
         )
         cache_invalidate(ws_stage)
+        try:
+            invalidate_final_stage_ram_index()
+        except Exception:
+            pass
         return
 
     updates = []
@@ -8014,6 +8020,10 @@ def set_final_stage(
     if updates:
         ws_stage.batch_update(updates)
         cache_invalidate(ws_stage)
+        try:
+            invalidate_final_stage_ram_index()
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -8060,10 +8070,6 @@ def _final_read_ranking_geral_rows(sh, season_id: int) -> list[dict]:
     """
     Retorna a classificação final da season usando a mesma lógica oficial
     do /ranking_geral, mas em formato estruturado.
-
-    Critério:
-    - considera somente jogadores que aparecem na aba Standings da season
-    - isso representa quem participou competitivamente de algum ciclo
     """
     ws_standings = ensure_worksheet(
         sh,
@@ -8203,11 +8209,6 @@ def _final_read_ranking_geral_rows(sh, season_id: int) -> list[dict]:
 
 # =========================================================
 # DEFINIÇÃO DO TOP DA FASE FINAL
-# REGRA OFICIAL:
-# - até 8 jogadores -> TOP 2
-# - 9 a 15 -> TOP 4
-# - 16 a 31 -> TOP 8
-# - 32+ -> TOP 16
 # =========================================================
 
 def define_final_top_size(total_players: int) -> int:
@@ -8225,14 +8226,6 @@ def define_final_top_size(total_players: int) -> int:
 
 
 def get_final_qualified_players(sh, season_id: int) -> tuple[list[dict], int]:
-    """
-    Retorna:
-    - lista dos classificados (já com seed)
-    - top_size calculado
-
-    Critério:
-    - conta apenas jogadores que aparecem no ranking geral da season
-    """
     ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
 
     if not ranking_rows:
@@ -8279,6 +8272,10 @@ def clear_final_participants_for_season(ws_participants, season_id: int):
     if not vals:
         ws_participants.append_row(FINAL_PARTICIPANTS_HEADER)
         cache_invalidate(ws_participants)
+        try:
+            invalidate_final_participants_ram_index()
+        except Exception:
+            pass
         return
 
     header = vals[0]
@@ -8296,6 +8293,10 @@ def clear_final_participants_for_season(ws_participants, season_id: int):
     ws_participants.clear()
     ws_participants.append_rows(kept, value_input_option="RAW")
     cache_invalidate(ws_participants)
+    try:
+        invalidate_final_participants_ram_index()
+    except Exception:
+        pass
 
 
 def save_final_participants(ws_participants, season_id: int, qualified_rows: list[dict]):
@@ -8306,6 +8307,10 @@ def save_final_participants(ws_participants, season_id: int, qualified_rows: lis
     clear_final_participants_for_season(ws_participants, season_id)
 
     if not qualified_rows:
+        try:
+            invalidate_final_participants_ram_index()
+        except Exception:
+            pass
         return
 
     nowb = now_br_str()
@@ -8327,7 +8332,12 @@ def save_final_participants(ws_participants, season_id: int, qualified_rows: lis
             rows_to_add,
             value_input_option="USER_ENTERED"
         )
-        cache_invalidate(ws_participants)
+
+    cache_invalidate(ws_participants)
+    try:
+        invalidate_final_participants_ram_index()
+    except Exception:
+        pass
 
 
 def get_final_participants_rows(ws_participants, season_id: int) -> list[dict]:
@@ -8404,6 +8414,7 @@ def get_final_matches_rows(ws_matches, season_id: int) -> list[dict]:
 # =================================================
 # FIM DO BLOCO 12/22
 # =================================================
+
 
 # =================================================
 # BLOCO ORIGINAL: BLOCO 13/22
