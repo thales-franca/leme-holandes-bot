@@ -1507,8 +1507,8 @@ def compute_cycle_start_deadline_br(season_id: int, cycle: int, ws_pods, ws_cycl
 # =================================================
 # BLOCO ORIGINAL: BLOCO 3/22
 # SUB-BLOCO: B/2
-# REVISÃO: uso preferencial de snapshot imediato do MATCH AC INDEX no
-# autocomplete crítico de /resultado e /rejeitar, reduzindo timeout.
+# REVISÃO: autocomplete ultra-rápido com prioridade para snapshots RAM,
+# fallback leve para ensure_*_index e menor chance de Unknown interaction.
 # =================================================
 
 # =========================
@@ -1570,6 +1570,70 @@ def _get_match_ac_choices_snapshot_for_user(user_id: str, query: str = "", limit
     return out
 
 
+def _get_season_choices_snapshot(query: str = "", limit: int = 25) -> list[dict]:
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    try:
+        with _SEASON_RAM_INDEX_LOCK:
+            items = list(_SEASON_RAM_INDEX.get("choices", []))
+    except Exception:
+        return []
+
+    if not items:
+        return []
+
+    if not q:
+        return [dict(item) for item in items[:limit]]
+
+    out = []
+    for item in items:
+        if q in str(item.get("search", "")):
+            out.append(dict(item))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _get_cycle_choices_snapshot(
+    season_id: int,
+    query: str = "",
+    only_open: bool = False,
+    limit: int = 25
+) -> list[dict]:
+    sid = safe_int(season_id, 0)
+    if sid <= 0:
+        return []
+
+    q = str(query or "").strip().lower()
+    limit = max(1, min(limit, 25))
+
+    try:
+        with _CYCLE_RAM_LOCK:
+            items = list(_CYCLE_RAM_INDEX.get("by_season", {}).get(sid, {}).get("choices", []))
+    except Exception:
+        return []
+
+    if not items:
+        return []
+
+    out = []
+    for item in items:
+        status = str(item.get("status", "")).strip().lower()
+
+        if only_open and status != "open":
+            continue
+
+        if q and q not in str(item.get("search", "")):
+            continue
+
+        out.append(dict(item))
+        if len(out) >= limit:
+            break
+
+    return out
+
+
 # =========================
 # AUTOCOMPLETE FUNCTIONS
 # =========================
@@ -1578,19 +1642,30 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
         if _ac_should_skip(interaction, "ac_cycle_open"):
             return []
 
+        q = str(current or "").strip().lower()
+
         sh = open_sheet()
         season_id = get_current_season_id(sh)
         if season_id <= 0:
             return []
 
-        q = str(current or "").strip().lower()
-        items = get_cycle_choices_fast(
-            sh,
+        # 1) snapshot imediato
+        items = _get_cycle_choices_snapshot(
             season_id=season_id,
             query=q,
             only_open=False,
             limit=25
         )
+
+        # 2) fallback leve
+        if not items:
+            items = get_cycle_choices_fast(
+                sh,
+                season_id=season_id,
+                query=q,
+                only_open=False,
+                limit=25
+            )
 
         out: list[app_commands.Choice[str]] = []
         for item in items:
@@ -1601,6 +1676,7 @@ async def ac_cycle_open(interaction: discord.Interaction, current: str):
             out.append(app_commands.Choice(name=label[:100], value=value))
 
         return out[:25]
+
     except Exception:
         return []
 
@@ -1610,19 +1686,30 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
         if _ac_should_skip(interaction, "ac_cycle_only_open"):
             return []
 
+        q = str(current or "").strip().lower()
+
         sh = open_sheet()
         season_id = get_current_season_id(sh)
         if season_id <= 0:
             return []
 
-        q = str(current or "").strip().lower()
-        items = get_cycle_choices_fast(
-            sh,
+        # 1) snapshot imediato
+        items = _get_cycle_choices_snapshot(
             season_id=season_id,
             query=q,
             only_open=True,
             limit=25
         )
+
+        # 2) fallback leve
+        if not items:
+            items = get_cycle_choices_fast(
+                sh,
+                season_id=season_id,
+                query=q,
+                only_open=True,
+                limit=25
+            )
 
         out: list[app_commands.Choice[str]] = []
         for item in items:
@@ -1633,6 +1720,7 @@ async def ac_cycle_only_open(interaction: discord.Interaction, current: str):
             out.append(app_commands.Choice(name=label[:100], value=value))
 
         return out[:25]
+
     except Exception:
         return []
 
@@ -1643,30 +1731,34 @@ async def ac_season_open(interaction: discord.Interaction, current: str):
         if _ac_should_skip(interaction, "ac_season_open"):
             return []
 
-        sh = open_sheet()
-        ws = ensure_worksheet(sh, "Seasons", SEASONS_HEADER)
-        rows = cached_get_all_records(ws, ttl_seconds=30)
-
         q = str(current or "").strip().lower()
+
+        # 1) snapshot imediato
+        items = _get_season_choices_snapshot(query=q, limit=25)
+
+        # 2) fallback leve
+        if not items:
+            sh = open_sheet()
+            items = get_season_choices_fast(sh, query=q, limit=25)
+
         out: list[app_commands.Choice[int]] = []
 
-        for r in rows:
-            sid = str(r.get("season_id", "")).strip()
-            status = str(r.get("status", "")).strip().lower()
+        for item in items:
+            sid = safe_int(item.get("season_id", 0), 0)
+            status = str(item.get("status", "")).strip().lower()
 
-            if not sid or status != "open":
+            if sid <= 0 or status != "open":
                 continue
 
-            if q and q not in sid:
-                continue
-
-            try:
-                out.append(app_commands.Choice(
+            out.append(
+                app_commands.Choice(
                     name=f"Season {sid}",
-                    value=int(sid)
-                ))
-            except Exception:
-                continue
+                    value=sid
+                )
+            )
+
+            if len(out) >= 25:
+                break
 
         return out[:25]
 
@@ -1682,12 +1774,14 @@ async def ac_match_id_user_pending(interaction: discord.Interaction, current: st
         uid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
+        # 1) snapshot imediato
         items = _get_match_ac_choices_snapshot_for_user(
             user_id=uid,
             query=q,
             limit=25
         )
 
+        # 2) fallback leve
         if not items:
             sh = open_sheet()
             items = get_match_ac_choices_for_user(
@@ -1750,7 +1844,7 @@ async def ac_score_vde(interaction: discord.Interaction, current: str):
             out.append(
                 app_commands.Choice(
                     name=f"{score} ({label})",
-                    value=score  # 🔥 NÃO ALTERAR
+                    value=score
                 )
             )
 
@@ -1765,10 +1859,15 @@ async def ac_owner_season(interaction: discord.Interaction, current: str):
         if _ac_should_skip(interaction, "ac_owner_season"):
             return []
 
-        sh = open_sheet()
         q = str(current or "").strip().lower()
 
-        items = get_season_choices_fast(sh, query=q, limit=25)
+        # 1) snapshot imediato
+        items = _get_season_choices_snapshot(query=q, limit=25)
+
+        # 2) fallback leve
+        if not items:
+            sh = open_sheet()
+            items = get_season_choices_fast(sh, query=q, limit=25)
 
         out: list[app_commands.Choice[int]] = []
         for item in items:
@@ -1776,9 +1875,14 @@ async def ac_owner_season(interaction: discord.Interaction, current: str):
             label = str(item.get("label", "")).strip()
             if sid <= 0 or not label:
                 continue
+
             out.append(app_commands.Choice(name=label[:100], value=sid))
 
+            if len(out) >= 25:
+                break
+
         return out[:25]
+
     except Exception:
         return []
 
@@ -1788,21 +1892,30 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
         if _ac_should_skip(interaction, "ac_owner_cycle_for_season"):
             return []
 
-        sh = open_sheet()
-
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
         q = str(current or "").strip().lower()
 
         if season_selected <= 0:
             return []
 
-        items = get_cycle_choices_fast(
-            sh,
+        # 1) snapshot imediato
+        items = _get_cycle_choices_snapshot(
             season_id=season_selected,
             query=q,
             only_open=False,
             limit=25
         )
+
+        # 2) fallback leve
+        if not items:
+            sh = open_sheet()
+            items = get_cycle_choices_fast(
+                sh,
+                season_id=season_selected,
+                query=q,
+                only_open=False,
+                limit=25
+            )
 
         out: list[app_commands.Choice[int]] = []
         for item in items:
@@ -1810,9 +1923,14 @@ async def ac_owner_cycle_for_season(interaction: discord.Interaction, current: s
             label = str(item.get("label", "")).strip()
             if cyc <= 0 or not label:
                 continue
+
             out.append(app_commands.Choice(name=label[:100], value=cyc))
 
+            if len(out) >= 25:
+                break
+
         return out[:25]
+
     except Exception:
         return []
 
@@ -12561,10 +12679,10 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 22/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: estabilidade total do ciclo de vida do serviço
+# REVISÃO V2: estabilidade total com heartbeat garantido via tasks.loop
 # - separação entre liveness (/ping) e readiness (/healthz)
 # - endpoint raiz estável para inspeção manual
-# - heartbeat periódico no log
+# - heartbeat periódico robusto
 # - captura de exceções fatais do processo principal
 # - simplificação do estado do Discord
 # Deve ficar no FINAL ABSOLUTO do main.py.
@@ -12572,7 +12690,7 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 
 import sys
 import traceback
-import asyncio
+from discord.ext import tasks
 
 
 # =========================================================
@@ -12582,7 +12700,7 @@ _APP_BOOT_STARTED_AT = now_iso_utc()
 _APP_BOOT_COMPLETED_AT = ""
 _LAST_FATAL_ERROR_AT = ""
 _LAST_FATAL_ERROR_TEXT = ""
-_HEARTBEAT_STARTED = False
+_READY_ONCE = False
 
 
 def _set_fatal_error(err_text: str):
@@ -12633,7 +12751,6 @@ def home():
     Sempre responde 200 se o processo HTTP estiver vivo.
     """
     snap = get_runtime_health_snapshot()
-
     status = "ready" if snap["discord_ready"] else "starting"
 
     return {
@@ -12684,69 +12801,68 @@ def healthz():
 
 
 # =========================================================
-# HEARTBEAT
+# HEARTBEAT ROBUSTO
 # =========================================================
 
-async def _heartbeat_loop():
-    """
-    Emite logs periódicos para ajudar no diagnóstico de estabilidade.
-    """
-    while True:
-        try:
-            snap = get_runtime_health_snapshot()
+@tasks.loop(minutes=5)
+async def health_heartbeat_loop():
+    try:
+        snap = get_runtime_health_snapshot()
 
+        match_snapshot = {}
+        player_snapshot = {}
+        cycle_snapshot = {}
+        season_snapshot = {}
+
+        try:
+            match_snapshot = get_match_ram_index_snapshot()
+        except Exception:
             match_snapshot = {}
+
+        try:
+            player_snapshot = get_player_ram_index_snapshot()
+        except Exception:
             player_snapshot = {}
+
+        try:
+            cycle_snapshot = get_cycle_ram_index_snapshot()
+        except Exception:
             cycle_snapshot = {}
+
+        try:
+            season_snapshot = get_season_ram_index_snapshot()
+        except Exception:
             season_snapshot = {}
 
-            try:
-                match_snapshot = get_match_ram_index_snapshot()
-            except Exception:
-                match_snapshot = {}
+        print(
+            "[HEARTBEAT] "
+            f"time={now_iso_utc()} | "
+            f"ready={snap.get('discord_ready')} | "
+            f"guilds={snap.get('guild_count')} | "
+            f"match_idx={match_snapshot.get('matches_indexed', '-')} | "
+            f"player_idx={player_snapshot.get('players_indexed', '-')} | "
+            f"cycle_idx={cycle_snapshot.get('cycles_indexed', '-')} | "
+            f"season_idx={season_snapshot.get('seasons_indexed', '-')}"
+        )
 
-            try:
-                player_snapshot = get_player_ram_index_snapshot()
-            except Exception:
-                player_snapshot = {}
+    except Exception as e:
+        print(f"[HEARTBEAT] erro: {e}")
 
-            try:
-                cycle_snapshot = get_cycle_ram_index_snapshot()
-            except Exception:
-                cycle_snapshot = {}
 
-            try:
-                season_snapshot = get_season_ram_index_snapshot()
-            except Exception:
-                season_snapshot = {}
-
-            print(
-                "[HEARTBEAT] "
-                f"time={now_iso_utc()} | "
-                f"ready={snap.get('discord_ready')} | "
-                f"guilds={snap.get('guild_count')} | "
-                f"match_idx={match_snapshot.get('matches_indexed', '-')} | "
-                f"player_idx={player_snapshot.get('players_indexed', '-')} | "
-                f"cycle_idx={cycle_snapshot.get('cycles_indexed', '-')} | "
-                f"season_idx={season_snapshot.get('seasons_indexed', '-')}"
-            )
-
-        except Exception as e:
-            print(f"[HEARTBEAT] erro: {e}")
-
-        await asyncio.sleep(300)  # 5 minutos
+@health_heartbeat_loop.before_loop
+async def before_health_heartbeat_loop():
+    try:
+        await client.wait_until_ready()
+    except Exception:
+        pass
 
 
 def _start_heartbeat_once():
-    global _HEARTBEAT_STARTED
-
-    if _HEARTBEAT_STARTED:
+    if health_heartbeat_loop.is_running():
         return
 
-    _HEARTBEAT_STARTED = True
-
     try:
-        asyncio.create_task(_heartbeat_loop())
+        health_heartbeat_loop.start()
         print("[BOOT] Heartbeat iniciado com sucesso.")
     except Exception as e:
         print(f"[BOOT] Falha ao iniciar heartbeat: {e}")
@@ -12821,18 +12937,24 @@ def _install_global_exception_hooks():
 
 @client.event
 async def on_ready():
-    try:
-        _mark_boot_completed()
-    except Exception:
-        pass
+    global _READY_ONCE
 
     try:
-        print("\n" + "=" * 80)
-        print("LEME HOLANDÊS BOT READY")
-        print(f"User: {client.user}")
-        print(f"Guilds carregadas: {len(client.guilds)}")
-        print(f"Ready at (UTC): {_APP_BOOT_COMPLETED_AT}")
-        print("=" * 80 + "\n")
+        if not _READY_ONCE:
+            _READY_ONCE = True
+            _mark_boot_completed()
+
+            print("\n" + "=" * 80)
+            print("LEME HOLANDÊS BOT READY")
+            print(f"User: {client.user}")
+            print(f"Guilds carregadas: {len(client.guilds)}")
+            print(f"Ready at (UTC): {_APP_BOOT_COMPLETED_AT}")
+            print("=" * 80 + "\n")
+        else:
+            print(
+                f"[READY] Reconexão detectada em {now_iso_utc()} | "
+                f"user={client.user} | guilds={len(client.guilds)}"
+            )
     except Exception:
         pass
 
