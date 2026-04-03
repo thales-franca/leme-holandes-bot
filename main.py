@@ -6206,7 +6206,7 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 # SUB-BLOCO: G/7
 # REVISÃO: otimização de loops pesados com melhor aproveitamento dos índices RAM
 # de Players e Matches, invalidação consistente após substituição e remoção do
-# START deste sub-bloco, que deve permanecer apenas no BLOCO 22 final.
+# START deste sub-bloco, que deve permanecer apenas no último bloco.
 # =================================================
 
 
