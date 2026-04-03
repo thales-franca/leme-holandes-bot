@@ -12679,36 +12679,125 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 # =================================================
 # BLOCO ORIGINAL: BLOCO 22/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: BLINDAGEM TOTAL DE ESTABILIDADE (ANTI-QUEDA)
+# REVISÃO FINAL: BLINDAGEM TOTAL DE ESTABILIDADE (ANTI-QUEDA)
+# CORREÇÃO CRÍTICA:
+# - NÃO recria client
+# - NÃO recria tree
+# - reaproveita o LemeBot() já definido no BLOCO 5
+# - mantém setup_hook, sync, views persistentes e warm caches
+# - adiciona healthcheck real do Discord
 # =================================================
 
+# =========================================================
+# HEALTHCHECK SERVER (RENDER)
+# =========================================================
+from flask import jsonify
+
+START_TIME = datetime.now(timezone.utc)
+
+
+@app.route("/")
+def home():
+    try:
+        return jsonify({
+            "ok": True,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "ready",
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "error",
+            "error": str(e),
+        }), 500
+
+
+@app.route("/ping")
+def ping():
+    try:
+        return jsonify({
+            "ok": True,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "alive",
+            "time": datetime.now(timezone.utc).isoformat(),
+            "discord_ready": bool(client.is_ready()),
+            "guild_count": len(client.guilds) if client.is_ready() else 0,
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "error",
+            "error": str(e),
+        }), 500
+
+
+@app.route("/healthz")
+def healthz():
+    try:
+        now_utc = datetime.now(timezone.utc)
+
+        return jsonify({
+            "ok": True,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "ready" if client.is_ready() else "starting",
+            "uptime_seconds": int((now_utc - START_TIME).total_seconds()),
+            "discord_ready": bool(client.is_ready()),
+            "discord_user": str(client.user) if client.user else "",
+            "guild_count": len(client.guilds) if client.is_ready() else 0,
+            "latency_ms": round(client.latency * 1000, 2) if client.is_ready() else None,
+            "time": now_utc.isoformat(),
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "service": "LEME HOLANDÊS BOT",
+            "status": "error",
+            "error": str(e),
+        }), 500
+
 
 # =========================================================
-# CLIENTE RESILIENTE
+# LOGS DE ESTABILIDADE NO CLIENT PRINCIPAL
+# IMPORTANTE:
+# - NÃO criar outro client
+# - apenas reaproveitar o client = LemeBot() do BLOCO 5
 # =========================================================
-class StableClient(discord.Client):
-    async def on_ready(self):
-        print(f"🔥 BOT ONLINE: {self.user}")
+@client.event
+async def on_ready():
+    try:
+        print("========================================")
+        print(f"🔥 BOT ONLINE: {client.user} (id={client.user.id if client.user else '0'})")
+        print(f"🌐 Guilds conectadas: {len(client.guilds)}")
+        print(f"📶 Latência: {round(client.latency * 1000, 2)} ms")
+        print("========================================")
+    except Exception as e:
+        print(f"ERRO on_ready: {e}")
 
-    async def on_disconnect(self):
+
+@client.event
+async def on_disconnect():
+    try:
         print("⚠️ Discord desconectado...")
+    except Exception:
+        pass
 
-    async def on_resumed(self):
-        print("✅ Sessão Discord retomada")
 
-    async def on_error(self, event_method, *args, **kwargs):
+@client.event
+async def on_resumed():
+    try:
+        print("✅ Sessão Discord retomada.")
+    except Exception:
+        pass
+
+
+@client.event
+async def on_error(event_method, *args, **kwargs):
+    try:
         print(f"❌ Erro no evento {event_method}")
-
-
-# =========================================================
-# INICIALIZAÇÃO DO CLIENT
-# =========================================================
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
-client = StableClient(intents=intents)
-tree = app_commands.CommandTree(client)
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -12719,78 +12808,42 @@ GLOBAL_LOCK = asyncio.Lock()
 
 # =========================================================
 # RUNNER RESILIENTE
+# IMPORTANTE:
+# - usa o client principal já existente
+# - NÃO reinstancia client
+# - mantém setup_hook funcional
 # =========================================================
 async def run_bot():
     """
-    Loop infinito que mantém o bot vivo mesmo após falhas.
+    Loop resiliente para manter o bot vivo mesmo após falhas inesperadas.
     """
     retry = 0
 
     while True:
         try:
             print("🚀 Iniciando LEME HOLANDÊS BOT...")
-
             await client.start(DISCORD_TOKEN)
 
         except Exception as e:
             retry += 1
 
             print("========================================")
-            print(f"❌ BOT CRASH DETECTADO")
+            print("❌ BOT CRASH DETECTADO")
             print(f"Erro: {e}")
             print(f"Tentativa de restart: {retry}")
             print("========================================")
 
-            await asyncio.sleep(5)
-
-        finally:
             try:
-                await client.close()
+                await asyncio.sleep(5)
             except Exception:
                 pass
 
-
-# =========================================================
-# HEALTHCHECK SERVER (OBRIGATÓRIO RENDER)
-# =========================================================
-from flask import Flask, jsonify
-import threading
-
-app = Flask(__name__)
-
-START_TIME = datetime.now(timezone.utc)
-
-@app.route("/")
-def home():
-    return jsonify({
-        "ok": True,
-        "service": "LEME HOLANDÊS BOT",
-        "status": "ready"
-    })
-
-@app.route("/ping")
-def ping():
-    return jsonify({
-        "ok": True,
-        "service": "LEME HOLANDÊS BOT",
-        "status": "alive",
-        "time": datetime.now(timezone.utc).isoformat()
-    })
-
-@app.route("/healthz")
-def healthz():
-    return jsonify({
-        "ok": True,
-        "service": "LEME HOLANDÊS BOT",
-        "status": "ready",
-        "uptime_seconds": int((datetime.now(timezone.utc) - START_TIME).total_seconds()),
-        "discord_ready": client.is_ready(),
-        "guild_count": len(client.guilds) if client.is_ready() else 0
-    })
-
-
-def run_flask():
-    app.run(host="0.0.0.0", port=10000)
+        finally:
+            try:
+                if not client.is_closed():
+                    await client.close()
+            except Exception:
+                pass
 
 
 # =========================================================
@@ -12800,8 +12853,8 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN não configurado.")
 
 
-# Inicia servidor HTTP em thread separada
-threading.Thread(target=run_flask, daemon=True).start()
+# Inicia servidor HTTP usando o app já criado no BLOCO 1
+keep_alive()
 
 
 # Loop principal resiliente
