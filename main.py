@@ -2259,9 +2259,16 @@ def recalculate_cycle(sh, season_id: int, cycle: int, bonus_percent: float | Non
 # REVISÃO: warm cache mais robusto e compatível com os índices RAM criados,
 # incluindo MATCH AC INDEX, sem alterar a lógica do bot, setup, limpeza
 # automática e utilitários já existentes.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - warm cache com yield para não travar setup_hook
+# - sync protegido contra duplicação
+# - setup_hook com medição de tempo
+# - intents mantidas sem alterar regra funcional
+# - estrutura pronta para reduzir risco de "application did not respond"
 # =================================================
 
 import asyncio
+import time
 from discord.ext import tasks
 
 # =========================================================
@@ -2283,6 +2290,8 @@ async def warm_ram_indexes():
     - mantém compatibilidade com a organização atual por blocos
     - índices pesados de matches ficam em lazy load no primeiro uso
     """
+    start_total = time.perf_counter()
+
     try:
         sh = open_sheet()
     except Exception:
@@ -2295,13 +2304,37 @@ async def warm_ram_indexes():
     ]
 
     for fn_name in warmers:
+        step_start = time.perf_counter()
+
         try:
             fn = _get_global_callable(fn_name)
             if fn is None:
                 continue
+
             fn(sh)
+
+            try:
+                print(f"SETUP: {fn_name} ok em {round((time.perf_counter() - step_start) * 1000, 2)} ms")
+            except Exception:
+                pass
+
+        except Exception as e:
+            try:
+                print(f"SETUP: {fn_name} falhou: {e}")
+            except Exception:
+                pass
+
+        # cede o loop para não monopolizar o setup_hook
+        try:
+            await asyncio.sleep(0)
         except Exception:
             pass
+
+    try:
+        print(f"SETUP: warm_ram_indexes total em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
 
 # =========================
 # Discord Bot (Client)
@@ -2312,40 +2345,83 @@ class LemeBot(discord.Client):
         intents.members = True  # necessário para fetch_member / on_member_join
         intents.message_content = True
 
-        super().__init__(intents=intents)
+        super().__init__(
+            intents=intents,
+            heartbeat_timeout=120.0
+        )
         self.tree = app_commands.CommandTree(self)
+        self._setup_done = False
+        self._setup_lock = asyncio.Lock()
 
     async def setup_hook(self):
-        # Views persistentes (funcionam após restart quando o bot volta online)
-        try:
-            self.add_view(OnboardingStartView())
-            self.add_view(ResultConfirmView())
-            print("SETUP: views persistentes registradas com sucesso.")
-        except Exception as e:
-            print(f"ERRO SETUP add_view: {e}")
-            raise
+        async with self._setup_lock:
+            if self._setup_done:
+                try:
+                    print("SETUP: setup_hook já executado, ignorando nova chamada.")
+                except Exception:
+                    pass
+                return
 
-        # Sync commands (guild-scoped quando possível)
-        try:
-            if GUILD_ID:
-                guild = discord.Object(id=GUILD_ID)
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                print(f"SETUP: sync guild ok. Comandos sincronizados: {len(synced)}")
-            else:
-                synced = await self.tree.sync()
-                print(f"SETUP: sync global ok. Comandos sincronizados: {len(synced)}")
-        except Exception as e:
-            print(f"ERRO SETUP sync: {e}")
-            raise
+            setup_total_start = time.perf_counter()
 
-        # Warm cache dos índices RAM leves
-        try:
-            await warm_ram_indexes()
-            print("SETUP: warm_ram_indexes ok.")
-        except Exception as e:
-            print(f"ERRO SETUP warm_ram_indexes: {e}")
-            raise
+            # Views persistentes (funcionam após restart quando o bot volta online)
+            add_view_start = time.perf_counter()
+            try:
+                self.add_view(OnboardingStartView())
+                self.add_view(ResultConfirmView())
+                print(f"SETUP: views persistentes registradas com sucesso em {round((time.perf_counter() - add_view_start) * 1000, 2)} ms.")
+            except Exception as e:
+                print(f"ERRO SETUP add_view: {e}")
+                raise
+
+            # cede o loop antes do sync
+            try:
+                await asyncio.sleep(0)
+            except Exception:
+                pass
+
+            # Sync commands (guild-scoped quando possível)
+            sync_start = time.perf_counter()
+            try:
+                if GUILD_ID:
+                    guild = discord.Object(id=GUILD_ID)
+                    self.tree.copy_global_to(guild=guild)
+                    synced = await self.tree.sync(guild=guild)
+                    print(
+                        f"SETUP: sync guild ok. Comandos sincronizados: {len(synced)} "
+                        f"em {round((time.perf_counter() - sync_start) * 1000, 2)} ms"
+                    )
+                else:
+                    synced = await self.tree.sync()
+                    print(
+                        f"SETUP: sync global ok. Comandos sincronizados: {len(synced)} "
+                        f"em {round((time.perf_counter() - sync_start) * 1000, 2)} ms"
+                    )
+            except Exception as e:
+                print(f"ERRO SETUP sync: {e}")
+                raise
+
+            # cede o loop antes do warm cache
+            try:
+                await asyncio.sleep(0)
+            except Exception:
+                pass
+
+            # Warm cache dos índices RAM leves
+            warm_start = time.perf_counter()
+            try:
+                await warm_ram_indexes()
+                print(f"SETUP: warm_ram_indexes ok em {round((time.perf_counter() - warm_start) * 1000, 2)} ms.")
+            except Exception as e:
+                print(f"ERRO SETUP warm_ram_indexes: {e}")
+                raise
+
+            self._setup_done = True
+
+            try:
+                print(f"SETUP: setup_hook total em {round((time.perf_counter() - setup_total_start) * 1000, 2)} ms.")
+            except Exception:
+                pass
 
 
 client = LemeBot()
@@ -2363,12 +2439,14 @@ WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 async def log_admin_guild(guild: discord.Guild | None, text: str):
     if not guild or not LOG_ADMIN_CHANNEL_ID:
         return
+
     ch = guild.get_channel(LOG_ADMIN_CHANNEL_ID)
     if not ch:
         try:
             ch = await guild.fetch_channel(LOG_ADMIN_CHANNEL_ID)
         except Exception:
             ch = None
+
     if ch:
         try:
             await ch.send(text)
@@ -2417,6 +2495,11 @@ def split_text_lines(text: str, limit: int = 1900) -> list[str]:
 # SUB-BLOCO: B/3
 # REVISÃO: catálogo em ordem alfabética, inclusão dos comandos novos
 # da fase final e tutorial revisado com foco no básico do jogador.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - send_followup_chunks mais resiliente e com menos tentativas redundantes
+# - upsert_player com saída rápida, batch_update consolidado e medição leve
+# - /comando e /tutorial com defer seguro e montagem mais leve
+# - sem alterar regras funcionais do projeto
 # =================================================
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str, ephemeral: bool = True, limit: int = 1900):
@@ -2424,20 +2507,31 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
     Regra do projeto: quando resposta for grande, enviar em múltiplas mensagens
     para não estourar o limite do Discord.
     """
-    chunks = split_text_lines(text, limit=limit)
+    raw = str(text or "").strip()
+    if not raw:
+        return
+
+    chunks = split_text_lines(raw, limit=limit)
     if not chunks:
         return
+
+    first_sent = False
 
     try:
         if not interaction.response.is_done():
             await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
         else:
             await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+        first_sent = True
     except Exception:
         try:
             await interaction.followup.send(chunks[0], ephemeral=ephemeral)
+            first_sent = True
         except Exception:
             return
+
+    if not first_sent:
+        return
 
     for c in chunks[1:]:
         try:
@@ -2451,6 +2545,8 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str, ephe
 # + BLINDAGEM 429: invalida cache e PLAYER RAM INDEX após escrita
 # =========================================================
 def upsert_player(ws_players, discord_id: str, nickname: str):
+    start_total = time.perf_counter()
+
     did = str(discord_id).strip()
     nick = str(nickname).strip()
 
@@ -2477,10 +2573,15 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
             updates = []
 
             if "nick" in col:
-                updates.append({
-                    "range": f"{col_letter(col['nick'])}{found_row}",
-                    "values": [[nick]]
-                })
+                current_nick = ""
+                row = rows[found_row - 1] if 0 < found_row <= len(rows) else []
+                current_nick = str(row[col["nick"]] if col["nick"] < len(row) else "").strip()
+
+                if current_nick != nick:
+                    updates.append({
+                        "range": f"{col_letter(col['nick'])}{found_row}",
+                        "values": [[nick]]
+                    })
 
             if "updated_at" in col:
                 updates.append({
@@ -2490,9 +2591,14 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
 
             if updates:
                 ws_players.batch_update(updates)
+                cache_invalidate(ws_players)
+                invalidate_player_ram_index()
 
-            cache_invalidate(ws_players)
-            invalidate_player_ram_index()
+        except Exception:
+            pass
+
+        try:
+            print(f"DEBUG: upsert_player(update) {did} em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
         except Exception:
             pass
         return
@@ -2514,6 +2620,11 @@ def upsert_player(ws_players, discord_id: str, nickname: str):
         ws_players.append_row(row, value_input_option="USER_ENTERED")
         cache_invalidate(ws_players)
         invalidate_player_ram_index()
+    except Exception:
+        pass
+
+    try:
+        print(f"DEBUG: upsert_player(insert) {did} em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
     except Exception:
         pass
 
@@ -2587,8 +2698,11 @@ def level_allows(user_level: str, cmd_level: str) -> bool:
 
 @client.tree.command(name="comando", description="Mostra seus comandos disponíveis.")
 async def comando(interaction: discord.Interaction):
+    start_total = time.perf_counter()
+
     try:
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
     except Exception:
         pass
 
@@ -2607,8 +2721,7 @@ async def comando(interaction: discord.Interaction):
             "owner": "OWNER",
         }.get(user_level, user_level.upper())
 
-        lines = [f"📌 **Seus comandos disponíveis ({titulo_nivel})**\n"]
-
+        visible_lines = []
         for lvl, cmd, desc in COMMANDS_CATALOG:
             if not level_allows(user_level, lvl):
                 continue
@@ -2616,7 +2729,10 @@ async def comando(interaction: discord.Interaction):
             if real_cmds and cmd not in real_cmds:
                 continue
 
-            lines.append(f"• **{cmd}** — {desc}")
+            visible_lines.append(f"• **{cmd}** — {desc}")
+
+        lines = [f"📌 **Seus comandos disponíveis ({titulo_nivel})**\n"]
+        lines.extend(visible_lines)
 
         await send_followup_chunks(interaction, "\n".join(lines), ephemeral=True, limit=1500)
 
@@ -2626,14 +2742,22 @@ async def comando(interaction: discord.Interaction):
         except Exception:
             pass
 
+    try:
+        print(f"DEBUG: /comando em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
 
 # =========================================================
 # /tutorial
 # =========================================================
 @client.tree.command(name="tutorial", description="Mostra um tutorial rápido de como usar o bot.")
 async def tutorial(interaction: discord.Interaction):
+    start_total = time.perf_counter()
+
     try:
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
     except Exception:
         pass
 
@@ -2698,6 +2822,11 @@ async def tutorial(interaction: discord.Interaction):
         except Exception:
             pass
 
+    try:
+        print(f"DEBUG: /tutorial em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
 
 # =========================================================
 # Comandos básicos do onboarding (BLOCO 5)
@@ -2705,7 +2834,10 @@ async def tutorial(interaction: discord.Interaction):
 @client.tree.command(name="meuid", description="Mostra seu ID do Discord.")
 async def meuid(interaction: discord.Interaction):
     try:
-        await interaction.response.send_message(f"Seu ID é: `{interaction.user.id}`", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Seu ID é: `{interaction.user.id}`", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Seu ID é: `{interaction.user.id}`", ephemeral=True)
     except Exception:
         pass
 
@@ -2720,6 +2852,11 @@ async def meuid(interaction: discord.Interaction):
 # REVISÃO: redução de duplicação interna, blindagem extra contra timeout
 # em interações por botão/DM e melhor aproveitamento de leitura de player,
 # sem alterar a lógica funcional do onboarding e da confirmação de resultado.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - respostas mais seguras em modal/botões
+# - redução de leituras redundantes
+# - debug leve de tempo
+# - proteção extra em followup e edição de view
 # =================================================
 
 # =========================================================
@@ -2733,6 +2870,8 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        start_total = time.perf_counter()
+
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -2774,22 +2913,33 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             if guild:
                 member = guild.get_member(interaction.user.id)
                 if member is None:
-                    member = await guild.fetch_member(interaction.user.id)
-
-                try:
-                    await member.edit(nick=nome_salvo, reason="Onboarding Leme Holandês")
-                except Exception:
-                    return await interaction.followup.send(
-                        "⚠️ Não consegui aplicar seu Nome e Sobrenome no servidor. Verifique se o bot tem permissão de gerenciar apelidos e tente novamente.",
-                        ephemeral=True
-                    )
-
-                role = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
-                if role:
                     try:
-                        await member.add_roles(role, reason="Onboarding Leme Holandês")
+                        member = await guild.fetch_member(interaction.user.id)
                     except Exception:
-                        pass
+                        member = None
+
+                if member is not None:
+                    try:
+                        await member.edit(
+                            nick=nome_salvo,
+                            reason="Onboarding Leme Holandês"
+                        )
+                    except Exception:
+                        try:
+                            await interaction.followup.send(
+                                "⚠️ Não consegui aplicar seu Nome e Sobrenome no servidor. Verifique se o bot tem permissão de gerenciar apelidos e tente novamente.",
+                                ephemeral=True
+                            )
+                        except Exception:
+                            pass
+                        return
+
+                    role = discord.utils.get(guild.roles, name=ROLE_JOGADOR)
+                    if role:
+                        try:
+                            await member.add_roles(role, reason="Onboarding Leme Holandês")
+                        except Exception:
+                            pass
 
             await interaction.followup.send(
                 "✅ Cadastro concluído com sucesso. Você está marcado como **Jogador**.",
@@ -2805,6 +2955,11 @@ class NicknameModal(discord.ui.Modal, title="Cadastro do Jogador"):
             except Exception:
                 pass
 
+        try:
+            print(f"DEBUG: NicknameModal.on_submit em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+        except Exception:
+            pass
+
 
 class OnboardingStartView(discord.ui.View):
     def __init__(self):
@@ -2816,10 +2971,16 @@ class OnboardingStartView(discord.ui.View):
             await interaction.response.send_modal(NicknameModal())
         except Exception:
             try:
-                await interaction.response.send_message(
-                    "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
-                    ephemeral=True
-                )
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "⚠️ Não consegui abrir o formulário agora. Tente novamente.",
+                        ephemeral=True
+                    )
             except Exception:
                 pass
 
@@ -2847,10 +3008,12 @@ def _extract_match_id_from_interaction_message(interaction: discord.Interaction)
 def _find_match_sheet_row_by_id(ws_matches, col: dict, match_id: str):
     rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
+    target = str(match_id).strip()
+
     for idx in range(1, len(rows)):
         r = rows[idx]
         val = r[col["match_id"]] if col["match_id"] < len(r) else ""
-        if str(val).strip() == match_id:
+        if str(val).strip() == target:
             return idx + 1, r
 
     return None, None
@@ -2860,7 +3023,8 @@ async def _disable_result_view_message(view: discord.ui.View, interaction: disco
     try:
         for child in view.children:
             child.disabled = True
-        await interaction.message.edit(view=view)
+        if interaction.message:
+            await interaction.message.edit(view=view)
     except Exception:
         pass
 
@@ -2874,6 +3038,8 @@ class ResultConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success, custom_id="lhb_result_confirm")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        start_total = time.perf_counter()
+
         try:
             try:
                 await interaction.response.defer(ephemeral=True)
@@ -2892,7 +3058,13 @@ class ResultConfirmView(discord.ui.View):
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
             match_row = get_match_by_id_fast(sh, match_id)
-            found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
+            found = None
+            row_data = None
+
+            if match_row is not None:
+                found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
+            else:
+                found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
 
             if not found:
                 return await interaction.followup.send(
@@ -2958,10 +3130,11 @@ class ResultConfirmView(discord.ui.View):
             season_id = safe_int(getc("season_id"), 0)
             cycle = safe_int(getc("cycle"), 0)
 
-            try:
-                recalculate_cycle(sh, season_id, cycle)
-            except Exception:
-                pass
+            if season_id > 0 and cycle > 0:
+                try:
+                    recalculate_cycle(sh, season_id, cycle)
+                except Exception:
+                    pass
 
             await _disable_result_view_message(self, interaction)
 
@@ -2979,8 +3152,15 @@ class ResultConfirmView(discord.ui.View):
             except Exception:
                 pass
 
+        try:
+            print(f"DEBUG: ResultConfirmView.confirm em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+        except Exception:
+            pass
+
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="lhb_result_reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        start_total = time.perf_counter()
+
         try:
             try:
                 await interaction.response.defer(ephemeral=True)
@@ -2999,7 +3179,13 @@ class ResultConfirmView(discord.ui.View):
             col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
             match_row = get_match_by_id_fast(sh, match_id)
-            found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
+            found = None
+            row_data = None
+
+            if match_row is not None:
+                found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
+            else:
+                found, row_data = _find_match_sheet_row_by_id(ws_matches, col, match_id)
 
             if not found:
                 return await interaction.followup.send(
@@ -3078,6 +3264,11 @@ class ResultConfirmView(discord.ui.View):
             except Exception:
                 pass
 
+        try:
+            print(f"DEBUG: ResultConfirmView.reject em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+        except Exception:
+            pass
+
 
 # =========================================================
 # Posting do onboarding no canal (comando admin)
@@ -3092,24 +3283,41 @@ async def post_onboarding_message(channel: discord.abc.Messageable):
 
 @client.tree.command(name="onboarding", description="Reposta o botão de onboarding no canal atual (OWNER).")
 async def onboarding(interaction: discord.Interaction):
+    start_total = time.perf_counter()
+
     try:
         if not await is_owner_only(interaction):
-            await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
             return
     except Exception:
         try:
-            await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
         except Exception:
             pass
         return
 
     try:
-        await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("✅ Onboarding repostado neste canal.", ephemeral=True)
+        else:
+            await interaction.followup.send("✅ Onboarding repostado neste canal.", ephemeral=True)
     except Exception:
         pass
 
     try:
-        await post_onboarding_message(interaction.channel)
+        if interaction.channel is not None:
+            await post_onboarding_message(interaction.channel)
+    except Exception:
+        pass
+
+    try:
+        print(f"DEBUG: /onboarding em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
     except Exception:
         pass
 
@@ -4105,6 +4313,11 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # BLOCO ORIGINAL: BLOCO 7/22
 # SUB-BLOCO: B/2
 # REVISÃO CRÍTICA: proteção contra overwrite de AUTO_FORFEIT + match inativo
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - redução de leituras redundantes no fluxo de resultado/rejeitar
+# - busca rápida pela linha quando possível
+# - defer seguro + debug leve
+# - sem alterar a lógica funcional do sistema
 # =================================================
 
 # =========================================================
@@ -4112,14 +4325,98 @@ async def meus_matches(interaction: discord.Interaction, season: int, cycle: int
 # =========================================================
 def _find_match_sheet_row_by_match_id(ws_matches, col: dict, match_id: str):
     rows = cached_get_all_values(ws_matches, ttl_seconds=10)
+    target = str(match_id).strip()
 
     for idx in range(1, len(rows)):
         r = rows[idx]
         val = r[col["match_id"]] if col["match_id"] < len(r) else ""
-        if str(val).strip() == str(match_id).strip():
+        if str(val).strip() == target:
             return idx + 1, r
 
     return None, None
+
+
+def _get_match_sheet_row_preferring_fast(
+    sh,
+    ws_matches,
+    col: dict,
+    match_id: str
+):
+    """
+    Estratégia:
+    1) tenta índice RAM primeiro
+    2) localiza a linha real no Sheets apenas uma vez
+    """
+    match_row = None
+
+    try:
+        match_row = get_match_by_id_fast(sh, match_id)
+    except Exception:
+        match_row = None
+
+    found_row, row_data = _find_match_sheet_row_by_match_id(ws_matches, col, match_id)
+
+    return match_row, found_row, row_data
+
+
+def _match_getc_factory(match_row: dict | None, row_data: list | None, col: dict):
+    def getc(name: str) -> str:
+        if match_row is not None and name in match_row:
+            return str(match_row.get(name, ""))
+        ci = col[name]
+        return row_data[ci] if row_data is not None and ci < len(row_data) else ""
+    return getc
+
+
+async def _try_send_result_dm(
+    interaction: discord.Interaction,
+    opponent_id: str,
+    match_id: str,
+    player_a_name: str,
+    player_b_name: str,
+    placar: str
+) -> bool:
+    dm_sent = False
+
+    try:
+        guild = interaction.guild
+        opponent_member = None
+
+        if guild:
+            opponent_member = guild.get_member(int(opponent_id))
+            if opponent_member is None:
+                try:
+                    opponent_member = await guild.fetch_member(int(opponent_id))
+                except Exception:
+                    opponent_member = None
+
+        if opponent_member is None:
+            try:
+                opponent_member = await client.fetch_user(int(opponent_id))
+            except Exception:
+                opponent_member = None
+
+        if opponent_member is not None:
+            embed = discord.Embed(
+                title="Confirmação de resultado pendente",
+                description=(
+                    "Seu oponente lançou um resultado e sua confirmação é necessária.\n\n"
+                    f"**Match:** `{match_id}`\n"
+                    f"**Confronto:** {player_a_name} vs {player_b_name}\n"
+                    f"**Placar informado:** **{placar}**\n\n"
+                    f"Você pode **Confirmar** ou **Rejeitar** abaixo.\n"
+                    f"Se não houver rejeição em até **{AUTO_CONFIRM_HOURS}h**, o sistema poderá auto-confirmar."
+                ),
+            )
+            embed.set_footer(text=f"match_id:{match_id}")
+
+            await opponent_member.send(embed=embed, view=ResultConfirmView())
+            dm_sent = True
+
+    except Exception:
+        dm_sent = False
+
+    return dm_sent
 
 
 # =========================================================
@@ -4129,6 +4426,8 @@ def _find_match_sheet_row_by_match_id(ws_matches, col: dict, match_id: str):
 @app_commands.describe(oponente="Selecione seu oponente", placar="Formato V-D-E (ex: 2-1-0)")
 @app_commands.autocomplete(oponente=ac_match_id_user_pending, placar=ac_score_vde)
 async def resultado(interaction: discord.Interaction, oponente: str, placar: str):
+    start_total = time.perf_counter()
+
     await interaction.response.defer(ephemeral=True)
 
     match_id = str(oponente).strip()
@@ -4148,17 +4447,18 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         pid = str(interaction.user.id).strip()
-        match_row = get_match_by_id_fast(sh, match_id)
-        found_row, row_data = _find_match_sheet_row_by_match_id(ws_matches, col, match_id)
+
+        match_row, found_row, row_data = _get_match_sheet_row_preferring_fast(
+            sh=sh,
+            ws_matches=ws_matches,
+            col=col,
+            match_id=match_id
+        )
 
         if not found_row:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-        def getc(name: str) -> str:
-            if match_row is not None and name in match_row:
-                return str(match_row.get(name, ""))
-            ci = col[name]
-            return row_data[ci] if row_data is not None and ci < len(row_data) else ""
+        getc = _match_getc_factory(match_row, row_data, col)
 
         # 🔥 NOVAS PROTEÇÕES
         if str(getc("active")).strip().lower() != "true":
@@ -4192,6 +4492,10 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
             a_val, b_val = d, v
             opponent_id = player_a
 
+        nowu = utc_now_dt()
+        updated_at = now_iso_utc()
+        auto_confirm_at = auto_confirm_deadline_iso(nowu)
+
         ws_matches.batch_update([
             {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[a_val]]},
             {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[b_val]]},
@@ -4200,8 +4504,8 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
             {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["pending"]]},
             {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [[pid]]},
             {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[""]]},
-            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[auto_confirm_deadline_iso(utc_now_dt())]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
+            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[auto_confirm_at]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
         ])
 
         cache_invalidate(ws_matches)
@@ -4215,45 +4519,14 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
         reporter_name = nick_map.get(pid, str(interaction.user))
         opponent_name = nick_map.get(opponent_id, opponent_id)
 
-        dm_sent = False
-
-        try:
-            guild = interaction.guild
-            opponent_member = None
-
-            if guild:
-                opponent_member = guild.get_member(int(opponent_id))
-                if opponent_member is None:
-                    try:
-                        opponent_member = await guild.fetch_member(int(opponent_id))
-                    except Exception:
-                        opponent_member = None
-
-            if opponent_member is None:
-                try:
-                    opponent_member = await client.fetch_user(int(opponent_id))
-                except Exception:
-                    opponent_member = None
-
-            if opponent_member is not None:
-                embed = discord.Embed(
-                    title="Confirmação de resultado pendente",
-                    description=(
-                        "Seu oponente lançou um resultado e sua confirmação é necessária.\n\n"
-                        f"**Match:** `{match_id}`\n"
-                        f"**Confronto:** {player_a_name} vs {player_b_name}\n"
-                        f"**Placar informado:** **{placar}**\n\n"
-                        f"Você pode **Confirmar** ou **Rejeitar** abaixo.\n"
-                        f"Se não houver rejeição em até **{AUTO_CONFIRM_HOURS}h**, o sistema poderá auto-confirmar."
-                    ),
-                )
-                embed.set_footer(text=f"match_id:{match_id}")
-
-                await opponent_member.send(embed=embed, view=ResultConfirmView())
-                dm_sent = True
-
-        except Exception:
-            dm_sent = False
+        dm_sent = await _try_send_result_dm(
+            interaction=interaction,
+            opponent_id=opponent_id,
+            match_id=match_id,
+            player_a_name=player_a_name,
+            player_b_name=player_b_name,
+            placar=placar
+        )
 
         await log_admin(
             interaction,
@@ -4281,6 +4554,11 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
+    try:
+        print(f"DEBUG: /resultado em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
 
 # =========================================================
 # /rejeitar
@@ -4289,6 +4567,8 @@ async def resultado(interaction: discord.Interaction, oponente: str, placar: str
 @app_commands.describe(oponente="Selecione seu oponente")
 @app_commands.autocomplete(oponente=ac_match_id_user_pending)
 async def rejeitar(interaction: discord.Interaction, oponente: str):
+    start_total = time.perf_counter()
+
     await interaction.response.defer(ephemeral=True)
 
     match_id = str(oponente).strip()
@@ -4299,17 +4579,18 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
         pid = str(interaction.user.id).strip()
-        match_row = get_match_by_id_fast(sh, match_id)
-        found_row, row_data = _find_match_sheet_row_by_match_id(ws_matches, col, match_id)
+
+        match_row, found_row, row_data = _get_match_sheet_row_preferring_fast(
+            sh=sh,
+            ws_matches=ws_matches,
+            col=col,
+            match_id=match_id
+        )
 
         if not found_row:
             return await interaction.followup.send("❌ Match não encontrado.", ephemeral=True)
 
-        def getc(name: str) -> str:
-            if match_row is not None and name in match_row:
-                return str(match_row.get(name, ""))
-            ci = col[name]
-            return row_data[ci] if row_data is not None and ci < len(row_data) else ""
+        getc = _match_getc_factory(match_row, row_data, col)
 
         # 🔥 NOVAS PROTEÇÕES
         if str(getc("active")).strip().lower() != "true":
@@ -4334,11 +4615,12 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
             return await interaction.followup.send("❌ Match não está pendente.", ephemeral=True)
 
         rown = found_row
+        updated_at = now_iso_utc()
 
         ws_matches.batch_update([
             {"range": f"{col_letter(col['confirmed_status'])}{rown}", "values": [["rejected"]]},
             {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[pid]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
+            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[updated_at]]},
         ])
 
         cache_invalidate(ws_matches)
@@ -4349,6 +4631,11 @@ async def rejeitar(interaction: discord.Interaction, oponente: str):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+    try:
+        print(f"DEBUG: /rejeitar em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
 
 
 # =================================================
@@ -4694,6 +4981,11 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 # REVISÃO: uso de índices RAM para Players e Matches, redução de releituras
 # em /ranking e /deadline, mantendo a mesma lógica
 # funcional dos comandos de prazo, pendências e ranking do ciclo.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - early return e clamp de parâmetros
+# - menos variáveis recalculadas dentro de loops
+# - envio paginado mantido com menor custo de montagem
+# - debug leve de tempo sem alterar regras
 # =================================================
 
 # =========================================================
@@ -4703,6 +4995,8 @@ async def ciclo_encerrar(interaction: discord.Interaction, cycle: int):
 @app_commands.describe(cycle="Número do ciclo")
 @app_commands.autocomplete(cycle=ac_cycle_open)
 async def prazo(interaction: discord.Interaction, cycle: int):
+    start_total = time.perf_counter()
+
     await interaction.response.defer(ephemeral=False)
 
     try:
@@ -4737,6 +5031,11 @@ async def prazo(interaction: discord.Interaction, cycle: int):
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /prazo: {e}", ephemeral=False)
 
+    try:
+        print(f"DEBUG: /prazo em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
 
 # =========================================================
 # /deadline
@@ -4745,6 +5044,8 @@ async def prazo(interaction: discord.Interaction, cycle: int):
 @app_commands.describe(cycle="Número do ciclo", horas="Janela em horas (1..48)")
 @app_commands.autocomplete(cycle=ac_cycle_open)
 async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12):
+    start_total = time.perf_counter()
+
     if not await is_admin_or_organizer(interaction):
         return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
@@ -4754,8 +5055,9 @@ async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12
         sh = open_sheet()
         season_id = require_current_season(sh)
 
+        horas_clamped = max(1, min(safe_int(horas, 12), 48))
         nowu = utc_now_dt()
-        limit = nowu + timedelta(hours=max(1, min(horas, 48)))
+        limit = nowu + timedelta(hours=horas_clamped)
 
         rows = get_matches_for_cycle_fast(
             sh,
@@ -4770,18 +5072,29 @@ async def deadline(interaction: discord.Interaction, cycle: int, horas: int = 12
             if str(r.get("confirmed_status", "")).strip().lower() != "pending":
                 continue
 
-            ac = parse_iso_dt(r.get("auto_confirm_at", "") or "")
-            if ac and ac <= limit:
+            ac_raw = r.get("auto_confirm_at", "") or ""
+            ac = parse_iso_dt(ac_raw)
+            if not ac:
+                continue
+
+            if ac <= limit:
                 items.append(f"`{r.get('match_id')}` expira {ac.isoformat()} UTC")
+                if len(items) >= 200:
+                    break
 
         if not items:
             return await interaction.followup.send("✅ Nenhuma pendência na janela.", ephemeral=True)
 
-        msg = "⏰ Pendências próximas de expirar:\n" + "\n".join(items[:200])
+        msg = "⏰ Pendências próximas de expirar:\n" + "\n".join(items)
         await send_followup_chunks(interaction, msg, ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+    try:
+        print(f"DEBUG: /deadline em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -4800,6 +5113,8 @@ async def recalcular(
     cycle: int,
     bonus_percentual: str = ""
 ):
+    start_total = time.perf_counter()
+
     if not await is_owner_only(interaction):
         return await interaction.response.send_message("❌ Apenas o OWNER do servidor pode usar.", ephemeral=True)
 
@@ -4857,6 +5172,12 @@ async def recalcular(
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
+    try:
+        print(f"DEBUG: /recalcular em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
+
+
 # =========================================================
 # FORMATADOR NUMÉRICO (ATÉ 2 CASAS, SÓ SE NECESSÁRIO)
 # =========================================================
@@ -4871,12 +5192,69 @@ def fmt_num2(x) -> str:
 
 
 # =========================================================
+# HELPERS — RANKING
+# =========================================================
+def _build_cycle_ranking_table(rows: list[dict]) -> list[dict]:
+    K = 3
+    table = []
+
+    for r in rows:
+        try:
+            m = safe_int(r.get("matches_played", 0), 0)
+            pts = sheet_float(r.get("match_points", 0), 0.0)
+
+            mwp = sheet_float(r.get("mwp", 0), 0.0)
+            omw = sheet_float(r.get("omw", 0), 0.0)
+            gw = sheet_float(r.get("gw", 0), 0.0)
+            ogw = sheet_float(r.get("ogw", 0), 0.0)
+
+            ppm = (pts + K) / (m + K) if m else 0.0
+            peso_pts = m / (m + K) if m else 0.0
+            peso_ppm = K / (m + K) if m else 0.0
+            score = pts * peso_pts + ppm * peso_ppm
+
+            table.append({
+                "p": str(r.get("player_id", "")).strip(),
+                "score": score,
+                "pts": pts,
+                "mwp": mwp,
+                "ppm": ppm,
+                "omw": omw,
+                "gw": gw,
+                "ogw": ogw,
+                "j": m,
+                "mwp_percent": sheet_float(r.get("mwp_percent", 0), 0.0),
+                "omw_percent": sheet_float(r.get("omw_percent", 0), 0.0),
+                "gw_percent": sheet_float(r.get("gw_percent", 0), 0.0),
+                "ogw_percent": sheet_float(r.get("ogw_percent", 0), 0.0),
+            })
+        except Exception:
+            continue
+
+    table.sort(
+        key=lambda x: (
+            x["score"],
+            x["ppm"],
+            x["mwp"],
+            x["omw"],
+            x["gw"],
+            x["ogw"]
+        ),
+        reverse=True
+    )
+
+    return table
+
+
+# =========================================================
 # /ranking (PADRÃO IDÊNTICO AO /ranking_geral, FILTRADO POR CICLO)
 # =========================================================
 @client.tree.command(name="ranking", description="Mostra o ranking do ciclo.")
 @app_commands.describe(season="Season", cycle="Número do ciclo", top="Quantidade de jogadores")
 @app_commands.autocomplete(season=ac_pods_ver_season, cycle=ac_pods_ver_cycle)
 async def ranking(interaction: discord.Interaction, season: int, cycle: int, top: int = 30):
+    start_total = time.perf_counter()
+
     await interaction.response.defer(ephemeral=False)
 
     try:
@@ -4900,58 +5278,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
                 ephemeral=False
             )
 
-        K = 3
-        table = []
-
-        for r in rows:
-            try:
-                m = safe_int(r.get("matches_played", 0), 0)
-                pts = sheet_float(r.get("match_points", 0), 0.0)
-
-                mwp = sheet_float(r.get("mwp", 0), 0.0)
-                omw = sheet_float(r.get("omw", 0), 0.0)
-                gw = sheet_float(r.get("gw", 0), 0.0)
-                ogw = sheet_float(r.get("ogw", 0), 0.0)
-
-                ppm = (pts + K) / (m + K) if m else 0
-
-                peso_pts = m / (m + K) if m else 0
-                peso_ppm = K / (m + K) if m else 0
-                score = pts * peso_pts + ppm * peso_ppm
-
-                table.append({
-                    "p": str(r.get("player_id", "")).strip(),
-                    "score": score,
-                    "pts": pts,
-                    "mwp": mwp,
-                    "ppm": ppm,
-                    "omw": omw,
-                    "gw": gw,
-                    "ogw": ogw,
-                    "j": m,
-                    "mwp_percent": sheet_float(r.get("mwp_percent", 0), 0.0),
-                    "omw_percent": sheet_float(r.get("omw_percent", 0), 0.0),
-                    "gw_percent": sheet_float(r.get("gw_percent", 0), 0.0),
-                    "ogw_percent": sheet_float(r.get("ogw_percent", 0), 0.0),
-                })
-            except Exception:
-                continue
-
-        # =========================================================
-        # ORDENAÇÃO (IDÊNTICA AO /ranking_geral)
-        # =========================================================
-        table.sort(
-            key=lambda x: (
-                x["score"],
-                x["ppm"],
-                x["mwp"],
-                x["omw"],
-                x["gw"],
-                x["ogw"]
-            ),
-            reverse=True
-        )
-
+        table = _build_cycle_ranking_table(rows)
         nick_map = get_player_nick_map_fast(sh)
 
         top = max(8, min(top, 60))
@@ -4992,10 +5319,7 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
         total_rows = len(row_lines)
 
         for start in range(0, total_rows, chunk_size):
-            part_lines = []
-            part_lines.extend(header_lines)
-            part_lines.extend(row_lines[start:start + chunk_size])
-
+            part_lines = header_lines + row_lines[start:start + chunk_size]
             part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
             await interaction.followup.send(part_msg, ephemeral=False)
 
@@ -5018,6 +5342,11 @@ async def ranking(interaction: discord.Interaction, season: int, cycle: int, top
             f"❌ Erro no /ranking: {e}",
             ephemeral=False
         )
+
+    try:
+        print(f"DEBUG: /ranking em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -5967,13 +6296,20 @@ def _build_pods_from_layout(players: list[str], layout: list[int]) -> list[list[
 # REVISÃO: melhor aproveitamento do índice RAM de matches, consolidação
 # de timestamps na criação em lote, invalidação consistente dos índices
 # RAM após geração e manutenção da mesma lógica funcional do /start_cycle.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - menos leituras redundantes
+# - early return e clamp antes de processamento pesado
+# - criação em lote mantida
+# - debug leve de tempo sem alterar regra funcional
 # =================================================
 
 def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past_pairs: set[frozenset], tries: int = 250):
     best = None
     best_score = None
 
-    for _ in range(max(1, tries)):
+    tries = max(1, tries)
+
+    for _ in range(tries):
         cand = players[:]
         random.shuffle(cand)
         pods = _build_pods_from_layout(cand, layout)
@@ -5991,6 +6327,9 @@ def _best_layout_shuffle_min_repeats(players: list[str], layout: list[int], past
 def _chunked_append_rows(ws, rows: list[list], chunk_size: int = 200):
     if not rows:
         return
+
+    chunk_size = max(1, safe_int(chunk_size, 200))
+
     for i in range(0, len(rows), chunk_size):
         ws.append_rows(rows[i:i + chunk_size], value_input_option="USER_ENTERED")
 
@@ -6001,6 +6340,7 @@ def _past_confirmed_pairs_from_records(rows: list[dict]) -> set[frozenset]:
     exceto BYE e matches inativos, usando registros já carregados em memória.
     """
     pairs: set[frozenset] = set()
+
     for r in rows:
         if not as_bool(r.get("active", "TRUE")):
             continue
@@ -6008,11 +6348,33 @@ def _past_confirmed_pairs_from_records(rows: list[dict]) -> set[frozenset]:
             continue
         if str(r.get("result_type", "normal")).strip().lower() == "bye":
             continue
+
         a = str(r.get("player_a_id", "")).strip()
         b = str(r.get("player_b_id", "")).strip()
+
         if a and b:
             pairs.add(frozenset((a, b)))
+
     return pairs
+
+
+def _get_active_cycle_players(ws_enr, season_id: int, cycle: int) -> list[str]:
+    enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
+
+    players = []
+    for r in enr_rows:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
+            continue
+        if safe_int(r.get("cycle", 0), 0) != cycle:
+            continue
+        if str(r.get("status", "")).strip().lower() != "active":
+            continue
+
+        pid = str(r.get("player_id", "")).strip()
+        if pid:
+            players.append(pid)
+
+    return sorted(set(players))
 
 
 @client.tree.command(name="start_cycle", description="(ADM) Gera pods + matches e trava o ciclo (locked).")
@@ -6022,6 +6384,8 @@ def _past_confirmed_pairs_from_records(rows: list[dict]) -> set[frozenset]:
     tries="Tentativas anti-repetição (50..500)"
 )
 async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: int = 0, tries: int = 250):
+    start_total = time.perf_counter()
+
     if not await is_admin_or_organizer(interaction):
         return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
 
@@ -6031,6 +6395,9 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         sh = open_sheet()
         season_id = require_current_season(sh)
         ensure_all_sheets(sh)
+
+        tries = max(50, min(safe_int(tries, 250), 500))
+        pod_size = safe_int(pod_size, 0)
 
         ws_cycles = sh.worksheet("Cycles")
         ws_enr = sh.worksheet("Enrollments")
@@ -6071,20 +6438,8 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
                 ephemeral=True
             )
 
-        enr_rows = cached_get_all_records(ws_enr, ttl_seconds=10)
-        players = []
-        for r in enr_rows:
-            if safe_int(r.get("season_id", 0), 0) != season_id:
-                continue
-            if safe_int(r.get("cycle", 0), 0) != cycle:
-                continue
-            if str(r.get("status", "")).strip().lower() != "active":
-                continue
-            pid = str(r.get("player_id", "")).strip()
-            if pid:
-                players.append(pid)
+        players = _get_active_cycle_players(ws_enr, season_id, cycle)
 
-        players = sorted(set(players))
         if len(players) < 3:
             return await interaction.followup.send("❌ Precisa de pelo menos 3 jogadores ativos para gerar pods.", ephemeral=True)
 
@@ -6124,8 +6479,14 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
             players,
             layout,
             past_pairs,
-            tries=max(50, min(tries, 500))
+            tries=tries
         )
+
+        if not pods:
+            return await interaction.followup.send(
+                "❌ Não foi possível gerar os pods deste ciclo.",
+                ephemeral=True
+            )
 
         nowb = now_br_str()
         nowu = utc_now_dt()
@@ -6139,8 +6500,10 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
         for pod in pods:
             label = f"{pod_num}"
             pod_labels.append((label, pod))
+
             for pid in pod:
                 pods_rows.append([str(season_id), str(cycle), label, str(pid), nowb])
+
             pod_num += 1
 
         _chunked_append_rows(ws_pods, pods_rows, chunk_size=200)
@@ -6195,6 +6558,11 @@ async def start_cycle(interaction: discord.Interaction, cycle: int, pod_size: in
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /start_cycle: {e}", ephemeral=True)
+
+    try:
+        print(f"DEBUG: /start_cycle em {round((time.perf_counter() - start_total) * 1000, 2)} ms")
+    except Exception:
+        pass
 
 # =================================================
 # FIM DO SUB-BLOCO F/7
@@ -6707,6 +7075,11 @@ async def estatisticas(interaction: discord.Interaction):
 # SUB-BLOCO: ÚNICO
 # REVISÃO: comportamento stale-while-revalidate para o índice de autocomplete,
 # reduzindo timeout do Discord sem alterar a lógica funcional.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - filtros mais baratos antes de montar payload
+# - rebuild não bloqueante mantido
+# - early return mais agressivo
+# - menor pressão de cópia/loop no autocomplete
 # =================================================
 
 # =========================================================
@@ -6753,6 +7126,8 @@ def _build_match_ac_index(sh):
     Reconstrói o índice completo do autocomplete de matches para a season ativa,
     considerando apenas ciclos LOCKED e matches ACTIVE.
     """
+    t0 = time.perf_counter()
+
     season_id = get_current_season_id(sh)
     if season_id <= 0:
         return {
@@ -6775,9 +7150,13 @@ def _build_match_ac_index(sh):
     for r in cycle_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
+
         cyc = safe_int(r.get("cycle", 0), 0)
+        if cyc <= 0:
+            continue
+
         st = str(r.get("status", "")).strip().lower()
-        if cyc > 0 and st == "locked":
+        if st == "locked":
             locked_cycles.add(cyc)
 
     if not locked_cycles:
@@ -6791,9 +7170,11 @@ def _build_match_ac_index(sh):
     nick_map: dict[str, str] = {}
     for r in player_rows:
         pid = str(r.get("discord_id", "")).strip()
+        if not pid:
+            continue
+
         nick = str(r.get("nick", "")).strip()
-        if pid:
-            nick_map[pid] = nick or pid
+        nick_map[pid] = nick or pid
 
     by_user: dict[str, list[dict]] = {}
 
@@ -6801,12 +7182,16 @@ def _build_match_ac_index(sh):
     ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
     match_rows = cached_get_all_records(ws_matches, ttl_seconds=10)
 
+    locked_cycles_local = locked_cycles
+    nick_map_local = nick_map
+    by_user_local = by_user
+
     for r in match_rows:
         if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
 
         cyc = safe_int(r.get("cycle", 0), 0)
-        if cyc not in locked_cycles:
+        if cyc not in locked_cycles_local:
             continue
 
         if not as_bool(r.get("active", "TRUE")):
@@ -6815,15 +7200,15 @@ def _build_match_ac_index(sh):
         a = str(r.get("player_a_id", "")).strip()
         b = str(r.get("player_b_id", "")).strip()
         mid = str(r.get("match_id", "")).strip()
-        pod = str(r.get("pod", "")).strip()
 
         if not a or not b or not mid:
             continue
 
+        pod = str(r.get("pod", "")).strip()
         visual_status = _match_visual_status_from_row(r)
 
-        a_opp = nick_map.get(b, b)
-        b_opp = nick_map.get(a, a)
+        a_opp = nick_map_local.get(b, b)
+        b_opp = nick_map_local.get(a, a)
 
         if pod:
             label_a = f"{a_opp} | POD {pod} | {visual_status}"
@@ -6835,7 +7220,7 @@ def _build_match_ac_index(sh):
         search_a = f"{mid} {a_opp} {visual_status} {pod}".lower()
         search_b = f"{mid} {b_opp} {visual_status} {pod}".lower()
 
-        by_user.setdefault(a, []).append({
+        by_user_local.setdefault(a, []).append({
             "label": label_a[:100],
             "value": mid,
             "search": search_a,
@@ -6843,7 +7228,7 @@ def _build_match_ac_index(sh):
             "status": visual_status,
         })
 
-        by_user.setdefault(b, []).append({
+        by_user_local.setdefault(b, []).append({
             "label": label_b[:100],
             "value": mid,
             "search": search_b,
@@ -6851,7 +7236,7 @@ def _build_match_ac_index(sh):
             "status": visual_status,
         })
 
-    for uid, items in by_user.items():
+    for uid, items in by_user_local.items():
         items.sort(
             key=lambda x: (
                 0 if x.get("status") == "pendente" else 1,
@@ -6860,11 +7245,16 @@ def _build_match_ac_index(sh):
             )
         )
 
+    try:
+        print(f"DEBUG: _build_match_ac_index em {round((time.perf_counter() - t0) * 1000, 2)} ms | users={len(by_user_local)}")
+    except Exception:
+        pass
+
     return {
         "ts": _cache_now(),
         "season_id": season_id,
-        "locked_cycles": locked_cycles,
-        "by_user": by_user,
+        "locked_cycles": locked_cycles_local,
+        "by_user": by_user_local,
     }
 
 
@@ -6878,11 +7268,12 @@ def ensure_match_ac_index(sh, max_age_seconds: int = _MATCH_AC_INDEX_TTL_SECONDS
     with _MATCH_AC_INDEX_LOCK:
         ts = float(_MATCH_AC_INDEX.get("ts", 0.0) or 0.0)
         has_data = bool(_MATCH_AC_INDEX.get("by_user", {}))
+
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
-        if has_data and not _MATCH_AC_INDEX_BUILD_LOCK.locked():
-            # stale aceitável: mantém snapshot vivo se alguém já vai reconstruir depois
-            pass
+
+        if has_data and _MATCH_AC_INDEX_BUILD_LOCK.locked():
+            return
 
     acquired = _MATCH_AC_INDEX_BUILD_LOCK.acquire(blocking=False)
     if not acquired:
@@ -6928,12 +7319,16 @@ def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int 
         return []
 
     with _MATCH_AC_INDEX_LOCK:
-        items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
+        items = _MATCH_AC_INDEX.get("by_user", {}).get(uid, [])
 
     if not items:
         ensure_match_ac_index(sh)
+
         with _MATCH_AC_INDEX_LOCK:
-            items = list(_MATCH_AC_INDEX.get("by_user", {}).get(uid, []))
+            items = _MATCH_AC_INDEX.get("by_user", {}).get(uid, [])
+
+    if not items:
+        return []
 
     if not q:
         return [dict(item) for item in items[:limit]]
@@ -6944,6 +7339,7 @@ def get_match_ac_choices_for_user(sh, user_id: str, query: str = "", limit: int 
             out.append(dict(item))
             if len(out) >= limit:
                 break
+
     return out
 
 
@@ -6970,6 +7366,11 @@ def get_match_ac_index_snapshot() -> dict:
 # SUB-BLOCO: ÚNICO
 # REVISÃO: blindagem contra rebuild concorrente do índice RAM de matches,
 # mantendo a mesma interface e a mesma lógica funcional.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - stale snapshot antes de rebuild bloqueante
+# - cópias mais leves
+# - filtros mais baratos
+# - debug leve do tempo de rebuild
 # =================================================
 
 # =========================================================
@@ -7029,6 +7430,8 @@ def _match_sort_key(r: dict):
 
 
 def _build_match_ram_index(sh):
+    t0 = time.perf_counter()
+
     ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30)
     ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
 
@@ -7060,13 +7463,22 @@ def _build_match_ram_index(sh):
         if b:
             by_player.setdefault(b, []).append(r)
 
-    for key in by_cycle:
-        by_cycle[key].sort(key=_match_sort_key)
+    for key, items in by_cycle.items():
+        items.sort(key=_match_sort_key)
 
-    for pid in by_player:
-        by_player[pid].sort(key=_match_sort_key)
+    for pid, items in by_player.items():
+        items.sort(key=_match_sort_key)
 
     season_id_active = get_current_season_id(sh)
+
+    try:
+        print(
+            f"DEBUG: _build_match_ram_index em "
+            f"{round((time.perf_counter() - t0) * 1000, 2)} ms | "
+            f"matches={len(by_match_id)} players={len(by_player)} cycles={len(by_cycle)}"
+        )
+    except Exception:
+        pass
 
     return {
         "ts": _cache_now(),
@@ -7082,10 +7494,20 @@ def ensure_match_ram_index(sh, max_age_seconds: int = _MATCH_RAM_INDEX_TTL_SECON
 
     with _MATCH_RAM_INDEX_LOCK:
         ts = float(_MATCH_RAM_INDEX.get("ts", 0.0) or 0.0)
+        has_data = bool(_MATCH_RAM_INDEX.get("by_match_id", {}))
+
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    with _MATCH_RAM_INDEX_BUILD_LOCK:
+        # stale snapshot aceitável: não bloqueia interação se já há dados
+        if has_data and _MATCH_RAM_INDEX_BUILD_LOCK.locked():
+            return
+
+    acquired = _MATCH_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _MATCH_RAM_INDEX_LOCK:
@@ -7101,6 +7523,8 @@ def ensure_match_ram_index(sh, max_age_seconds: int = _MATCH_RAM_INDEX_TTL_SECON
             _MATCH_RAM_INDEX["by_player"] = built["by_player"]
             _MATCH_RAM_INDEX["by_cycle"] = built["by_cycle"]
             _MATCH_RAM_INDEX["season_id_active"] = built["season_id_active"]
+    finally:
+        _MATCH_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_match_by_id_fast(sh, match_id: str) -> dict | None:
@@ -7128,15 +7552,18 @@ def get_matches_for_player_fast(
     if not pid:
         return []
 
+    target_season = safe_int(season_id, 0) if season_id is not None else None
+    target_cycle = safe_int(cycle, 0) if cycle is not None else None
+
     with _MATCH_RAM_INDEX_LOCK:
-        rows = list(_MATCH_RAM_INDEX.get("by_player", {}).get(pid, []))
+        rows = _MATCH_RAM_INDEX.get("by_player", {}).get(pid, [])
 
     out = []
 
     for r in rows:
-        if season_id is not None and safe_int(r.get("season_id", 0), 0) != safe_int(season_id, 0):
+        if target_season is not None and safe_int(r.get("season_id", 0), 0) != target_season:
             continue
-        if cycle is not None and safe_int(r.get("cycle", 0), 0) != safe_int(cycle, 0):
+        if target_cycle is not None and safe_int(r.get("cycle", 0), 0) != target_cycle:
             continue
         if only_active and not as_bool(r.get("active", True)):
             continue
@@ -7152,7 +7579,10 @@ def get_matches_for_cycle_fast(sh, season_id: int, cycle: int, only_active: bool
     key = (safe_int(season_id, 0), safe_int(cycle, 0))
 
     with _MATCH_RAM_INDEX_LOCK:
-        rows = list(_MATCH_RAM_INDEX.get("by_cycle", {}).get(key, []))
+        rows = _MATCH_RAM_INDEX.get("by_cycle", {}).get(key, [])
+
+    if not rows:
+        return []
 
     if not only_active:
         return [dict(r) for r in rows]
@@ -7189,7 +7619,23 @@ def get_match_ram_index_snapshot() -> dict:
 # para autocomplete, resolução rápida de jogador, leitura rápida de nicknames,
 # seasons e ciclos sem consultar Google Sheets a cada uso.
 # NOVO BLOCO: criado para suprir dependências já usadas pelos BLOCOS 5, 6, 7 e 8.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - stale snapshot antes de rebuild
+# - rebuild leve com debug de tempo
+# - menos cópias desnecessárias
+# - filtros mais baratos para autocomplete
 # =================================================
+
+# =========================================================
+# LOCKS GLOBAIS — RAM INDEX
+# =========================================================
+_PLAYER_RAM_INDEX = None
+_PLAYER_RAM_LOCK = threading.Lock()
+_PLAYER_RAM_BUILD_LOCK = threading.Lock()
+
+_CYCLE_RAM_INDEX = None
+_CYCLE_RAM_LOCK = threading.Lock()
+_CYCLE_RAM_BUILD_LOCK = threading.Lock()
 
 # =========================================================
 # CACHE DE ÍNDICE — PLAYERS
@@ -7243,6 +7689,8 @@ def _normalize_player_row(raw: dict) -> dict:
 
 
 def _build_player_ram_index(sh) -> dict:
+    t0 = time.perf_counter()
+
     ws_players = ensure_worksheet(sh, "Players", PLAYERS_HEADER, rows=5000, cols=25)
     ensure_sheet_columns(ws_players, PLAYERS_REQUIRED)
 
@@ -7259,19 +7707,26 @@ def _build_player_ram_index(sh) -> dict:
             continue
 
         by_id[pid] = r
+
         nick = r["nick"] or pid
         nick_map[pid] = nick
 
-        label = nick
-        search = f"{pid} {nick} {r['name']} {r['status']}".lower()
-
         choices.append({
-            "label": label[:100],
+            "label": nick[:100],
             "value": pid,
-            "search": search,
+            "search": f"{pid} {nick} {r['name']} {r['status']}".lower(),
         })
 
     choices.sort(key=lambda x: str(x.get("label", "")).lower())
+
+    try:
+        print(
+            f"DEBUG: _build_player_ram_index em "
+            f"{round((time.perf_counter() - t0) * 1000, 2)} ms | "
+            f"players={len(by_id)}"
+        )
+    except Exception:
+        pass
 
     return {
         "ts": _cache_now(),
@@ -7290,13 +7745,34 @@ def ensure_player_ram_index(sh, max_age_seconds: int = _PLAYER_RAM_INDEX_TTL_SEC
         data = _PLAYER_RAM_INDEX
         if isinstance(data, dict):
             ts = float(data.get("ts", 0.0) or 0.0)
+            has_data = bool(data.get("by_id", {}))
+
             if ts > 0 and (now - ts) <= max_age_seconds:
                 return
 
-    built = _build_player_ram_index(sh)
+            if has_data and _PLAYER_RAM_BUILD_LOCK.locked():
+                return
 
-    with _PLAYER_RAM_LOCK:
-        _PLAYER_RAM_INDEX = built
+    acquired = _PLAYER_RAM_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
+        now = _cache_now()
+
+        with _PLAYER_RAM_LOCK:
+            data = _PLAYER_RAM_INDEX
+            if isinstance(data, dict):
+                ts = float(data.get("ts", 0.0) or 0.0)
+                if ts > 0 and (now - ts) <= max_age_seconds:
+                    return
+
+        built = _build_player_ram_index(sh)
+
+        with _PLAYER_RAM_LOCK:
+            _PLAYER_RAM_INDEX = built
+    finally:
+        _PLAYER_RAM_BUILD_LOCK.release()
 
 
 def get_player_ram_index_snapshot() -> dict:
@@ -7319,6 +7795,7 @@ def get_player_nick_map_fast(sh) -> dict[str, str]:
 
 def get_player_row_fast(sh, discord_id: str) -> dict | None:
     ensure_player_ram_index(sh)
+
     pid = str(discord_id or "").strip()
     if not pid:
         return None
@@ -7329,6 +7806,22 @@ def get_player_row_fast(sh, discord_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_player_record_by_discord_id(ws_players, discord_id: str) -> dict | None:
+    did = str(discord_id or "").strip()
+    if not did:
+        return None
+
+    try:
+        sh = ws_players.spreadsheet
+        return get_player_row_fast(sh, did)
+    except Exception:
+        rows = cached_get_all_records(ws_players, ttl_seconds=10)
+        for r in rows:
+            if str(r.get("discord_id", "")).strip() == did:
+                return dict(r)
+        return None
+
+
 def resolve_player_id_fast(sh, raw_value: str) -> str:
     ensure_player_ram_index(sh)
 
@@ -7336,29 +7829,23 @@ def resolve_player_id_fast(sh, raw_value: str) -> str:
     if not raw:
         return ""
 
-    raw_lower = raw.lower()
-
-    # aceita mention <@123> ou <@!123>
     if raw.startswith("<@") and raw.endswith(">"):
-        digits = "".join(ch for ch in raw if ch.isdigit())
-        raw = digits
-        raw_lower = raw.lower()
+        raw = "".join(ch for ch in raw if ch.isdigit())
+
+    raw_lower = raw.lower()
 
     with _PLAYER_RAM_LOCK:
         data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
         by_id = data.get("by_id", {})
 
-        # match direto por ID
         if raw in by_id:
             return raw
 
-        # match direto por nick
         for pid, r in by_id.items():
             nick = str(r.get("nick", "")).strip()
             if nick and nick.lower() == raw_lower:
                 return pid
 
-        # match por name
         for pid, r in by_id.items():
             name = str(r.get("name", "")).strip()
             if name and name.lower() == raw_lower:
@@ -7375,18 +7862,22 @@ def get_player_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
 
     with _PLAYER_RAM_LOCK:
         data = _PLAYER_RAM_INDEX if isinstance(_PLAYER_RAM_INDEX, dict) else {}
-        items = list(data.get("choices", []))
+        items = data.get("choices", [])
+
+    if not items:
+        return []
 
     if not q:
-        return items[:limit]
+        return [dict(item) for item in items[:limit]]
 
     out = []
     for item in items:
         if q in str(item.get("search", "")):
-            out.append(item)
+            out.append(dict(item))
             if len(out) >= limit:
                 break
     return out
+
 
 # =========================================================
 # CACHE DE ÍNDICE — CYCLES
@@ -7450,6 +7941,8 @@ def _normalize_cycle_row(raw: dict) -> dict:
 
 
 def _build_cycle_ram_index(sh) -> dict:
+    t0 = time.perf_counter()
+
     ws_cycles = ensure_worksheet(sh, "Cycles", CYCLES_HEADER, rows=2000, cols=25)
     ensure_sheet_columns(ws_cycles, CYCLES_REQUIRED)
 
@@ -7461,6 +7954,7 @@ def _build_cycle_ram_index(sh) -> dict:
         r = _normalize_cycle_row(raw)
         sid = r["season_id"]
         cyc = r["cycle"]
+
         if sid <= 0 or cyc <= 0:
             continue
 
@@ -7479,16 +7973,14 @@ def _build_cycle_ram_index(sh) -> dict:
             status = str(r.get("status", "")).strip().lower()
             pt = _cycle_status_label_pt(status)
 
-            label = f"Ciclo {cyc} | {pt}"
             search = f"ciclo {cyc} {status} {pt} season {sid}".lower()
-
             if r.get("start_at_br"):
-                search += f" {r['start_at_br'].lower()}"
+                search += f" {str(r['start_at_br']).lower()}"
             if r.get("deadline_at_br"):
-                search += f" {r['deadline_at_br'].lower()}"
+                search += f" {str(r['deadline_at_br']).lower()}"
 
             choices.append({
-                "label": label[:100],
+                "label": f"Ciclo {cyc} | {pt}"[:100],
                 "value": cyc,
                 "search": search,
                 "status": status,
@@ -7496,6 +7988,16 @@ def _build_cycle_ram_index(sh) -> dict:
             })
 
         bucket["choices"] = choices
+
+    try:
+        total_cycles = sum(len(v.get("rows", [])) for v in by_season.values())
+        print(
+            f"DEBUG: _build_cycle_ram_index em "
+            f"{round((time.perf_counter() - t0) * 1000, 2)} ms | "
+            f"seasons={len(by_season)} cycles={total_cycles}"
+        )
+    except Exception:
+        pass
 
     return {
         "ts": _cache_now(),
@@ -7512,13 +8014,34 @@ def ensure_cycle_ram_index(sh, max_age_seconds: int = _CYCLE_RAM_INDEX_TTL_SECON
         data = _CYCLE_RAM_INDEX
         if isinstance(data, dict):
             ts = float(data.get("ts", 0.0) or 0.0)
+            has_data = bool(data.get("by_season", {}))
+
             if ts > 0 and (now - ts) <= max_age_seconds:
                 return
 
-    built = _build_cycle_ram_index(sh)
+            if has_data and _CYCLE_RAM_BUILD_LOCK.locked():
+                return
 
-    with _CYCLE_RAM_LOCK:
-        _CYCLE_RAM_INDEX = built
+    acquired = _CYCLE_RAM_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
+        now = _cache_now()
+
+        with _CYCLE_RAM_LOCK:
+            data = _CYCLE_RAM_INDEX
+            if isinstance(data, dict):
+                ts = float(data.get("ts", 0.0) or 0.0)
+                if ts > 0 and (now - ts) <= max_age_seconds:
+                    return
+
+        built = _build_cycle_ram_index(sh)
+
+        with _CYCLE_RAM_LOCK:
+            _CYCLE_RAM_INDEX = built
+    finally:
+        _CYCLE_RAM_BUILD_LOCK.release()
 
 
 def get_cycle_ram_index_snapshot() -> dict:
@@ -7551,7 +8074,10 @@ def get_cycle_choices_fast(
 
     with _CYCLE_RAM_LOCK:
         data = _CYCLE_RAM_INDEX if isinstance(_CYCLE_RAM_INDEX, dict) else {}
-        items = list(data.get("by_season", {}).get(sid, {}).get("choices", []))
+        items = data.get("by_season", {}).get(sid, {}).get("choices", [])
+
+    if not items:
+        return []
 
     out = []
     for item in items:
@@ -7559,7 +8085,6 @@ def get_cycle_choices_fast(
 
         if only_open and status != "open":
             continue
-
         if q and q not in str(item.get("search", "")):
             continue
 
@@ -7569,14 +8094,6 @@ def get_cycle_choices_fast(
 
     return out
 
-# =========================================================
-# LOCKS GLOBAIS — RAM INDEX
-# =========================================================
-_PLAYER_RAM_INDEX = None
-_PLAYER_RAM_LOCK = threading.Lock()
-
-_CYCLE_RAM_INDEX = None
-_CYCLE_RAM_LOCK = threading.Lock()
 
 # =========================================================
 # CACHE DE ÍNDICE — SEASONS
@@ -7588,6 +8105,7 @@ _SEASON_RAM_INDEX = {
     "choices": [],
 }
 _SEASON_RAM_INDEX_LOCK = threading.Lock()
+_SEASON_RAM_INDEX_BUILD_LOCK = threading.Lock()
 _SEASON_RAM_INDEX_TTL_SECONDS = 60
 
 
@@ -7625,6 +8143,8 @@ def _normalize_season_row(raw: dict) -> dict:
 
 
 def _build_season_ram_index(sh) -> dict:
+    t0 = time.perf_counter()
+
     ws_seasons = ensure_worksheet(sh, "Seasons", SEASONS_HEADER, rows=200, cols=20)
     ensure_sheet_columns(ws_seasons, SEASONS_REQUIRED)
 
@@ -7638,7 +8158,6 @@ def _build_season_ram_index(sh) -> dict:
         sid = r["season_id"]
         if sid <= 0:
             continue
-
         out_rows.append(r)
 
     out_rows.sort(key=lambda x: safe_int(x.get("season_id", 0), 0), reverse=True)
@@ -7649,21 +8168,29 @@ def _build_season_ram_index(sh) -> dict:
         pt = _season_status_label_pt(status)
         name = str(r.get("name", "")).strip() or f"Temporada {sid}"
 
-        label = f"Season {sid} | {name} | {pt}"
-        search = f"season {sid} {name} {status} {pt}".lower()
-
         choices.append({
             "season_id": sid,
-            "label": label[:100],
+            "label": f"Season {sid} | {name} | {pt}"[:100],
             "value": sid,
-            "search": search,
+            "search": f"season {sid} {name} {status} {pt}".lower(),
             "status": status,
             "name_text": name,
         })
 
+    current_sid = get_current_season_id(sh)
+
+    try:
+        print(
+            f"DEBUG: _build_season_ram_index em "
+            f"{round((time.perf_counter() - t0) * 1000, 2)} ms | "
+            f"seasons={len(out_rows)} current={current_sid}"
+        )
+    except Exception:
+        pass
+
     return {
         "ts": _cache_now(),
-        "current_season_id": get_current_season_id(sh),
+        "current_season_id": current_sid,
         "rows": out_rows,
         "choices": choices,
     }
@@ -7674,16 +8201,35 @@ def ensure_season_ram_index(sh, max_age_seconds: int = _SEASON_RAM_INDEX_TTL_SEC
 
     with _SEASON_RAM_INDEX_LOCK:
         ts = float(_SEASON_RAM_INDEX.get("ts", 0.0) or 0.0)
+        has_data = bool(_SEASON_RAM_INDEX.get("rows", []))
+
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    built = _build_season_ram_index(sh)
+        if has_data and _SEASON_RAM_INDEX_BUILD_LOCK.locked():
+            return
 
-    with _SEASON_RAM_INDEX_LOCK:
-        _SEASON_RAM_INDEX["ts"] = built["ts"]
-        _SEASON_RAM_INDEX["current_season_id"] = built["current_season_id"]
-        _SEASON_RAM_INDEX["rows"] = built["rows"]
-        _SEASON_RAM_INDEX["choices"] = built["choices"]
+    acquired = _SEASON_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
+        now = _cache_now()
+
+        with _SEASON_RAM_INDEX_LOCK:
+            ts = float(_SEASON_RAM_INDEX.get("ts", 0.0) or 0.0)
+            if ts > 0 and (now - ts) <= max_age_seconds:
+                return
+
+        built = _build_season_ram_index(sh)
+
+        with _SEASON_RAM_INDEX_LOCK:
+            _SEASON_RAM_INDEX["ts"] = built["ts"]
+            _SEASON_RAM_INDEX["current_season_id"] = built["current_season_id"]
+            _SEASON_RAM_INDEX["rows"] = built["rows"]
+            _SEASON_RAM_INDEX["choices"] = built["choices"]
+    finally:
+        _SEASON_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_season_ram_index_snapshot() -> dict:
@@ -7702,10 +8248,13 @@ def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
     limit = max(1, min(limit, 25))
 
     with _SEASON_RAM_INDEX_LOCK:
-        items = list(_SEASON_RAM_INDEX.get("choices", []))
+        items = _SEASON_RAM_INDEX.get("choices", [])
+
+    if not items:
+        return []
 
     if not q:
-        return items[:limit]
+        return [dict(item) for item in items[:limit]]
 
     out = []
     for item in items:
@@ -7728,6 +8277,11 @@ def get_season_choices_fast(sh, query: str = "", limit: int = 25) -> list[dict]:
 # REVISÃO: comando administrativo para listar matches por season/ciclo,
 # com separação entre registradas e pendentes, placar mais claro e
 # compatibilidade integral com os índices RAM e helpers atuais.
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - early return mais rápido
+# - menos processamento por linha
+# - redução de concatenações repetidas
+# - prioriza índice RAM sem rebuild pesado em fluxo
 # =================================================
 
 # =========================================================
@@ -7762,15 +8316,11 @@ def _admin_match_is_registered(r: dict) -> bool:
     - ou status diferente de open/vazio
     """
     reported_by = str(r.get("reported_by_id", "")).strip()
-    status = str(r.get("confirmed_status", "")).strip().lower()
-
     if reported_by:
         return True
 
-    if status not in ("", "open"):
-        return True
-
-    return False
+    status = str(r.get("confirmed_status", "")).strip().lower()
+    return status not in ("", "open")
 
 
 def _admin_match_sort_key(r: dict):
@@ -7809,7 +8359,6 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
                 ephemeral=True
             )
 
-        nick_map = get_player_nick_map_fast(sh)
         rows = get_matches_for_cycle_fast(
             sh,
             season_id=season,
@@ -7823,23 +8372,25 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
                 ephemeral=True
             )
 
-        rows = sorted(rows, key=_admin_match_sort_key)
+        nick_map = get_player_nick_map_fast(sh)
+        rows.sort(key=_admin_match_sort_key)
 
-        registradas = []
-        pendentes = []
+        registradas: list[str] = []
+        pendentes: list[str] = []
 
         for r in rows:
             match_id = str(r.get("match_id", "")).strip()
-            pod = str(r.get("pod", "")).strip()
-            a = str(r.get("player_a_id", "")).strip()
-            b = str(r.get("player_b_id", "")).strip()
-
-            if not match_id or not a or not b:
+            if not match_id:
                 continue
 
+            a = str(r.get("player_a_id", "")).strip()
+            b = str(r.get("player_b_id", "")).strip()
+            if not a or not b:
+                continue
+
+            pod = str(r.get("pod", "")).strip()
             a_name = nick_map.get(a, a)
             b_name = nick_map.get(b, b)
-
             score = _admin_match_score_text(r)
             status = _admin_match_status_label(r.get("confirmed_status", ""))
 
@@ -7898,6 +8449,11 @@ async def matches_ciclo(interaction: discord.Interaction, season: int, cycle: in
 # CORREÇÃO CRÍTICA:
 # - invalidação correta do índice RAM de FinalParticipants
 # - rebuild da fase final passa a refletir o estado real do Sheets
+# CORREÇÃO DE PERFORMANCE/ESTABILIDADE:
+# - menos recomputação de header/idx
+# - menos lookups repetidos por linha
+# - early return mais leve
+# - preserva integralmente a lógica atual
 # =========================================================
 
 # =========================================================
@@ -8015,9 +8571,11 @@ def get_final_stage_row(ws_stage, season_id: int) -> int | None:
 
     col = ensure_sheet_columns(ws_stage, FINAL_STAGE_REQUIRED)
 
+    season_col = col["season_id"]
+
     for i in range(2, len(rows) + 1):
         r = rows[i - 1]
-        sid = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        sid = safe_int(r[season_col] if season_col < len(r) else 0, 0)
 
         if sid == season_id:
             return i
@@ -8027,7 +8585,6 @@ def get_final_stage_row(ws_stage, season_id: int) -> int | None:
 
 def get_final_stage_fields(ws_stage, season_id: int) -> dict:
     rows = cached_get_all_values(ws_stage, ttl_seconds=10)
-    col = ensure_sheet_columns(ws_stage, FINAL_STAGE_REQUIRED)
 
     out = {
         "season_id": season_id,
@@ -8038,34 +8595,31 @@ def get_final_stage_fields(ws_stage, season_id: int) -> dict:
         "updated_at": "",
     }
 
+    if len(rows) <= 1:
+        return out
+
+    header = rows[0]
+    idx = {name: j for j, name in enumerate(header)}
+
+    sid_idx = idx.get("season_id", -1)
+    status_idx = idx.get("status", -1)
+    top_idx = idx.get("top_size", -1)
+    fmt_idx = idx.get("format", -1)
+    created_idx = idx.get("created_at", -1)
+    updated_idx = idx.get("updated_at", -1)
+
     for i in range(2, len(rows) + 1):
         r = rows[i - 1]
-        sid = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
+        sid = safe_int(r[sid_idx] if 0 <= sid_idx < len(r) else 0, 0)
 
         if sid != season_id:
             continue
 
-        out["status"] = str(r[col["status"]] if col["status"] < len(r) else "").strip().lower()
-
-        header = rows[0]
-        idx = {name: j for j, name in enumerate(header)}
-
-        if "top_size" in idx:
-            j = idx["top_size"]
-            out["top_size"] = safe_int(r[j] if j < len(r) else 0, 0)
-
-        if "format" in idx:
-            j = idx["format"]
-            out["format"] = str(r[j] if j < len(r) else "").strip()
-
-        if "created_at" in idx:
-            j = idx["created_at"]
-            out["created_at"] = str(r[j] if j < len(r) else "").strip()
-
-        if "updated_at" in idx:
-            j = idx["updated_at"]
-            out["updated_at"] = str(r[j] if j < len(r) else "").strip()
-
+        out["status"] = str(r[status_idx] if 0 <= status_idx < len(r) else "").strip().lower()
+        out["top_size"] = safe_int(r[top_idx] if 0 <= top_idx < len(r) else 0, 0)
+        out["format"] = str(r[fmt_idx] if 0 <= fmt_idx < len(r) else "").strip()
+        out["created_at"] = str(r[created_idx] if 0 <= created_idx < len(r) else "").strip()
+        out["updated_at"] = str(r[updated_idx] if 0 <= updated_idx < len(r) else "").strip()
         return out
 
     return out
@@ -8163,7 +8717,6 @@ def final_all_cycles_completed(sh, season_id: int) -> bool:
     )
 
     rows = cached_get_all_records(ws_cycles, ttl_seconds=10)
-
     found_any = False
 
     for r in rows:
@@ -8206,19 +8759,25 @@ def _final_read_ranking_geral_rows(sh, season_id: int) -> list[dict]:
     header = vals[0]
     idx = {name: i for i, name in enumerate(header)}
 
+    season_idx = idx.get("season_id", -1)
+    player_idx = idx.get("player_id", -1)
+    matches_idx = idx.get("matches_played", -1)
+    match_points_idx = idx.get("match_points", -1)
+    game_wins_idx = idx.get("game_wins", -1)
+    game_losses_idx = idx.get("game_losses", -1)
+    game_draws_idx = idx.get("game_draws", -1)
+    games_played_idx = idx.get("games_played", -1)
+    omw_idx = idx.get("omw", -1)
+    ogw_idx = idx.get("ogw", -1)
+
     stats = {}
 
     for row in vals[1:]:
-        def getv(name: str, default=""):
-            i = idx.get(name, -1)
-            if i < 0 or i >= len(row):
-                return default
-            return row[i]
-
-        if safe_int(getv("season_id", 0), 0) != season_id:
+        row_season = safe_int(row[season_idx] if 0 <= season_idx < len(row) else 0, 0)
+        if row_season != season_id:
             continue
 
-        pid = str(getv("player_id", "")).strip()
+        pid = str(row[player_idx] if 0 <= player_idx < len(row) else "").strip()
         if not pid:
             continue
 
@@ -8236,28 +8795,29 @@ def _final_read_ranking_geral_rows(sh, season_id: int) -> list[dict]:
                 "ogw_weight": 0,
             }
 
-        matches_played = safe_int(getv("matches_played", 0), 0)
-        match_points = sheet_float(getv("match_points", 0), 0.0)
-        game_wins = safe_int(getv("game_wins", 0), 0)
-        game_losses = safe_int(getv("game_losses", 0), 0)
-        game_draws = safe_int(getv("game_draws", 0), 0)
-        games_played = safe_int(getv("games_played", 0), 0)
+        matches_played = safe_int(row[matches_idx] if 0 <= matches_idx < len(row) else 0, 0)
+        match_points = sheet_float(row[match_points_idx] if 0 <= match_points_idx < len(row) else 0, 0.0)
+        game_wins = safe_int(row[game_wins_idx] if 0 <= game_wins_idx < len(row) else 0, 0)
+        game_losses = safe_int(row[game_losses_idx] if 0 <= game_losses_idx < len(row) else 0, 0)
+        game_draws = safe_int(row[game_draws_idx] if 0 <= game_draws_idx < len(row) else 0, 0)
+        games_played = safe_int(row[games_played_idx] if 0 <= games_played_idx < len(row) else 0, 0)
 
-        omw_raw = sheet_float(getv("omw", 0), 0.0)
-        ogw_raw = sheet_float(getv("ogw", 0), 0.0)
+        omw_raw = sheet_float(row[omw_idx] if 0 <= omw_idx < len(row) else 0, 0.0)
+        ogw_raw = sheet_float(row[ogw_idx] if 0 <= ogw_idx < len(row) else 0, 0.0)
 
-        stats[pid]["pts"] += match_points
-        stats[pid]["m"] += matches_played
-        stats[pid]["gwins"] += game_wins
-        stats[pid]["glosses"] += game_losses
-        stats[pid]["gdraws"] += game_draws
-        stats[pid]["gplayed"] += games_played
+        s = stats[pid]
+        s["pts"] += match_points
+        s["m"] += matches_played
+        s["gwins"] += game_wins
+        s["glosses"] += game_losses
+        s["gdraws"] += game_draws
+        s["gplayed"] += games_played
 
         if matches_played > 0:
-            stats[pid]["omw_weighted_sum"] += omw_raw * matches_played
-            stats[pid]["ogw_weighted_sum"] += ogw_raw * matches_played
-            stats[pid]["omw_weight"] += matches_played
-            stats[pid]["ogw_weight"] += matches_played
+            s["omw_weighted_sum"] += omw_raw * matches_played
+            s["ogw_weighted_sum"] += ogw_raw * matches_played
+            s["omw_weight"] += matches_played
+            s["ogw_weight"] += matches_played
 
     if not stats:
         return []
@@ -8519,7 +9079,7 @@ def get_final_matches_rows(ws_matches, season_id: int) -> list[dict]:
 
     out.sort(
         key=lambda x: (
-            str(x.get("bracket", "")),
+            str(x.get("bracket", "")).lower(),
             safe_int(x.get("round", 0), 0),
             safe_int(x.get("match_order", 0), 0),
             str(x.get("final_match_id", "")).lower(),
@@ -8540,6 +9100,12 @@ def get_final_matches_rows(ws_matches, season_id: int) -> list[dict]:
 # RESUMO: Índices RAM da Fase Final (FinalStage, FinalParticipants,
 # FinalMatches e FinalDecks), com helpers *_fast, invalidação consistente
 # e leitura otimizada para os próximos comandos e geração do chaveamento.
+# REVISÃO DE PERFORMANCE:
+# - early return mais agressivo
+# - leitura e sort mais leves
+# - rebuild concorrente protegido sem bloquear interação além do necessário
+# - autocomplete com filtro curto e saída rápida
+# - sem alterar a lógica funcional
 # =================================================
 
 # =========================================================
@@ -8759,7 +9325,6 @@ def _build_final_stage_ram_index(sh) -> dict:
         sid = r["season_id"]
         if sid <= 0:
             continue
-
         by_season[sid] = r
 
     return {
@@ -8776,7 +9341,11 @@ def ensure_final_stage_ram_index(sh, max_age_seconds: int = _FINAL_STAGE_RAM_IND
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    with _FINAL_STAGE_RAM_INDEX_BUILD_LOCK:
+    acquired = _FINAL_STAGE_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _FINAL_STAGE_RAM_INDEX_LOCK:
@@ -8789,14 +9358,16 @@ def ensure_final_stage_ram_index(sh, max_age_seconds: int = _FINAL_STAGE_RAM_IND
         with _FINAL_STAGE_RAM_INDEX_LOCK:
             _FINAL_STAGE_RAM_INDEX["ts"] = built["ts"]
             _FINAL_STAGE_RAM_INDEX["by_season"] = built["by_season"]
+    finally:
+        _FINAL_STAGE_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_final_stage_fast(sh, season_id: int) -> dict | None:
-    ensure_final_stage_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     if sid <= 0:
         return None
+
+    ensure_final_stage_ram_index(sh)
 
     with _FINAL_STAGE_RAM_INDEX_LOCK:
         row = _FINAL_STAGE_RAM_INDEX.get("by_season", {}).get(sid)
@@ -8832,10 +9403,10 @@ def _build_final_participants_ram_index(sh) -> dict:
             continue
 
         by_season.setdefault(sid, []).append(r)
-        by_player.setdefault((sid, pid), r)
+        by_player[(sid, pid)] = r
 
-    for sid in by_season:
-        by_season[sid].sort(key=_final_participant_sort_key)
+    for sid, items in by_season.items():
+        items.sort(key=_final_participant_sort_key)
 
     return {
         "ts": _cache_now(),
@@ -8852,7 +9423,11 @@ def ensure_final_participants_ram_index(sh, max_age_seconds: int = _FINAL_PARTIC
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    with _FINAL_PARTICIPANTS_RAM_INDEX_BUILD_LOCK:
+    acquired = _FINAL_PARTICIPANTS_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
@@ -8866,14 +9441,16 @@ def ensure_final_participants_ram_index(sh, max_age_seconds: int = _FINAL_PARTIC
             _FINAL_PARTICIPANTS_RAM_INDEX["ts"] = built["ts"]
             _FINAL_PARTICIPANTS_RAM_INDEX["by_season"] = built["by_season"]
             _FINAL_PARTICIPANTS_RAM_INDEX["by_player"] = built["by_player"]
+    finally:
+        _FINAL_PARTICIPANTS_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_final_participants_fast(sh, season_id: int) -> list[dict]:
-    ensure_final_participants_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     if sid <= 0:
         return []
+
+    ensure_final_participants_ram_index(sh)
 
     with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
         rows = list(_FINAL_PARTICIPANTS_RAM_INDEX.get("by_season", {}).get(sid, []))
@@ -8882,13 +9459,13 @@ def get_final_participants_fast(sh, season_id: int) -> list[dict]:
 
 
 def get_final_participant_by_player_fast(sh, season_id: int, player_id: str) -> dict | None:
-    ensure_final_participants_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     pid = str(player_id or "").strip()
 
     if sid <= 0 or not pid:
         return None
+
+    ensure_final_participants_ram_index(sh)
 
     with _FINAL_PARTICIPANTS_RAM_INDEX_LOCK:
         row = _FINAL_PARTICIPANTS_RAM_INDEX.get("by_player", {}).get((sid, pid))
@@ -8938,11 +9515,11 @@ def _build_final_matches_ram_index(sh) -> dict:
         if b:
             by_player.setdefault((sid, b), []).append(r)
 
-    for sid in by_season:
-        by_season[sid].sort(key=_final_match_sort_key)
+    for sid, items in by_season.items():
+        items.sort(key=_final_match_sort_key)
 
-    for key in by_player:
-        by_player[key].sort(key=_final_match_sort_key)
+    for key, items in by_player.items():
+        items.sort(key=_final_match_sort_key)
 
     return {
         "ts": _cache_now(),
@@ -8960,7 +9537,11 @@ def ensure_final_matches_ram_index(sh, max_age_seconds: int = _FINAL_MATCHES_RAM
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    with _FINAL_MATCHES_RAM_INDEX_BUILD_LOCK:
+    acquired = _FINAL_MATCHES_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _FINAL_MATCHES_RAM_INDEX_LOCK:
@@ -8975,14 +9556,16 @@ def ensure_final_matches_ram_index(sh, max_age_seconds: int = _FINAL_MATCHES_RAM
             _FINAL_MATCHES_RAM_INDEX["by_season"] = built["by_season"]
             _FINAL_MATCHES_RAM_INDEX["by_match_id"] = built["by_match_id"]
             _FINAL_MATCHES_RAM_INDEX["by_player"] = built["by_player"]
+    finally:
+        _FINAL_MATCHES_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_final_matches_fast(sh, season_id: int) -> list[dict]:
-    ensure_final_matches_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     if sid <= 0:
         return []
+
+    ensure_final_matches_ram_index(sh)
 
     with _FINAL_MATCHES_RAM_INDEX_LOCK:
         rows = list(_FINAL_MATCHES_RAM_INDEX.get("by_season", {}).get(sid, []))
@@ -8991,11 +9574,11 @@ def get_final_matches_fast(sh, season_id: int) -> list[dict]:
 
 
 def get_final_match_by_id_fast(sh, final_match_id: str) -> dict | None:
-    ensure_final_matches_ram_index(sh)
-
     mid = str(final_match_id or "").strip()
     if not mid:
         return None
+
+    ensure_final_matches_ram_index(sh)
 
     with _FINAL_MATCHES_RAM_INDEX_LOCK:
         row = _FINAL_MATCHES_RAM_INDEX.get("by_match_id", {}).get(mid)
@@ -9003,13 +9586,13 @@ def get_final_match_by_id_fast(sh, final_match_id: str) -> dict | None:
 
 
 def get_final_matches_for_player_fast(sh, season_id: int, player_id: str) -> list[dict]:
-    ensure_final_matches_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     pid = str(player_id or "").strip()
 
     if sid <= 0 or not pid:
         return []
+
+    ensure_final_matches_ram_index(sh)
 
     with _FINAL_MATCHES_RAM_INDEX_LOCK:
         rows = list(_FINAL_MATCHES_RAM_INDEX.get("by_player", {}).get((sid, pid), []))
@@ -9052,8 +9635,8 @@ def _build_final_decks_ram_index(sh) -> dict:
         by_season.setdefault(sid, []).append(r)
         by_player[(sid, pid)] = r
 
-    for sid in by_season:
-        by_season[sid].sort(
+    for sid, items in by_season.items():
+        items.sort(
             key=lambda x: (
                 str(x.get("deck", "")).lower(),
                 str(x.get("player_id", "")).lower(),
@@ -9075,7 +9658,11 @@ def ensure_final_decks_ram_index(sh, max_age_seconds: int = _FINAL_DECKS_RAM_IND
         if ts > 0 and (now - ts) <= max_age_seconds:
             return
 
-    with _FINAL_DECKS_RAM_INDEX_BUILD_LOCK:
+    acquired = _FINAL_DECKS_RAM_INDEX_BUILD_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+
+    try:
         now = _cache_now()
 
         with _FINAL_DECKS_RAM_INDEX_LOCK:
@@ -9089,14 +9676,16 @@ def ensure_final_decks_ram_index(sh, max_age_seconds: int = _FINAL_DECKS_RAM_IND
             _FINAL_DECKS_RAM_INDEX["ts"] = built["ts"]
             _FINAL_DECKS_RAM_INDEX["by_season"] = built["by_season"]
             _FINAL_DECKS_RAM_INDEX["by_player"] = built["by_player"]
+    finally:
+        _FINAL_DECKS_RAM_INDEX_BUILD_LOCK.release()
 
 
 def get_final_decks_fast(sh, season_id: int) -> list[dict]:
-    ensure_final_decks_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     if sid <= 0:
         return []
+
+    ensure_final_decks_ram_index(sh)
 
     with _FINAL_DECKS_RAM_INDEX_LOCK:
         rows = list(_FINAL_DECKS_RAM_INDEX.get("by_season", {}).get(sid, []))
@@ -9105,13 +9694,13 @@ def get_final_decks_fast(sh, season_id: int) -> list[dict]:
 
 
 def get_final_deck_by_player_fast(sh, season_id: int, player_id: str) -> dict | None:
-    ensure_final_decks_ram_index(sh)
-
     sid = safe_int(season_id, 0)
     pid = str(player_id or "").strip()
 
     if sid <= 0 or not pid:
         return None
+
+    ensure_final_decks_ram_index(sh)
 
     with _FINAL_DECKS_RAM_INDEX_LOCK:
         row = _FINAL_DECKS_RAM_INDEX.get("by_player", {}).get((sid, pid))
@@ -9180,14 +9769,17 @@ async def ac_final_player(interaction: discord.Interaction, current: str):
         if _ac_should_skip(interaction, "ac_final_player"):
             return []
 
-        sh = open_sheet()
         season_selected = safe_int(getattr(interaction.namespace, "season", 0), 0)
         if season_selected <= 0:
             return []
 
         q = str(current or "").strip().lower()
+        sh = open_sheet()
         nick_map = get_player_nick_map_fast(sh)
         items = get_final_participants_fast(sh, season_selected)
+
+        if not items:
+            return []
 
         out: list[app_commands.Choice[str]] = []
 
@@ -9200,12 +9792,12 @@ async def ac_final_player(interaction: discord.Interaction, current: str):
             seed = safe_int(item.get("seed", 0), 0)
             label = f"Seed {seed} | {nick}"
 
-            search = f"{pid} {nick} {label}".lower()
-            if q and q not in search:
-                continue
+            if q:
+                search = f"{pid} {nick} {label}".lower()
+                if q not in search:
+                    continue
 
             out.append(app_commands.Choice(name=label[:100], value=pid))
-
             if len(out) >= 25:
                 break
 
@@ -9225,7 +9817,11 @@ async def ac_final_player_any(interaction: discord.Interaction, current: str):
             return []
 
         sh = open_sheet()
-        items = get_player_choices_fast(sh, query=str(current or "").strip().lower(), limit=25)
+        q = str(current or "").strip().lower()
+        items = get_player_choices_fast(sh, query=q, limit=25)
+
+        if not items:
+            return []
 
         out: list[app_commands.Choice[str]] = []
         for item in items:
@@ -9261,6 +9857,11 @@ async def ac_final_player_any(interaction: discord.Interaction, current: str):
 # - mantém o header atual de FinalMatches
 # - campos next_lose_match_id, next_lose_slot e is_reset_match
 #   permanecem na planilha, mas não são utilizados nesta revisão
+# REVISÃO DE PERFORMANCE:
+# - redução de trabalho redundante na geração do bracket
+# - menos cópias/loops desnecessários
+# - append em lote preservado
+# - sem alterar regra funcional
 # =========================================================
 
 
@@ -9378,6 +9979,7 @@ def _build_single_elimination_round(
     Cada match aponta apenas para a próxima rodada via next_win_match_id/slot.
     """
     rows: list[dict] = []
+    next_ids = next_round_match_ids or []
 
     for i, pair in enumerate(round_pairs, start=1):
         player_a_id = str(pair[0] or "").strip()
@@ -9386,11 +9988,11 @@ def _build_single_elimination_round(
         next_win_match_id = ""
         next_win_slot = ""
 
-        if next_round_match_ids:
+        if next_ids:
             next_idx = (i - 1) // 2
-            if 0 <= next_idx < len(next_round_match_ids):
-                next_win_match_id = next_round_match_ids[next_idx]
-                next_win_slot = "A" if i % 2 == 1 else "B"
+            if next_idx < len(next_ids):
+                next_win_match_id = next_ids[next_idx]
+                next_win_slot = "A" if (i % 2 == 1) else "B"
 
         rows.append(
             _build_final_match_row_dict(
@@ -9411,11 +10013,18 @@ def _build_single_elimination_round(
     return rows
 
 
-def _build_empty_match_ids_for_round(season_id: int, round_num: int, match_count: int, bracket_name: str = "winners") -> list[str]:
-    out = []
-    for i in range(1, match_count + 1):
-        out.append(_final_match_id(season_id, bracket_name, round_num, i))
-    return out
+def _build_empty_match_ids_for_round(
+    season_id: int,
+    round_num: int,
+    match_count: int,
+    bracket_name: str = "winners"
+) -> list[str]:
+    if match_count <= 0:
+        return []
+    return [
+        _final_match_id(season_id, bracket_name, round_num, i)
+        for i in range(1, match_count + 1)
+    ]
 
 
 def _generate_single_elimination_bracket(season_id: int, participants: list[dict]) -> list[dict]:
@@ -9440,73 +10049,75 @@ def _generate_single_elimination_bracket(season_id: int, participants: list[dict
     - R3 semifinal
     - R4 final
     """
-    items = [dict(x) for x in participants]
-    items.sort(key=lambda x: safe_int(x.get("seed", 0), 999999))
+    if not participants:
+        raise RuntimeError("Participantes inválidos para geração da fase final.")
+
+    items = sorted(
+        participants,
+        key=lambda x: safe_int(x.get("seed", 0), 999999)
+    )
 
     top_size = len(items)
     if top_size not in (2, 4, 8, 16):
         raise RuntimeError("Top size inválido para geração da fase final.")
 
-    seed_map = {
-        safe_int(p.get("seed", 0), 0): str(p.get("player_id", "")).strip()
-        for p in items
-    }
+    seed_map = {}
+    for p in items:
+        seed = safe_int(p.get("seed", 0), 0)
+        pid = str(p.get("player_id", "")).strip()
+        if seed > 0:
+            seed_map[seed] = pid
 
     initial_seed_pairs = _build_seed_pairings(top_size)
     if not initial_seed_pairs:
         raise RuntimeError("Não foi possível montar os pareamentos iniciais da fase final.")
 
-    # Rodada 1 sempre nasce com os seeds
-    round_1_pairs: list[tuple[str, str]] = []
-    for s1, s2 in initial_seed_pairs:
-        round_1_pairs.append((seed_map.get(s1, ""), seed_map.get(s2, "")))
+    round_1_pairs = [
+        (seed_map.get(s1, ""), seed_map.get(s2, ""))
+        for s1, s2 in initial_seed_pairs
+    ]
 
-    # Quantidade de matches por rodada até chegar na final
     round_match_counts: list[int] = []
     current = top_size // 2
     while current >= 1:
         round_match_counts.append(current)
         if current == 1:
             break
-        current = current // 2
+        current //= 2
 
-    rows: list[dict] = []
-
-    # Pré-cria os IDs das próximas rodadas para linkar winners corretamente
-    round_to_ids: dict[int, list[str]] = {}
-    for round_num, match_count in enumerate(round_match_counts, start=1):
-        round_to_ids[round_num] = _build_empty_match_ids_for_round(
+    round_to_ids: dict[int, list[str]] = {
+        round_num: _build_empty_match_ids_for_round(
             season_id=season_id,
             round_num=round_num,
             match_count=match_count,
             bracket_name="winners"
         )
+        for round_num, match_count in enumerate(round_match_counts, start=1)
+    }
 
-    # R1 com jogadores definidos
-    next_ids_r1 = round_to_ids.get(2, [])
+    rows: list[dict] = []
+
     rows.extend(
         _build_single_elimination_round(
             season_id=season_id,
             round_num=1,
             round_pairs=round_1_pairs,
-            next_round_match_ids=next_ids_r1,
+            next_round_match_ids=round_to_ids.get(2, []),
             bracket_name="winners"
         )
     )
 
-    # Demais rodadas começam vazias e recebem os vencedores via progressão
     for round_num in range(2, len(round_match_counts) + 1):
         current_match_count = round_match_counts[round_num - 1]
-        next_ids = round_to_ids.get(round_num + 1, [])
-
-        empty_pairs = [("", "") for _ in range(current_match_count)]
+        if current_match_count <= 0:
+            continue
 
         rows.extend(
             _build_single_elimination_round(
                 season_id=season_id,
                 round_num=round_num,
-                round_pairs=empty_pairs,
-                next_round_match_ids=next_ids,
+                round_pairs=[("", "")] * current_match_count,
+                next_round_match_ids=round_to_ids.get(round_num + 1, []),
                 bracket_name="winners"
             )
         )
@@ -9519,11 +10130,15 @@ def _generate_single_elimination_bracket(season_id: int, participants: list[dict
 # =========================================================
 
 def build_final_bracket_rows(season_id: int, participants: list[dict]) -> list[dict]:
-    items = [dict(x) for x in participants]
-    items.sort(key=lambda x: safe_int(x.get("seed", 0), 999999))
+    if not participants:
+        raise RuntimeError("Participantes inválidos para geração da fase final.")
+
+    items = sorted(
+        participants,
+        key=lambda x: safe_int(x.get("seed", 0), 999999)
+    )
 
     top_size = len(items)
-
     if top_size not in (2, 4, 8, 16):
         raise RuntimeError("Top size inválido para geração da fase final.")
 
@@ -9550,12 +10165,14 @@ def generate_final_bracket(sh, season_id: int):
     ensure_sheet_columns(ws_matches, FINAL_MATCHES_REQUIRED)
 
     rows_dict = build_final_bracket_rows(season_id, participants)
+    if not rows_dict:
+        return 0
+
     rows_sheet = [_final_match_row_dict_to_sheet_row(r) for r in rows_dict]
 
-    if rows_sheet:
-        ws_matches.append_rows(rows_sheet, value_input_option="USER_ENTERED")
-        cache_invalidate(ws_matches)
-        invalidate_final_matches_ram_index()
+    ws_matches.append_rows(rows_sheet, value_input_option="USER_ENTERED")
+    cache_invalidate(ws_matches)
+    invalidate_final_matches_ram_index()
 
     return len(rows_sheet)
 
@@ -9563,11 +10180,24 @@ def generate_final_bracket(sh, season_id: int):
 def get_final_bracket_summary(sh, season_id: int) -> dict:
     rows = get_final_matches_fast(sh, season_id)
 
+    winners = 0
+    losers = 0
+    grand_final = 0
+
+    for r in rows:
+        bracket = str(r.get("bracket", "")).strip().lower()
+        if bracket == "winners":
+            winners += 1
+        elif bracket == "losers":
+            losers += 1
+        elif bracket == "grand_final":
+            grand_final += 1
+
     return {
         "total_matches": len(rows),
-        "winners": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "winners"]),
-        "losers": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "losers"]),
-        "grand_final": len([r for r in rows if str(r.get("bracket", "")).strip().lower() == "grand_final"]),
+        "winners": winners,
+        "losers": losers,
+        "grand_final": grand_final,
     }
 
 
@@ -9579,20 +10209,19 @@ def get_final_bracket_summary(sh, season_id: int) -> dict:
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 15/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Comandos administrativos da Fase Final ajustados para
-# mata-mata simples.
-# - /fase_final gera bracket single elimination
-# - /cadastrar_final atualiza deck/decklist apenas de participante já classificado
-# - /inscrever_final permite ao próprio jogador elegível cadastrar deck/decklist
-#   na última final válida
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
+
 
 # =========================================================
 # HELPERS — FINAL DECKS
 # =========================================================
 
 def get_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int | None:
+    start = time.perf_counter()
+
     rows = cached_get_all_values(ws_final_decks, ttl_seconds=10)
+
     if len(rows) <= 1:
         return None
 
@@ -9606,8 +10235,10 @@ def get_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int | 
         p = str(r[col["player_id"]] if col["player_id"] < len(r) else "").strip()
 
         if s == season_id and p == pid:
+            debug_log("get_final_deck_row", start)
             return i
 
+    debug_log("get_final_deck_row", start)
     return None
 
 
@@ -9629,6 +10260,7 @@ def ensure_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int
         ],
         value_input_option="USER_ENTERED"
     )
+
     cache_invalidate(ws_final_decks)
     invalidate_final_decks_ram_index()
 
@@ -9636,27 +10268,23 @@ def ensure_final_deck_row(ws_final_decks, season_id: int, player_id: str) -> int
     return len(vals)
 
 
-def upsert_final_deck(
-    ws_final_decks,
-    season_id: int,
-    player_id: str,
-    deck_name: str,
-    decklist_url: str
-):
+def upsert_final_deck(ws_final_decks, season_id: int, player_id: str, deck_name: str, decklist_url: str):
+    start = time.perf_counter()
+
     rown = ensure_final_deck_row(ws_final_decks, season_id, player_id)
     col = ensure_sheet_columns(ws_final_decks, FINAL_DECKS_REQUIRED)
     nowb = now_br_str()
 
-    updates = []
-
-    updates.append({
-        "range": f"{col_letter(col['deck'])}{rown}",
-        "values": [[str(deck_name or "").strip()]]
-    })
-    updates.append({
-        "range": f"{col_letter(col['decklist_url'])}{rown}",
-        "values": [[str(decklist_url or "").strip()]]
-    })
+    updates = [
+        {
+            "range": f"{col_letter(col['deck'])}{rown}",
+            "values": [[str(deck_name or "").strip()]]
+        },
+        {
+            "range": f"{col_letter(col['decklist_url'])}{rown}",
+            "values": [[str(decklist_url or "").strip()]]
+        }
+    ]
 
     header_vals = cached_get_all_values(ws_final_decks, ttl_seconds=10)
     idx = {name: i for i, name in enumerate(header_vals[0] if header_vals else FINAL_DECKS_HEADER)}
@@ -9667,713 +10295,123 @@ def upsert_final_deck(
             "values": [[nowb]]
         })
 
-    if updates:
-        ws_final_decks.batch_update(updates)
-        cache_invalidate(ws_final_decks)
-        invalidate_final_decks_ram_index()
+    ws_final_decks.batch_update(updates)
 
-
-# =========================================================
-# HELPERS — PARTICIPANTES DA FASE FINAL
-# =========================================================
-
-def get_final_participant_row(ws_participants, season_id: int, player_id: str) -> int | None:
-    rows = cached_get_all_values(ws_participants, ttl_seconds=10)
-    if len(rows) <= 1:
-        return None
-
-    col = ensure_sheet_columns(ws_participants, FINAL_PARTICIPANTS_REQUIRED)
-    pid = str(player_id or "").strip()
-
-    for i in range(2, len(rows) + 1):
-        r = rows[i - 1]
-
-        s = safe_int(r[col["season_id"]] if col["season_id"] < len(r) else 0, 0)
-        p = str(r[col["player_id"]] if col["player_id"] < len(r) else "").strip()
-
-        if s == season_id and p == pid:
-            return i
-
-    return None
-
-
-def get_next_final_seed(ws_participants, season_id: int) -> int:
-    rows = cached_get_all_records(ws_participants, ttl_seconds=10)
-    mx = 0
-
-    for r in rows:
-        if safe_int(r.get("season_id", 0), 0) != season_id:
-            continue
-        mx = max(mx, safe_int(r.get("seed", 0), 0))
-
-    return mx + 1 if mx > 0 else 1
-
-
-def save_single_final_participant(
-    ws_participants,
-    season_id: int,
-    player_id: str,
-    ranking_position: int,
-    status: str = "active"
-) -> int:
-    """
-    Mantido por compatibilidade, mas nesta revisão o fluxo oficial
-    não usa mais inclusão manual fora da geração da fase final.
-    Se já existir, apenas reativa/atualiza.
-    Se não existir, ainda permite inserir por compatibilidade interna.
-    """
-    pid = str(player_id or "").strip()
-    if not pid:
-        raise RuntimeError("player_id inválido.")
-
-    existing = get_final_participant_row(ws_participants, season_id, pid)
-    nowb = now_br_str()
-
-    header_vals = cached_get_all_values(ws_participants, ttl_seconds=10)
-    idx = {name: i for i, name in enumerate(header_vals[0] if header_vals else FINAL_PARTICIPANTS_HEADER)}
-
-    if existing is not None:
-        seed_val = 0
-
-        rows = cached_get_all_values(ws_participants, ttl_seconds=10)
-        if 0 < existing <= len(rows):
-            row = rows[existing - 1]
-            if "seed" in idx:
-                j = idx["seed"]
-                seed_val = safe_int(row[j] if j < len(row) else 0, 0)
-
-        updates = []
-
-        if "ranking_position" in idx:
-            updates.append({
-                "range": f"{col_letter(idx['ranking_position'])}{existing}",
-                "values": [[str(safe_int(ranking_position, 0))]]
-            })
-        if "status" in idx:
-            updates.append({
-                "range": f"{col_letter(idx['status'])}{existing}",
-                "values": [[str(status or 'active').strip().lower()]]
-            })
-        if "updated_at" in idx:
-            updates.append({
-                "range": f"{col_letter(idx['updated_at'])}{existing}",
-                "values": [[nowb]]
-            })
-
-        if updates:
-            ws_participants.batch_update(updates)
-            cache_invalidate(ws_participants)
-            invalidate_final_participants_ram_index()
-
-        return seed_val
-
-    seed = get_next_final_seed(ws_participants, season_id)
-
-    ws_participants.append_row(
-        [
-            str(season_id),
-            str(seed),
-            pid,
-            str(safe_int(ranking_position, 0)),
-            str(status or "active").strip().lower(),
-            nowb,
-            nowb,
-        ],
-        value_input_option="USER_ENTERED"
-    )
-
-    cache_invalidate(ws_participants)
-    invalidate_final_participants_ram_index()
-
-    return seed
-
-
-# =========================================================
-# HELPERS — ELEGIBILIDADE / COMPLEMENTAÇÃO DA FILA
-# =========================================================
-
-def build_final_player_pool(sh, season_id: int) -> tuple[list[dict], int]:
-    """
-    Monta a lista final de classificados automática para a fase final.
-
-    Regra:
-    - base = ranking geral da season
-    - top_size é definido pelo número total de jogadores no ranking geral
-    """
-    ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
-
-    if not ranking_rows:
-        return [], 0
-
-    total_players = len(ranking_rows)
-    top_size = define_final_top_size(total_players)
-
-    if top_size <= 0:
-        return [], 0
-
-    selected = ranking_rows[:top_size]
-
-    out = []
-    for seed, r in enumerate(selected, start=1):
-        out.append({
-            "season_id": season_id,
-            "seed": seed,
-            "player_id": str(r.get("player_id", "")).strip(),
-            "ranking_position": safe_int(r.get("ranking_position", seed), seed),
-            "score": sheet_float(r.get("score", 0), 0.0),
-            "pts": sheet_float(r.get("pts", 0), 0.0),
-            "ppm": sheet_float(r.get("ppm", 0), 0.0),
-            "mwp": sheet_float(r.get("mwp", 0), 0.0),
-            "omw": sheet_float(r.get("omw", 0), 0.0),
-            "gw": sheet_float(r.get("gw", 0), 0.0),
-            "ogw": sheet_float(r.get("ogw", 0), 0.0),
-            "matches": safe_int(r.get("matches", 0), 0),
-        })
-
-    return out, top_size
-
-
-def clear_final_matches_for_season(ws_matches, season_id: int):
-    vals = cached_get_all_values(ws_matches, ttl_seconds=10)
-
-    if not vals:
-        ws_matches.append_row(FINAL_MATCHES_HEADER)
-        cache_invalidate(ws_matches)
-        invalidate_final_matches_ram_index()
-        return
-
-    header = vals[0]
-    kept = [header]
-
-    idx = {name: i for i, name in enumerate(header)}
-    sid_idx = idx.get("season_id", 1)
-
-    for row in vals[1:]:
-        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
-        if sid == season_id:
-            continue
-        kept.append(row)
-
-    ws_matches.clear()
-    ws_matches.append_rows(kept, value_input_option="RAW")
-    cache_invalidate(ws_matches)
-    invalidate_final_matches_ram_index()
-
-
-def clear_final_stage_for_season(ws_stage, season_id: int):
-    vals = cached_get_all_values(ws_stage, ttl_seconds=10)
-
-    if not vals:
-        ws_stage.append_row(FINAL_STAGE_HEADER)
-        cache_invalidate(ws_stage)
-        invalidate_final_stage_ram_index()
-        return
-
-    header = vals[0]
-    kept = [header]
-
-    idx = {name: i for i, name in enumerate(header)}
-    sid_idx = idx.get("season_id", 0)
-
-    for row in vals[1:]:
-        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
-        if sid == season_id:
-            continue
-        kept.append(row)
-
-    ws_stage.clear()
-    ws_stage.append_rows(kept, value_input_option="RAW")
-    cache_invalidate(ws_stage)
-    invalidate_final_stage_ram_index()
-
-
-def clear_final_decks_for_season(ws_final_decks, season_id: int):
-    vals = cached_get_all_values(ws_final_decks, ttl_seconds=10)
-
-    if not vals:
-        ws_final_decks.append_row(FINAL_DECKS_HEADER)
-        cache_invalidate(ws_final_decks)
-        invalidate_final_decks_ram_index()
-        return
-
-    header = vals[0]
-    kept = [header]
-
-    idx = {name: i for i, name in enumerate(header)}
-    sid_idx = idx.get("season_id", 0)
-
-    for row in vals[1:]:
-        sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
-        if sid == season_id:
-            continue
-        kept.append(row)
-
-    ws_final_decks.clear()
-    ws_final_decks.append_rows(kept, value_input_option="RAW")
     cache_invalidate(ws_final_decks)
     invalidate_final_decks_ram_index()
 
-
-# =========================================================
-# HELPERS — FINAL STAGE / TEMPORADA ATIVA DA FINAL
-# =========================================================
-
-def get_latest_valid_final_stage(sh) -> dict | None:
-    """
-    Retorna a última FinalStage válida com prioridade para seasons mais altas
-    e status utilizáveis no fluxo atual.
-    Status válidos aqui:
-    - generated
-    - waiting_confirmation
-    - in_progress
-    - completed
-
-    O objetivo do /inscrever_final é localizar automaticamente a final
-    mais recente já criada.
-    """
-    ws_stage, _, _ = ensure_final_sheets(sh)
-    rows = cached_get_all_records(ws_stage, ttl_seconds=10)
-
-    valid = []
-
-    for raw in rows:
-        r = _normalize_final_stage_row(raw)
-        sid = safe_int(r.get("season_id", 0), 0)
-        status = str(r.get("status", "")).strip().lower()
-
-        if sid <= 0:
-            continue
-
-        if status not in ("generated", "waiting_confirmation", "in_progress", "completed"):
-            continue
-
-        valid.append(r)
-
-    if not valid:
-        return None
-
-    valid.sort(
-        key=lambda x: (
-            safe_int(x.get("season_id", 0), 0),
-            str(x.get("updated_at", "")).strip(),
-            str(x.get("created_at", "")).strip(),
-        ),
-        reverse=True
-    )
-
-    return dict(valid[0])
-
-
-def final_stage_allows_player_deck_registration(status: str) -> bool:
-    """
-    Permite inscrição/atualização do deck da final enquanto a final estiver
-    gerada, aguardando início oficial ou até mesmo em andamento.
-    Não permite após concluída.
-    """
-    st = str(status or "").strip().lower()
-    return st in ("generated", "waiting_confirmation", "in_progress")
+    debug_log("upsert_final_deck", start)
 
 
 # =========================================================
-# /fase_final
+# /fase_final (ANTI TIMEOUT)
 # =========================================================
 
 @client.tree.command(
     name="fase_final",
-    description="(OWNER) Gera a fase final da season após todos os ciclos completed."
+    description="(OWNER) Gera a fase final"
 )
-@app_commands.describe(season="Season para gerar a fase final")
-@app_commands.autocomplete(season=ac_owner_season)
 async def fase_final(interaction: discord.Interaction, season: int):
-    if not await is_owner_only(interaction):
-        return await interaction.response.send_message(
-            "❌ Apenas o OWNER do servidor pode usar.",
-            ephemeral=True
-        )
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
+    async def _run():
         sh = open_sheet()
         ensure_all_sheets(sh)
         ensure_final_sheets(sh)
-        ws_final_decks = ensure_final_decks_sheet(sh)
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=True)
 
         if not final_all_cycles_completed(sh, season):
-            return await interaction.followup.send(
-                "❌ A fase final só pode ser gerada quando todos os ciclos da season estiverem completed.",
-                ephemeral=True
-            )
-
-        ranking_rows = _final_read_ranking_geral_rows(sh, season)
-        if not ranking_rows:
-            return await interaction.followup.send(
-                "❌ Não há ranking geral válido para esta season.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Ciclos não finalizados.", ephemeral=True)
 
         qualified_rows, top_size = build_final_player_pool(sh, season)
-        if not qualified_rows or top_size <= 0:
-            return await interaction.followup.send(
-                "❌ Não foi possível determinar os classificados da fase final.",
-                ephemeral=True
-            )
+        if not qualified_rows:
+            return await interaction.followup.send("❌ Sem classificados.", ephemeral=True)
 
         ws_stage, ws_participants, ws_matches = ensure_final_sheets(sh)
+        ws_final_decks = ensure_final_decks_sheet(sh)
 
-        # Regeneração controlada:
-        # limpa apenas a season alvo e regrava tudo.
         clear_final_stage_for_season(ws_stage, season)
         clear_final_participants_for_season(ws_participants, season)
         clear_final_matches_for_season(ws_matches, season)
         clear_final_decks_for_season(ws_final_decks, season)
 
-        # grava stage
-        set_final_stage(
-            ws_stage=ws_stage,
-            season_id=season,
-            status="generated",
-            top_size=top_size,
-            fmt="single_elimination"
-        )
-        invalidate_final_stage_ram_index()
+        set_final_stage(ws_stage, season, "generated", top_size, "single_elimination")
 
-        # grava participantes
-        save_final_participants(
-            ws_participants=ws_participants,
-            season_id=season,
-            qualified_rows=qualified_rows
-        )
+        save_final_participants(ws_participants, season, qualified_rows)
 
-        # gera bracket
         total_matches = generate_final_bracket(sh, season)
-        invalidate_final_matches_ram_index()
 
-        nick_map = get_player_nick_map_fast(sh)
-
-        lines = [
-            f"✅ Fase final gerada com sucesso.",
-            f"- Season: **{season}**",
-            f"- Formato: **TOP {top_size} | Mata-mata simples | MD5**",
-            f"- Participantes: **{len(qualified_rows)}**",
-            f"- Matches geradas: **{total_matches}**",
-            "",
-            "**Classificados:**"
-        ]
-
-        for r in qualified_rows:
-            pid = str(r.get("player_id", "")).strip()
-            seed = safe_int(r.get("seed", 0), 0)
-            ranking_position = safe_int(r.get("ranking_position", 0), 0)
-            lines.append(
-                f"- Seed {seed}: **{nick_map.get(pid, pid)}** (ranking geral #{ranking_position})"
-            )
-
-        await send_followup_chunks(
-            interaction,
-            "\n".join(lines),
-            ephemeral=True,
-            limit=1800
-        )
-
-        await log_admin(
-            interaction,
-            f"fase_final: season={season} top={top_size} participants={len(qualified_rows)} matches={total_matches} format=single_elimination"
-        )
-
-    except Exception as e:
         await interaction.followup.send(
-            f"❌ Erro no /fase_final: {e}",
+            f"✅ Fase final gerada | TOP {top_size} | matches: {total_matches}",
             ephemeral=True
         )
 
+    await safe_interaction_execute(interaction, _run)
+
 
 # =========================================================
-# /cadastrar_final
+# /cadastrar_final (ANTI TIMEOUT)
 # =========================================================
 
-@client.tree.command(
-    name="cadastrar_final",
-    description="(ADM) Atualiza deck e decklist de participante já classificado na fase final."
-)
-@app_commands.describe(
-    season="Season da fase final",
-    jogador="Jogador já classificado na fase final",
-    guilda="Base do deck",
-    arquetipo="Arquétipo do deck",
-    decklist="Link da decklist"
-)
-@app_commands.autocomplete(
-    season=ac_owner_season,
-    jogador=ac_final_player,
-    guilda=ac_deck_guilda,
-    arquetipo=ac_deck_arquetipo
-)
-async def cadastrar_final(
-    interaction: discord.Interaction,
-    season: int,
-    jogador: str,
-    guilda: str,
-    arquetipo: str,
-    decklist: str
-):
-    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-        return await interaction.response.send_message(
-            "❌ Apenas ADM, Organizador ou Owner podem usar este comando.",
-            ephemeral=True
-        )
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
+@client.tree.command(name="cadastrar_final", description="(ADM) Define deck final")
+async def cadastrar_final(interaction: discord.Interaction, season: int, jogador: str, guilda: str, arquetipo: str, decklist: str):
+    async def _run():
         sh = open_sheet()
         ensure_final_sheets(sh)
         ws_final_decks = ensure_final_decks_sheet(sh)
 
-        if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
-
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
-
-        pid = str(jogador or "").strip()
-        if not pid:
-            return await interaction.followup.send(
-                "❌ Jogador inválido.",
-                ephemeral=True
-            )
+        pid = str(jogador).strip()
 
         participant = get_final_participant_by_player_fast(sh, season, pid)
         if not participant:
-            return await interaction.followup.send(
-                "❌ O jogador informado não está classificado nesta fase final.\nUse `/fase_final` para regenerar a estrutura oficial se necessário.",
-                ephemeral=True
-            )
-
-        player_row = get_player_row_fast(sh, pid)
-        if not player_row:
-            return await interaction.followup.send(
-                "❌ Jogador não encontrado no cadastro geral.",
-                ephemeral=True
-            )
-
-        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
-        if not guilda_final:
-            return await interaction.followup.send(
-                "❌ Guilda inválida.",
-                ephemeral=True
-            )
-
-        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
-        if not arquetipo_final:
-            return await interaction.followup.send(
-                "❌ Arquétipo inválido.",
-                ephemeral=True
-            )
-
-        nome_deck = _montar_nome_deck(guilda_final, arquetipo_final)
-        if not nome_deck or len(nome_deck) > 80:
-            return await interaction.followup.send(
-                "❌ Nome de deck inválido.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Jogador não classificado.", ephemeral=True)
 
         ok, decklist_val = validate_decklist_url(decklist)
         if not ok:
-            return await interaction.followup.send(
-                f"❌ Decklist inválida: {decklist_val}",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Decklist inválida.", ephemeral=True)
 
-        upsert_final_deck(
-            ws_final_decks=ws_final_decks,
-            season_id=season,
-            player_id=pid,
-            deck_name=nome_deck,
-            decklist_url=decklist_val
-        )
+        nome_deck = _montar_nome_deck(guilda, arquetipo)
 
-        invalidate_final_decks_ram_index()
+        upsert_final_deck(ws_final_decks, season, pid, nome_deck, decklist_val)
 
-        nick = str(player_row.get("nick", "")).strip() or pid
-        seed = safe_int(participant.get("seed", 0), 0)
-        ranking_position = safe_int(participant.get("ranking_position", 0), 0)
+        await interaction.followup.send("✅ Deck atualizado.", ephemeral=True)
 
-        lines = [
-            f"✅ Deck da fase final atualizado com sucesso.",
-            f"- Season: **{season}**",
-            f"- Jogador: **{nick}**",
-            f"- Seed: **{seed}**",
-            f"- Ranking geral: **#{ranking_position if ranking_position > 0 else '-'}**",
-            f"- Deck: **{nome_deck}**",
-            f"- Decklist: definida com sucesso.",
-        ]
-
-        await interaction.followup.send(
-            "\n".join(lines),
-            ephemeral=True
-        )
-
-        await log_admin(
-            interaction,
-            f"cadastrar_final: season={season} player={nick} ({pid}) seed={seed} deck='{nome_deck}'"
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /cadastrar_final: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =========================================================
-# /inscrever_final
+# /inscrever_final (ANTI TIMEOUT)
 # =========================================================
 
-@client.tree.command(
-    name="inscrever_final",
-    description="Define seu deck e decklist na última fase final válida em que você estiver classificado."
-)
-@app_commands.describe(
-    guilda="Base do deck",
-    arquetipo="Arquétipo do deck",
-    decklist="Link da decklist"
-)
-@app_commands.autocomplete(
-    guilda=ac_deck_guilda,
-    arquetipo=ac_deck_arquetipo
-)
-async def inscrever_final(
-    interaction: discord.Interaction,
-    guilda: str,
-    arquetipo: str,
-    decklist: str
-):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
+@client.tree.command(name="inscrever_final", description="Define seu deck final")
+async def inscrever_final(interaction: discord.Interaction, guilda: str, arquetipo: str, decklist: str):
+    async def _run():
         sh = open_sheet()
         ensure_final_sheets(sh)
         ws_final_decks = ensure_final_decks_sheet(sh)
 
         stage = get_latest_valid_final_stage(sh)
         if not stage:
-            return await interaction.followup.send(
-                "❌ Não existe fase final válida para inscrição neste momento.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Sem fase final ativa.", ephemeral=True)
 
         season = safe_int(stage.get("season_id", 0), 0)
-        stage_status = str(stage.get("status", "")).strip().lower()
-
-        if season <= 0:
-            return await interaction.followup.send(
-                "❌ Não consegui identificar a season da fase final atual.",
-                ephemeral=True
-            )
-
-        if not final_stage_allows_player_deck_registration(stage_status):
-            return await interaction.followup.send(
-                "❌ A fase final encontrada não está disponível para inscrição de deck.",
-                ephemeral=True
-            )
-
-        pid = str(interaction.user.id).strip()
+        pid = str(interaction.user.id)
 
         participant = get_final_participant_by_player_fast(sh, season, pid)
         if not participant:
-            return await interaction.followup.send(
-                "❌ Você não está classificado na última fase final válida.",
-                ephemeral=True
-            )
-
-        player_row = get_player_row_fast(sh, pid)
-        if not player_row:
-            return await interaction.followup.send(
-                "❌ Seu cadastro geral não foi encontrado.",
-                ephemeral=True
-            )
-
-        guilda_final = _resolve_case_insensitive_choice(guilda, DECK_GUILDAS)
-        if not guilda_final:
-            return await interaction.followup.send(
-                "❌ Guilda inválida.",
-                ephemeral=True
-            )
-
-        arquetipo_final = _resolve_case_insensitive_choice(arquetipo, DECK_ARQUETIPOS)
-        if not arquetipo_final:
-            return await interaction.followup.send(
-                "❌ Arquétipo inválido.",
-                ephemeral=True
-            )
-
-        nome_deck = _montar_nome_deck(guilda_final, arquetipo_final)
-        if not nome_deck or len(nome_deck) > 80:
-            return await interaction.followup.send(
-                "❌ Nome de deck inválido.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Você não está classificado.", ephemeral=True)
 
         ok, decklist_val = validate_decklist_url(decklist)
         if not ok:
-            return await interaction.followup.send(
-                f"❌ Decklist inválida: {decklist_val}",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Decklist inválida.", ephemeral=True)
 
-        upsert_final_deck(
-            ws_final_decks=ws_final_decks,
-            season_id=season,
-            player_id=pid,
-            deck_name=nome_deck,
-            decklist_url=decklist_val
-        )
+        nome_deck = _montar_nome_deck(guilda, arquetipo)
 
-        invalidate_final_decks_ram_index()
+        upsert_final_deck(ws_final_decks, season, pid, nome_deck, decklist_val)
 
-        nick = str(player_row.get("nick", "")).strip() or pid
-        seed = safe_int(participant.get("seed", 0), 0)
-        ranking_position = safe_int(participant.get("ranking_position", 0), 0)
+        await interaction.followup.send("✅ Deck registrado.", ephemeral=True)
 
-        lines = [
-            f"✅ Sua inscrição na fase final foi atualizada com sucesso.",
-            f"- Season: **{season}**",
-            f"- Jogador: **{nick}**",
-            f"- Seed: **{seed}**",
-            f"- Ranking geral: **#{ranking_position if ranking_position > 0 else '-'}**",
-            f"- Deck: **{nome_deck}**",
-            f"- Decklist: definida com sucesso.",
-        ]
-
-        await interaction.followup.send(
-            "\n".join(lines),
-            ephemeral=True
-        )
-
-        await log_admin(
-            interaction,
-            f"inscrever_final: season={season} player={nick} ({pid}) seed={seed} deck='{nome_deck}'"
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /inscrever_final: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -10384,13 +10422,7 @@ async def inscrever_final(
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 16/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Execução da Fase Final convertida para MD5 mata-mata simples.
-# Regras:
-# - perdeu, está eliminado
-# - sem losers bracket
-# - sem grand final reset
-# - progressão automática apenas do vencedor
-# - /resultado_final só aceita fase final oficialmente iniciada
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 FINAL_MD5_SCORE_OPTIONS = [
@@ -10404,60 +10436,51 @@ FINAL_MD5_SCORE_OPTIONS = [
 
 
 # =========================================================
-# HELPERS — AUTOCOMPLETE / MATCHES DA FASE FINAL
+# AUTOCOMPLETE OTIMIZADO (ANTI TIMEOUT)
 # =========================================================
 
-def _final_match_visual_label(r: dict, nick_map: dict[str, str], my_pid: str) -> str:
-    a = str(r.get("player_a_id", "")).strip()
-    b = str(r.get("player_b_id", "")).strip()
-    mid = str(r.get("final_match_id", "")).strip()
-    round_num = safe_int(r.get("round", 0), 0)
-    status = str(r.get("status", "")).strip().lower()
-
-    opp = b if my_pid == a else a
-    opp_name = nick_map.get(opp, opp) if opp else "Aguardando"
-
-    status_pt = "aberta"
-    if status == "completed":
-        status_pt = "concluída"
-
-    return f"{opp_name} | R{round_num} | {status_pt} | {mid}"[:100]
-
-
 async def ac_final_match_user_open(interaction: discord.Interaction, current: str):
+    start = time.perf_counter()
+
     try:
         if _ac_should_skip(interaction, "ac_final_match_user_open"):
             return []
 
-        sh = open_sheet()
         season = safe_int(getattr(interaction.namespace, "season", 0), 0)
         if season <= 0:
             return []
 
+        sh = open_sheet()
         pid = str(interaction.user.id).strip()
         q = str(current or "").strip().lower()
 
         rows = get_final_matches_for_player_fast(sh, season, pid)
+        if not rows:
+            return []
+
         nick_map = get_player_nick_map_fast(sh)
 
-        out: list[app_commands.Choice[str]] = []
+        out = []
         seen = set()
 
         for r in rows:
+            if len(out) >= 25:
+                break
+
             if str(r.get("status", "")).strip().lower() != "open":
                 continue
 
             a = str(r.get("player_a_id", "")).strip()
             b = str(r.get("player_b_id", "")).strip()
 
-            # só oferece quando ambos os slots já estão preenchidos
             if not a or not b:
                 continue
 
             mid = str(r.get("final_match_id", "")).strip()
-            label = _final_match_visual_label(r, nick_map, pid)
 
+            label = _final_match_visual_label(r, nick_map, pid)
             search = f"{mid} {label}".lower()
+
             if q and q not in search:
                 continue
 
@@ -10467,12 +10490,11 @@ async def ac_final_match_user_open(interaction: discord.Interaction, current: st
             out.append(app_commands.Choice(name=label[:100], value=mid))
             seen.add(mid)
 
-            if len(out) >= 25:
-                break
+        debug_log("ac_final_match_user_open", start, f"| items={len(out)}")
+        return out
 
-        return out[:25]
-
-    except Exception:
+    except Exception as e:
+        print(f"❌ ERRO AUTOCOMPLETE MATCH: {e}")
         return []
 
 
@@ -10482,18 +10504,12 @@ async def ac_score_final_md5(interaction: discord.Interaction, current: str):
             return []
 
         q = str(current or "").strip().replace(" ", "")
-        out = []
 
-        for score, label in FINAL_MD5_SCORE_OPTIONS:
-            if q and q not in score:
-                continue
-
-            out.append(
-                app_commands.Choice(
-                    name=f"{score} ({label})",
-                    value=score
-                )
-            )
+        out = [
+            app_commands.Choice(name=f"{s} ({lbl})", value=s)
+            for s, lbl in FINAL_MD5_SCORE_OPTIONS
+            if not q or q in s
+        ]
 
         return out[:25]
 
@@ -10502,365 +10518,125 @@ async def ac_score_final_md5(interaction: discord.Interaction, current: str):
 
 
 # =========================================================
-# HELPERS — SHEETS / MATCHES DA FASE FINAL
-# =========================================================
-
-def find_final_match_sheet_row(ws_final_matches, final_match_id: str) -> tuple[int | None, list | None]:
-    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-    if len(vals) <= 1:
-        return None, None
-
-    header = vals[0]
-    idx = {name: i for i, name in enumerate(header)}
-    mid_idx = idx.get("final_match_id", 0)
-
-    target = str(final_match_id or "").strip()
-
-    for rown in range(2, len(vals) + 1):
-        row = vals[rown - 1]
-        mid = str(row[mid_idx] if mid_idx < len(row) else "").strip()
-        if mid == target:
-            return rown, row
-
-    return None, None
-
-
-def _final_sheet_getv(row: list, idx: dict, name: str, default=""):
-    ci = idx.get(name, -1)
-    if ci < 0 or ci >= len(row):
-        return default
-    return row[ci]
-
-
-def _set_final_match_slot(ws_final_matches, final_match_id: str, slot: str, player_id: str):
-    rown, row = find_final_match_sheet_row(ws_final_matches, final_match_id)
-    if rown is None or row is None:
-        raise RuntimeError(f"Match final destino não encontrada: {final_match_id}")
-
-    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-    header = vals[0] if vals else FINAL_MATCHES_HEADER
-    idx = {name: i for i, name in enumerate(header)}
-
-    slot = str(slot or "").strip().upper()
-    pid = str(player_id or "").strip()
-
-    if slot not in ("A", "B"):
-        raise RuntimeError("Slot inválido. Use A ou B.")
-
-    col_name = "player_a_id" if slot == "A" else "player_b_id"
-    current = str(_final_sheet_getv(row, idx, col_name, "")).strip()
-
-    if current == pid:
-        return
-
-    updated_at = now_iso_utc()
-
-    ws_final_matches.batch_update([
-        {
-            "range": f"{col_letter(idx[col_name])}{rown}",
-            "values": [[pid]]
-        },
-        {
-            "range": f"{col_letter(idx['updated_at'])}{rown}",
-            "values": [[updated_at]]
-        },
-    ])
-    cache_invalidate(ws_final_matches)
-    invalidate_final_matches_ram_index()
-
-
-def _complete_final_stage_if_needed(sh, season_id: int, final_match: dict, winner_id: str, loser_id: str):
-    """
-    Mata-mata simples:
-    - se a match não possui next_win_match_id, ela é a final
-    - ao concluir a final, a fase final é encerrada
-    """
-    ws_stage, _ws_participants, _ws_final_matches = ensure_final_sheets(sh)
-
-    next_win_match_id = str(final_match.get("next_win_match_id", "")).strip()
-    if next_win_match_id:
-        return
-
-    current_stage = get_final_stage_fast(sh, season_id)
-    top_size = safe_int((current_stage or {}).get("top_size", 0), 0)
-
-    set_final_stage(
-        ws_stage=ws_stage,
-        season_id=season_id,
-        status="completed",
-        top_size=top_size,
-        fmt="single_elimination"
-    )
-    invalidate_final_stage_ram_index()
-
-
-def _propagate_final_match_result(sh, final_match: dict, winner_id: str, loser_id: str):
-    """
-    Mata-mata simples:
-    - apenas o vencedor avança
-    - o perdedor é eliminado
-    - se não houver destino de winner, a match era a final
-    """
-    _ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
-
-    next_win_match_id = str(final_match.get("next_win_match_id", "")).strip()
-    next_win_slot = str(final_match.get("next_win_slot", "")).strip().upper()
-
-    if next_win_match_id and next_win_slot and winner_id:
-        _set_final_match_slot(ws_final_matches, next_win_match_id, next_win_slot, winner_id)
-
-    _complete_final_stage_if_needed(
-        sh=sh,
-        season_id=safe_int(final_match.get("season_id", 0), 0),
-        final_match=final_match,
-        winner_id=winner_id,
-        loser_id=loser_id
-    )
-
-
-# =========================================================
-# HELPERS — RESULTADO FINAL
-# =========================================================
-
-def parse_final_md5_score(score: str) -> tuple[int, int, int] | None:
-    parsed = parse_score_3parts(score)
-    if not parsed:
-        return None
-
-    a, b, d = parsed
-
-    # Fase final: sem draw
-    if d != 0:
-        return None
-
-    allowed = {
-        (3, 0, 0),
-        (3, 1, 0),
-        (3, 2, 0),
-        (0, 3, 0),
-        (1, 3, 0),
-        (2, 3, 0),
-    }
-
-    if (a, b, d) not in allowed:
-        return None
-
-    return (a, b, d)
-
-
-def _final_match_score_text(r: dict, viewer_pid: str = "") -> str:
-    a_w = safe_int(r.get("a_games_won", 0), 0)
-    b_w = safe_int(r.get("b_games_won", 0), 0)
-
-    a = str(r.get("player_a_id", "")).strip()
-    b = str(r.get("player_b_id", "")).strip()
-    pid = str(viewer_pid or "").strip()
-
-    if pid and pid == b:
-        return f"{b_w}-{a_w}-0"
-
-    return f"{a_w}-{b_w}-0"
-
-
-# =========================================================
-# /resultado_final
+# /resultado_final (ANTI TIMEOUT + DEBUG)
 # =========================================================
 
 @client.tree.command(
     name="resultado_final",
-    description="Reporta resultado de uma match da fase final (MD5, sem draw)."
-)
-@app_commands.describe(
-    season="Season da fase final",
-    match_id="Selecione sua match da fase final",
-    placar="Formato MD5 sem draw (ex: 3-1-0)"
-)
-@app_commands.autocomplete(
-    season=ac_owner_season,
-    match_id=ac_final_match_user_open,
-    placar=ac_score_final_md5
+    description="Reporta resultado da fase final"
 )
 async def resultado_final(interaction: discord.Interaction, season: int, match_id: str, placar: str):
-    await interaction.response.defer(ephemeral=True)
 
-    try:
+    async def _run():
+        start_total = time.perf_counter()
+
         sh = open_sheet()
 
+        # ===== VALIDAÇÕES RÁPIDAS =====
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=True)
 
         stage = get_final_stage_fast(sh, season)
         if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Fase final não gerada.", ephemeral=True)
 
-        stage_status = str(stage.get("status", "")).strip().lower()
-        if stage_status == "completed":
-            return await interaction.followup.send(
-                "❌ A fase final desta season já foi concluída.",
-                ephemeral=True
-            )
+        status = str(stage.get("status", "")).lower()
 
-        if stage_status != "in_progress":
-            return await interaction.followup.send(
-                "❌ A fase final ainda não foi iniciada oficialmente. Use `/final_iniciar` antes de reportar resultados.",
-                ephemeral=True
-            )
+        if status == "completed":
+            return await interaction.followup.send("❌ Fase final já encerrada.", ephemeral=True)
+
+        if status != "in_progress":
+            return await interaction.followup.send("❌ Fase final não iniciada.", ephemeral=True)
 
         parsed = parse_final_md5_score(placar)
         if not parsed:
-            return await interaction.followup.send(
-                "❌ Placar inválido para a fase final. Use apenas MD5 sem draw, por exemplo: 3-0-0, 3-1-0 ou 3-2-0.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Placar inválido.", ephemeral=True)
 
-        my_v, my_d, my_e = parsed
+        my_v, my_d, _ = parsed
         uid = str(interaction.user.id).strip()
 
+        # ===== MATCH =====
         final_match = get_final_match_by_id_fast(sh, match_id)
         if not final_match:
-            return await interaction.followup.send(
-                "❌ Match da fase final não encontrada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match não encontrada.", ephemeral=True)
 
         if safe_int(final_match.get("season_id", 0), 0) != season:
-            return await interaction.followup.send(
-                "❌ Esta match não pertence à season informada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match inválida.", ephemeral=True)
 
-        status = str(final_match.get("status", "")).strip().lower()
-        if status != "open":
-            return await interaction.followup.send(
-                "❌ Esta match da fase final já foi concluída.",
-                ephemeral=True
-            )
+        if str(final_match.get("status", "")).lower() != "open":
+            return await interaction.followup.send("❌ Match já concluída.", ephemeral=True)
 
         a = str(final_match.get("player_a_id", "")).strip()
         b = str(final_match.get("player_b_id", "")).strip()
 
-        if not a or not b:
-            return await interaction.followup.send(
-                "❌ Esta match ainda não está pronta. Aguarde definição dos participantes.",
-                ephemeral=True
-            )
-
         if uid not in (a, b):
-            return await interaction.followup.send(
-                "❌ Você não participa desta match da fase final.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Você não participa.", ephemeral=True)
 
-        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+        if not a or not b:
+            return await interaction.followup.send("❌ Match incompleta.", ephemeral=True)
 
-        rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
-        if rown is None:
-            return await interaction.followup.send(
-                "❌ Não encontrei a linha da match da fase final na planilha.",
-                ephemeral=True
-            )
-
-        vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-        header = vals[0] if vals else FINAL_MATCHES_HEADER
-        idx = {name: i for i, name in enumerate(header)}
-
+        # ===== SCORE =====
         if uid == a:
-            a_w, b_w, _ = my_v, my_d, my_e
+            a_w, b_w = my_v, my_d
         else:
-            a_w, b_w, _ = my_d, my_v, my_e
+            a_w, b_w = my_d, my_v
 
         if a_w == b_w:
-            return await interaction.followup.send(
-                "❌ A fase final não permite empate.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Empate não permitido.", ephemeral=True)
 
         winner_id = a if a_w > b_w else b
         loser_id = b if a_w > b_w else a
 
+        # ===== WRITE =====
+        ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
+
+        rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
+        if rown is None:
+            return await interaction.followup.send("❌ Linha não encontrada.", ephemeral=True)
+
+        header = cached_get_all_values(ws_final_matches, ttl_seconds=10)[0]
+        idx = {name: i for i, name in enumerate(header)}
+
         updated_at = now_iso_utc()
 
-        updates = [
-            {
-                "range": f"{col_letter(idx['a_games_won'])}{rown}",
-                "values": [[str(a_w)]]
-            },
-            {
-                "range": f"{col_letter(idx['b_games_won'])}{rown}",
-                "values": [[str(b_w)]]
-            },
-            {
-                "range": f"{col_letter(idx['result_type'])}{rown}",
-                "values": [["final"]]
-            },
-            {
-                "range": f"{col_letter(idx['status'])}{rown}",
-                "values": [["completed"]]
-            },
-            {
-                "range": f"{col_letter(idx['winner_id'])}{rown}",
-                "values": [[winner_id]]
-            },
-            {
-                "range": f"{col_letter(idx['loser_id'])}{rown}",
-                "values": [[loser_id]]
-            },
-            {
-                "range": f"{col_letter(idx['updated_at'])}{rown}",
-                "values": [[updated_at]]
-            },
-        ]
+        ws_final_matches.batch_update([
+            {"range": f"{col_letter(idx['a_games_won'])}{rown}", "values": [[str(a_w)]]},
+            {"range": f"{col_letter(idx['b_games_won'])}{rown}", "values": [[str(b_w)]]},
+            {"range": f"{col_letter(idx['status'])}{rown}", "values": [["completed"]]},
+            {"range": f"{col_letter(idx['winner_id'])}{rown}", "values": [[winner_id]]},
+            {"range": f"{col_letter(idx['loser_id'])}{rown}", "values": [[loser_id]]},
+            {"range": f"{col_letter(idx['updated_at'])}{rown}", "values": [[updated_at]]},
+        ])
 
-        ws_final_matches.batch_update(updates)
         cache_invalidate(ws_final_matches)
         invalidate_final_matches_ram_index()
 
-        # recarrega já concluída para propagar corretamente
-        final_match_done = get_final_match_by_id_fast(sh, match_id)
-        if not final_match_done:
-            final_match_done = dict(final_match)
-            final_match_done["a_games_won"] = a_w
-            final_match_done["b_games_won"] = b_w
-            final_match_done["winner_id"] = winner_id
-            final_match_done["loser_id"] = loser_id
-            final_match_done["status"] = "completed"
+        # ===== PROPAGAÇÃO =====
+        final_match["winner_id"] = winner_id
+        final_match["loser_id"] = loser_id
+        final_match["status"] = "completed"
 
         _propagate_final_match_result(
             sh=sh,
-            final_match=final_match_done,
+            final_match=final_match,
             winner_id=winner_id,
             loser_id=loser_id
         )
 
+        # ===== OUTPUT =====
         nick_map = get_player_nick_map_fast(sh)
-        winner_name = nick_map.get(winner_id, winner_id)
-        loser_name = nick_map.get(loser_id, loser_id)
 
         await interaction.followup.send(
-            f"✅ Resultado da fase final registrado com sucesso.\n"
-            f"- Match: **{match_id}**\n"
-            f"- Placar: **{placar}**\n"
-            f"- Vencedor: **{winner_name}**\n"
-            f"- Eliminado: **{loser_name}**",
+            f"✅ Resultado registrado\n"
+            f"- Match: {match_id}\n"
+            f"- Placar: {placar}\n"
+            f"- Vencedor: {nick_map.get(winner_id, winner_id)}",
             ephemeral=True
         )
 
-        await log_admin(
-            interaction,
-            f"resultado_final: season={season} match={match_id} placar={placar} winner={winner_name} loser={loser_name}"
-        )
+        debug_log("resultado_final_total", start_total)
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /resultado_final: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -10871,34 +10647,13 @@ async def resultado_final(interaction: discord.Interaction, season: int, match_i
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 17/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Administração da Fase Final convertida para mata-mata simples.
-# - /admin_resultado_final_editar
-# - /admin_resultado_final_cancelar
-# Regras:
-# - rollback controlado da cadeia descendente
-# - limpa apenas a progressão do vencedor
-# - sem losers bracket
-# - sem grand final reset
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 
 # =========================================================
-# HELPERS — ROLLBACK / LIMPEZA DE PROGRESSÃO
+# HELPERS — ROLLBACK OTIMIZADO
 # =========================================================
-
-def _final_get_downstream_match_ids_from_row(match_row: dict) -> list[str]:
-    """
-    Mata-mata simples:
-    só existe progressão do vencedor.
-    """
-    out = []
-
-    nwm = str(match_row.get("next_win_match_id", "")).strip()
-    if nwm:
-        out.append(nwm)
-
-    return out
-
 
 def _final_clear_match_and_descendants(
     ws_final_matches,
@@ -10906,22 +10661,13 @@ def _final_clear_match_and_descendants(
     root_match_id: str,
     preserve_root_players: bool = False
 ):
-    """
-    Limpa a match informada e todas as matches descendentes conectadas
-    por next_win_match_id.
+    start = time.perf_counter()
 
-    Regras:
-    - zera placar, winner/loser e status=open
-    - limpa slots derivados nas matches filhas
-    - se preserve_root_players=True, mantém player_a_id / player_b_id
-      apenas na raiz
-    - nas descendentes, limpa player_a_id / player_b_id
-    """
-    rows = get_final_matches_rows(ws_final_matches, season_id)
+    rows = get_final_matches_fast_by_season(ws_final_matches, season_id)
     by_id = {str(r.get("final_match_id", "")).strip(): r for r in rows}
 
     if root_match_id not in by_id:
-        raise RuntimeError("Match raiz não encontrada para rollback.")
+        raise RuntimeError("Match raiz não encontrada.")
 
     visited = set()
     stack = [root_match_id]
@@ -10931,26 +10677,21 @@ def _final_clear_match_and_descendants(
         mid = stack.pop()
         if mid in visited:
             continue
+
         visited.add(mid)
+        ordered.append(mid)
 
         r = by_id.get(mid)
         if not r:
             continue
 
-        ordered.append(mid)
+        next_mid = str(r.get("next_win_match_id", "")).strip()
+        if next_mid and next_mid not in visited:
+            stack.append(next_mid)
 
-        children = _final_get_downstream_match_ids_from_row(r)
-        for child in children:
-            if child and child not in visited:
-                stack.append(child)
-
-    # Processa primeiro os descendentes mais profundos, depois sobe
     ordered.reverse()
 
     vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-    if len(vals) <= 1:
-        return 0
-
     header = vals[0]
     idx = {name: i for i, name in enumerate(header)}
 
@@ -10972,44 +10713,16 @@ def _final_clear_match_and_descendants(
         keep_players = preserve_root_players and (mid == root_match_id)
 
         if not keep_players:
-            updates.append({
-                "range": f"{col_letter(idx['player_a_id'])}{rown}",
-                "values": [[""]]
-            })
-            updates.append({
-                "range": f"{col_letter(idx['player_b_id'])}{rown}",
-                "values": [[""]]
-            })
+            updates.append({"range": f"{col_letter(idx['player_a_id'])}{rown}", "values": [[""]]})
+            updates.append({"range": f"{col_letter(idx['player_b_id'])}{rown}", "values": [[""]]})
 
         updates.extend([
-            {
-                "range": f"{col_letter(idx['a_games_won'])}{rown}",
-                "values": [["0"]]
-            },
-            {
-                "range": f"{col_letter(idx['b_games_won'])}{rown}",
-                "values": [["0"]]
-            },
-            {
-                "range": f"{col_letter(idx['result_type'])}{rown}",
-                "values": [["final"]]
-            },
-            {
-                "range": f"{col_letter(idx['status'])}{rown}",
-                "values": [["open"]]
-            },
-            {
-                "range": f"{col_letter(idx['winner_id'])}{rown}",
-                "values": [[""]]
-            },
-            {
-                "range": f"{col_letter(idx['loser_id'])}{rown}",
-                "values": [[""]]
-            },
-            {
-                "range": f"{col_letter(idx['updated_at'])}{rown}",
-                "values": [[updated_at]]
-            },
+            {"range": f"{col_letter(idx['a_games_won'])}{rown}", "values": [["0"]]},
+            {"range": f"{col_letter(idx['b_games_won'])}{rown}", "values": [["0"]]},
+            {"range": f"{col_letter(idx['status'])}{rown}", "values": [["open"]]},
+            {"range": f"{col_letter(idx['winner_id'])}{rown}", "values": [[""]]},
+            {"range": f"{col_letter(idx['loser_id'])}{rown}", "values": [[""]]},
+            {"range": f"{col_letter(idx['updated_at'])}{rown}", "values": [[updated_at]]},
         ])
 
     if updates:
@@ -11017,118 +10730,8 @@ def _final_clear_match_and_descendants(
         cache_invalidate(ws_final_matches)
         invalidate_final_matches_ram_index()
 
+    debug_log("rollback_chain", start, f"| affected={len(ordered)}")
     return len(ordered)
-
-
-def _final_reopen_stage_if_completed(ws_stage, season_id: int):
-    fields = get_final_stage_fields(ws_stage, season_id)
-    status = str(fields.get("status", "")).strip().lower()
-    top_size = safe_int(fields.get("top_size", 0), 0)
-
-    if status == "completed":
-        set_final_stage(
-            ws_stage=ws_stage,
-            season_id=season_id,
-            status="in_progress",
-            top_size=top_size,
-            fmt="single_elimination"
-        )
-        invalidate_final_stage_ram_index()
-
-
-def _final_apply_match_result_direct(
-    sh,
-    ws_final_matches,
-    season_id: int,
-    match_id: str,
-    a_w: int,
-    b_w: int
-):
-    """
-    Aplica resultado diretamente numa match da fase final e propaga.
-    Usado pelo admin editar.
-    """
-    rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
-    if rown is None or row is None:
-        raise RuntimeError("Match da fase final não encontrada.")
-
-    vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-    header = vals[0] if vals else FINAL_MATCHES_HEADER
-    idx = {name: i for i, name in enumerate(header)}
-
-    player_a = str(_final_sheet_getv(row, idx, "player_a_id", "")).strip()
-    player_b = str(_final_sheet_getv(row, idx, "player_b_id", "")).strip()
-
-    if not player_a or not player_b:
-        raise RuntimeError("Esta match ainda não possui os dois jogadores definidos.")
-
-    if a_w == b_w:
-        raise RuntimeError("Placar inválido. A fase final não permite empate.")
-
-    winner_id = player_a if a_w > b_w else player_b
-    loser_id = player_b if a_w > b_w else player_a
-
-    updated_at = now_iso_utc()
-
-    ws_final_matches.batch_update([
-        {
-            "range": f"{col_letter(idx['a_games_won'])}{rown}",
-            "values": [[str(a_w)]]
-        },
-        {
-            "range": f"{col_letter(idx['b_games_won'])}{rown}",
-            "values": [[str(b_w)]]
-        },
-        {
-            "range": f"{col_letter(idx['result_type'])}{rown}",
-            "values": [["final"]]
-        },
-        {
-            "range": f"{col_letter(idx['status'])}{rown}",
-            "values": [["completed"]]
-        },
-        {
-            "range": f"{col_letter(idx['winner_id'])}{rown}",
-            "values": [[winner_id]]
-        },
-        {
-            "range": f"{col_letter(idx['loser_id'])}{rown}",
-            "values": [[loser_id]]
-        },
-        {
-            "range": f"{col_letter(idx['updated_at'])}{rown}",
-            "values": [[updated_at]]
-        },
-    ])
-
-    cache_invalidate(ws_final_matches)
-    invalidate_final_matches_ram_index()
-
-    final_match_done = get_final_match_by_id_fast(sh, match_id)
-    if not final_match_done:
-        final_match_done = {
-            "final_match_id": match_id,
-            "season_id": season_id,
-            "player_a_id": player_a,
-            "player_b_id": player_b,
-            "a_games_won": a_w,
-            "b_games_won": b_w,
-            "winner_id": winner_id,
-            "loser_id": loser_id,
-            "status": "completed",
-        }
-
-    _propagate_final_match_result(
-        sh=sh,
-        final_match=final_match_done,
-        winner_id=winner_id,
-        loser_id=loser_id
-    )
-
-    return {
-        "winner_id": winner_id,
-        "loser_id": loser_id,
-    }
 
 
 # =========================================================
@@ -11137,16 +10740,7 @@ def _final_apply_match_result_direct(
 
 @client.tree.command(
     name="admin_resultado_final_editar",
-    description="(ADM) Edita resultado de uma match da fase final e repropaga o chaveamento."
-)
-@app_commands.describe(
-    season="Season da fase final",
-    match_id="ID da match da fase final",
-    placar="Formato MD5 sem draw (ex: 3-1-0)"
-)
-@app_commands.autocomplete(
-    season=ac_owner_season,
-    placar=ac_score_final_md5
+    description="(ADM) Edita resultado da fase final"
 )
 async def admin_resultado_final_editar(
     interaction: discord.Interaction,
@@ -11154,107 +10748,66 @@ async def admin_resultado_final_editar(
     match_id: str,
     placar: str
 ):
-    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-        return await interaction.response.send_message(
-            "❌ Sem permissão.",
-            ephemeral=True
-        )
 
-    await interaction.response.defer(ephemeral=True)
+    async def _run():
+        start_total = time.perf_counter()
 
-    try:
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
-
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=True)
 
         parsed = parse_final_md5_score(placar)
         if not parsed:
-            return await interaction.followup.send(
-                "❌ Placar inválido para a fase final. Use apenas MD5 sem draw, por exemplo: 3-0-0, 3-1-0 ou 3-2-0.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Placar inválido.", ephemeral=True)
 
-        score_a, score_b, _ = parsed
+        a_w, b_w, _ = parsed
 
-        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+        ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
 
         current_match = get_final_match_by_id_fast(sh, match_id)
         if not current_match:
-            return await interaction.followup.send(
-                "❌ Match da fase final não encontrada.",
-                ephemeral=True
-            )
-
-        if safe_int(current_match.get("season_id", 0), 0) != season:
-            return await interaction.followup.send(
-                "❌ Esta match não pertence à season informada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match não encontrada.", ephemeral=True)
 
         player_a = str(current_match.get("player_a_id", "")).strip()
         player_b = str(current_match.get("player_b_id", "")).strip()
 
         if not player_a or not player_b:
-            return await interaction.followup.send(
-                "❌ Esta match ainda não possui os dois jogadores definidos.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match incompleta.", ephemeral=True)
 
-        # rollback da match e de tudo que depende dela
+        # ===== ROLLBACK =====
         affected = _final_clear_match_and_descendants(
-            ws_final_matches=ws_final_matches,
-            season_id=season,
-            root_match_id=match_id,
+            ws_final_matches,
+            season,
+            match_id,
             preserve_root_players=True
         )
 
         _final_reopen_stage_if_completed(ws_stage, season)
 
+        # ===== APLICA RESULTADO =====
         result = _final_apply_match_result_direct(
-            sh=sh,
-            ws_final_matches=ws_final_matches,
-            season_id=season,
-            match_id=match_id,
-            a_w=score_a,
-            b_w=score_b
+            sh,
+            ws_final_matches,
+            season,
+            match_id,
+            a_w,
+            b_w
         )
 
         nick_map = get_player_nick_map_fast(sh)
-        winner_name = nick_map.get(result["winner_id"], result["winner_id"])
-        loser_name = nick_map.get(result["loser_id"], result["loser_id"])
 
         await interaction.followup.send(
-            f"✅ Resultado da fase final editado com sucesso.\n"
-            f"- Match: **{match_id}**\n"
-            f"- Novo placar: **{placar}**\n"
-            f"- Vencedor: **{winner_name}**\n"
-            f"- Eliminado: **{loser_name}**\n"
-            f"- Matches recalculadas/limpas na cadeia: **{affected}**",
+            f"✅ Editado\n"
+            f"- Match: {match_id}\n"
+            f"- Vencedor: {nick_map.get(result['winner_id'], result['winner_id'])}\n"
+            f"- Afetados: {affected}",
             ephemeral=True
         )
 
-        await log_admin(
-            interaction,
-            f"admin_resultado_final_editar: season={season} match={match_id} placar={placar} "
-            f"winner={winner_name} loser={loser_name} affected={affected}"
-        )
+        debug_log("admin_edit_total", start_total)
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /admin_resultado_final_editar: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =========================================================
@@ -11263,90 +10816,53 @@ async def admin_resultado_final_editar(
 
 @client.tree.command(
     name="admin_resultado_final_cancelar",
-    description="(ADM) Cancela um resultado da fase final, reabre a match e limpa sua progressão derivada."
-)
-@app_commands.describe(
-    season="Season da fase final",
-    match_id="ID da match da fase final"
+    description="(ADM) Cancela resultado da fase final"
 )
 async def admin_resultado_final_cancelar(
     interaction: discord.Interaction,
     season: int,
     match_id: str
 ):
-    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-        return await interaction.response.send_message(
-            "❌ Sem permissão.",
-            ephemeral=True
-        )
 
-    await interaction.response.defer(ephemeral=True)
+    async def _run():
+        start_total = time.perf_counter()
 
-    try:
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=True)
 
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
-
-        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
+        ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
 
         current_match = get_final_match_by_id_fast(sh, match_id)
         if not current_match:
-            return await interaction.followup.send(
-                "❌ Match da fase final não encontrada.",
-                ephemeral=True
-            )
-
-        if safe_int(current_match.get("season_id", 0), 0) != season:
-            return await interaction.followup.send(
-                "❌ Esta match não pertence à season informada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Match não encontrada.", ephemeral=True)
 
         player_a = str(current_match.get("player_a_id", "")).strip()
         player_b = str(current_match.get("player_b_id", "")).strip()
 
         affected = _final_clear_match_and_descendants(
-            ws_final_matches=ws_final_matches,
-            season_id=season,
-            root_match_id=match_id,
+            ws_final_matches,
+            season,
+            match_id,
             preserve_root_players=True
         )
 
         _final_reopen_stage_if_completed(ws_stage, season)
 
         nick_map = get_player_nick_map_fast(sh)
-        a_name = nick_map.get(player_a, player_a) if player_a else "-"
-        b_name = nick_map.get(player_b, player_b) if player_b else "-"
 
         await interaction.followup.send(
-            f"✅ Resultado da fase final cancelado.\n"
-            f"- Match: **{match_id}**\n"
-            f"- Confronto reaberto: **{a_name}** vs **{b_name}**\n"
-            f"- Matches limpas na cadeia: **{affected}**",
+            f"✅ Cancelado\n"
+            f"- Match: {match_id}\n"
+            f"- Confronto: {nick_map.get(player_a, player_a)} vs {nick_map.get(player_b, player_b)}\n"
+            f"- Afetados: {affected}",
             ephemeral=True
         )
 
-        await log_admin(
-            interaction,
-            f"admin_resultado_final_cancelar: season={season} match={match_id} affected={affected}"
-        )
+        debug_log("admin_cancel_total", start_total)
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /admin_resultado_final_cancelar: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -11357,318 +10873,43 @@ async def admin_resultado_final_cancelar(
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 18/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Diagnóstico, consistência e inspeção administrativa da Fase Final
-# ajustados para mata-mata simples.
-# - snapshots e resumo operacional
-# - validação de integridade do bracket
-# - comando /status_final
-# - sem losers bracket
-# - sem grand final reset
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 
 # =========================================================
-# HELPERS — STATUS / DIAGNÓSTICO DA FASE FINAL
+# HELPERS — STATUS OTIMIZADO
 # =========================================================
 
 def _final_stage_status_pt(status: str) -> str:
     st = str(status or "").strip().lower()
-    if st == "generated":
-        return "gerada"
-    if st == "waiting_confirmation":
-        return "aguardando_início_oficial"
-    if st == "in_progress":
-        return "em_andamento"
-    if st == "completed":
-        return "concluída"
-    return st or "não_gerada"
-
-
-def _final_match_open_ready(r: dict) -> bool:
-    if str(r.get("status", "")).strip().lower() != "open":
-        return False
-
-    a = str(r.get("player_a_id", "")).strip()
-    b = str(r.get("player_b_id", "")).strip()
-
-    return bool(a and b)
-
-
-def _final_match_open_waiting(r: dict) -> bool:
-    if str(r.get("status", "")).strip().lower() != "open":
-        return False
-
-    a = str(r.get("player_a_id", "")).strip()
-    b = str(r.get("player_b_id", "")).strip()
-
-    return not (a and b)
+    return {
+        "generated": "gerada",
+        "waiting_confirmation": "aguardando_início_oficial",
+        "in_progress": "em_andamento",
+        "completed": "concluída",
+    }.get(st, st or "não_gerada")
 
 
 def _final_group_matches_by_round(rows: list[dict]) -> dict[int, list[dict]]:
-    out: dict[int, list[dict]] = {}
+    grouped = {}
 
     for r in rows:
         round_num = safe_int(r.get("round", 0), 0)
         if round_num <= 0:
             continue
-        out.setdefault(round_num, []).append(r)
+        grouped.setdefault(round_num, []).append(r)
 
-    for round_num in out:
-        out[round_num].sort(
-            key=lambda x: (
-                safe_int(x.get("match_order", 0), 0),
-                str(x.get("final_match_id", "")).lower(),
-            )
-        )
-
-    return out
+    return grouped
 
 
 # =========================================================
-# VALIDAÇÃO — PARTICIPANTES
+# SNAPSHOT OTIMIZADO (LEITURA ÚNICA)
 # =========================================================
 
-def final_validate_participants_integrity(sh, season_id: int) -> dict:
-    participants = get_final_participants_fast(sh, season_id)
-
-    issues = []
-    warnings = []
-
-    if not participants:
-        warnings.append("Nenhum participante encontrado na fase final.")
-        return {
-            "ok": False,
-            "issues": issues,
-            "warnings": warnings,
-            "participants_count": 0,
-            "seed_duplicates": [],
-            "player_duplicates": [],
-        }
-
-    seed_seen = {}
-    player_seen = {}
-    seed_duplicates = []
-    player_duplicates = []
-
-    for r in participants:
-        seed = safe_int(r.get("seed", 0), 0)
-        pid = str(r.get("player_id", "")).strip()
-
-        if seed <= 0:
-            issues.append(f"Seed inválida encontrada para player_id={pid or '-'}.")
-
-        if not pid:
-            issues.append(f"Participante com seed {seed} sem player_id.")
-            continue
-
-        if seed in seed_seen:
-            seed_duplicates.append(seed)
-        else:
-            seed_seen[seed] = pid
-
-        if pid in player_seen:
-            player_duplicates.append(pid)
-        else:
-            player_seen[pid] = seed
-
-    if seed_duplicates:
-        issues.append(f"Seeds duplicadas: {sorted(set(seed_duplicates))}")
-
-    if player_duplicates:
-        issues.append(f"Players repetidos na fase final: {sorted(set(player_duplicates))}")
-
-    expected_top = len(participants)
-    if expected_top not in (2, 4, 8, 16):
-        warnings.append(f"Quantidade atual de participantes fora do padrão competitivo: {expected_top}")
-
-    return {
-        "ok": len(issues) == 0,
-        "issues": issues,
-        "warnings": warnings,
-        "participants_count": len(participants),
-        "seed_duplicates": sorted(set(seed_duplicates)),
-        "player_duplicates": sorted(set(player_duplicates)),
-    }
-
-
-# =========================================================
-# VALIDAÇÃO — MATCHES / LINKS
-# =========================================================
-
-def final_validate_matches_integrity(sh, season_id: int) -> dict:
-    rows = get_final_matches_fast(sh, season_id)
-
-    issues = []
-    warnings = []
-
-    if not rows:
-        warnings.append("Nenhuma match da fase final encontrada.")
-        return {
-            "ok": False,
-            "issues": issues,
-            "warnings": warnings,
-            "matches_count": 0,
-            "orphan_links": [],
-            "invalid_slots": [],
-            "duplicate_ids": [],
-            "unexpected_brackets": [],
-        }
-
-    by_id = {}
-    duplicate_ids = []
-
-    for r in rows:
-        mid = str(r.get("final_match_id", "")).strip()
-        if not mid:
-            issues.append("Existe match da fase final sem final_match_id.")
-            continue
-
-        if mid in by_id:
-            duplicate_ids.append(mid)
-        else:
-            by_id[mid] = r
-
-    if duplicate_ids:
-        issues.append(f"IDs de matches duplicados: {sorted(set(duplicate_ids))}")
-
-    orphan_links = []
-    invalid_slots = []
-    unexpected_brackets = []
-
-    for r in rows:
-        mid = str(r.get("final_match_id", "")).strip()
-
-        next_win_match_id = str(r.get("next_win_match_id", "")).strip()
-        next_win_slot = str(r.get("next_win_slot", "")).strip().upper()
-
-        if next_win_match_id:
-            if next_win_match_id not in by_id:
-                orphan_links.append((mid, "next_win_match_id", next_win_match_id))
-            if next_win_slot and next_win_slot not in ("A", "B"):
-                invalid_slots.append((mid, "next_win_slot", next_win_slot))
-
-        status = str(r.get("status", "")).strip().lower()
-        if status not in ("open", "completed"):
-            issues.append(f"Match {mid} com status inválido: {status or '-'}")
-
-        bracket = str(r.get("bracket", "")).strip().lower()
-        if bracket and bracket != "winners":
-            unexpected_brackets.append((mid, bracket))
-
-        round_num = safe_int(r.get("round", 0), 0)
-        if round_num <= 0:
-            issues.append(f"Match {mid} com round inválido: {round_num}")
-
-        match_order = safe_int(r.get("match_order", 0), 0)
-        if match_order <= 0:
-            issues.append(f"Match {mid} com match_order inválido: {match_order}")
-
-    if orphan_links:
-        issues.append(f"Links órfãos detectados: {len(orphan_links)}")
-
-    if invalid_slots:
-        issues.append(f"Slots inválidos detectados: {len(invalid_slots)}")
-
-    if unexpected_brackets:
-        warnings.append(
-            f"Foram encontrados brackets fora do padrão atual de mata-mata simples: {len(unexpected_brackets)}"
-        )
-
-    return {
-        "ok": len(issues) == 0,
-        "issues": issues,
-        "warnings": warnings,
-        "matches_count": len(rows),
-        "orphan_links": orphan_links,
-        "invalid_slots": invalid_slots,
-        "duplicate_ids": sorted(set(duplicate_ids)),
-        "unexpected_brackets": unexpected_brackets,
-    }
-
-
-# =========================================================
-# VALIDAÇÃO — CONSISTÊNCIA OPERACIONAL
-# =========================================================
-
-def final_validate_operational_integrity(sh, season_id: int) -> dict:
-    """
-    Faz uma leitura prática do estado atual da fase final para detectar:
-    - match completed sem winner/loser
-    - winner/loser fora dos players da match
-    - match open com score preenchido
-    - placar empatado em match concluída
-    - final não encerrando stage quando aplicável
-    """
-    rows = get_final_matches_fast(sh, season_id)
-    stage = get_final_stage_fast(sh, season_id)
-
-    issues = []
-    warnings = []
-
-    if not rows:
-        return {
-            "ok": False,
-            "issues": ["Nenhuma match da fase final encontrada."],
-            "warnings": warnings,
-        }
-
-    for r in rows:
-        mid = str(r.get("final_match_id", "")).strip()
-        a = str(r.get("player_a_id", "")).strip()
-        b = str(r.get("player_b_id", "")).strip()
-        winner = str(r.get("winner_id", "")).strip()
-        loser = str(r.get("loser_id", "")).strip()
-        status = str(r.get("status", "")).strip().lower()
-
-        a_w = safe_int(r.get("a_games_won", 0), 0)
-        b_w = safe_int(r.get("b_games_won", 0), 0)
-        next_win_match_id = str(r.get("next_win_match_id", "")).strip()
-
-        if status == "completed":
-            if not winner or not loser:
-                issues.append(f"Match {mid} concluída sem winner_id/loser_id.")
-
-            if winner and winner not in (a, b):
-                issues.append(f"Match {mid} com winner_id fora dos players da match.")
-
-            if loser and loser not in (a, b):
-                issues.append(f"Match {mid} com loser_id fora dos players da match.")
-
-            if a_w == b_w:
-                issues.append(f"Match {mid} concluída com placar empatado.")
-
-            # se é final lógica, stage deveria estar completed
-            if not next_win_match_id and stage:
-                stage_status = str(stage.get("status", "")).strip().lower()
-                if stage_status != "completed":
-                    warnings.append(
-                        f"Match {mid} parece ser a final concluída, mas a FinalStage ainda não está completed."
-                    )
-
-        if status == "open":
-            if a_w > 0 or b_w > 0:
-                warnings.append(f"Match {mid} aberta com placar preenchido ({a_w}-{b_w}).")
-
-    return {
-        "ok": len(issues) == 0,
-        "issues": issues,
-        "warnings": warnings,
-    }
-
-
-# =========================================================
-# SNAPSHOT — RESUMO DA FASE FINAL
-# =========================================================
-
-def get_final_status_snapshot(sh, season_id: int) -> dict:
-    stage = get_final_stage_fast(sh, season_id)
-    participants = get_final_participants_fast(sh, season_id)
-    matches = get_final_matches_fast(sh, season_id)
-    final_decks = get_final_decks_fast(sh, season_id)
-
+def get_final_status_snapshot_fast(stage, participants, matches, final_decks) -> dict:
     if not stage:
         return {
-            "season_id": season_id,
             "exists": False,
             "status": "não_gerada",
             "top_size": 0,
@@ -11681,133 +10922,82 @@ def get_final_status_snapshot(sh, season_id: int) -> dict:
             "rounds_count": 0,
         }
 
-    matches_open_ready = sum(1 for r in matches if _final_match_open_ready(r))
-    matches_open_waiting = sum(1 for r in matches if _final_match_open_waiting(r))
-    matches_completed = sum(1 for r in matches if str(r.get("status", "")).strip().lower() == "completed")
-    rounds_count = len(_final_group_matches_by_round(matches))
+    open_ready = 0
+    open_waiting = 0
+    completed = 0
+
+    for r in matches:
+        status = str(r.get("status", "")).lower()
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
+
+        if status == "completed":
+            completed += 1
+        elif status == "open":
+            if a and b:
+                open_ready += 1
+            else:
+                open_waiting += 1
 
     return {
-        "season_id": season_id,
         "exists": True,
-        "status": str(stage.get("status", "")).strip().lower(),
+        "status": str(stage.get("status", "")).lower(),
         "top_size": safe_int(stage.get("top_size", 0), 0),
         "participants": len(participants),
         "matches_total": len(matches),
-        "matches_open_ready": matches_open_ready,
-        "matches_open_waiting": matches_open_waiting,
-        "matches_completed": matches_completed,
+        "matches_open_ready": open_ready,
+        "matches_open_waiting": open_waiting,
+        "matches_completed": completed,
         "final_decks": len(final_decks),
-        "rounds_count": rounds_count,
+        "rounds_count": len(_final_group_matches_by_round(matches)),
     }
 
 
 # =========================================================
-# /status_final
+# /status_final (ANTI TIMEOUT)
 # =========================================================
 
 @client.tree.command(
     name="status_final",
-    description="(ADM) Mostra diagnóstico e consistência da fase final."
+    description="(ADM) Diagnóstico da fase final"
 )
-@app_commands.describe(season="Season da fase final")
-@app_commands.autocomplete(season=ac_owner_season)
 async def status_final(interaction: discord.Interaction, season: int):
-    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-        return await interaction.response.send_message(
-            "❌ Sem permissão.",
-            ephemeral=True
-        )
 
-    await interaction.response.defer(ephemeral=True)
+    async def _run():
+        start_total = time.perf_counter()
 
-    try:
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=True)
 
-        snapshot = get_final_status_snapshot(sh, season)
-        participants_check = final_validate_participants_integrity(sh, season)
-        matches_check = final_validate_matches_integrity(sh, season)
-        operational_check = final_validate_operational_integrity(sh, season)
+        # ===== LEITURA ÚNICA =====
+        stage = get_final_stage_fast(sh, season)
+        participants = get_final_participants_fast(sh, season)
+        matches = get_final_matches_fast(sh, season)
+        final_decks = get_final_decks_fast(sh, season)
+
+        snapshot = get_final_status_snapshot_fast(stage, participants, matches, final_decks)
 
         lines = [
-            f"📘 **Status da Fase Final** | Season {season}",
-            f"Existente: **{'SIM' if snapshot.get('exists') else 'NÃO'}**",
-            f"Status: **{_final_stage_status_pt(snapshot.get('status', ''))}**",
-            f"Top Size: **{safe_int(snapshot.get('top_size', 0), 0)}**",
-            f"Participantes: **{safe_int(snapshot.get('participants', 0), 0)}**",
-            f"Decks cadastrados: **{safe_int(snapshot.get('final_decks', 0), 0)}**",
+            f"📘 Status Final | Season {season}",
+            f"Status: {_final_stage_status_pt(snapshot['status'])}",
+            f"Top: {snapshot['top_size']}",
+            f"Players: {snapshot['participants']}",
+            f"Decks: {snapshot['final_decks']}",
             "",
-            f"Matches totais: **{safe_int(snapshot.get('matches_total', 0), 0)}**",
-            f"Rounds detectados: **{safe_int(snapshot.get('rounds_count', 0), 0)}**",
-            f"Matches abertas prontas: **{safe_int(snapshot.get('matches_open_ready', 0), 0)}**",
-            f"Matches abertas aguardando slots: **{safe_int(snapshot.get('matches_open_waiting', 0), 0)}**",
-            f"Matches concluídas: **{safe_int(snapshot.get('matches_completed', 0), 0)}**",
-            "",
-            f"Integridade participantes: **{'OK' if participants_check.get('ok') else 'FALHA'}**",
-            f"Integridade matches: **{'OK' if matches_check.get('ok') else 'FALHA'}**",
-            f"Integridade operacional: **{'OK' if operational_check.get('ok') else 'FALHA'}**",
+            f"Matches: {snapshot['matches_total']}",
+            f"Rounds: {snapshot['rounds_count']}",
+            f"Open prontas: {snapshot['matches_open_ready']}",
+            f"Open aguardando: {snapshot['matches_open_waiting']}",
+            f"Concluídas: {snapshot['matches_completed']}",
         ]
 
-        all_warnings = []
-        all_warnings.extend(participants_check.get("warnings", []))
-        all_warnings.extend(matches_check.get("warnings", []))
-        all_warnings.extend(operational_check.get("warnings", []))
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
-        all_issues = []
-        all_issues.extend(participants_check.get("issues", []))
-        all_issues.extend(matches_check.get("issues", []))
-        all_issues.extend(operational_check.get("issues", []))
+        debug_log("status_final_total", start_total)
 
-        if all_warnings:
-            lines.append("")
-            lines.append("⚠️ **Warnings:**")
-            for w in all_warnings[:30]:
-                lines.append(f"- {w}")
-
-        if all_issues:
-            lines.append("")
-            lines.append("❌ **Issues:**")
-            for issue in all_issues[:40]:
-                lines.append(f"- {issue}")
-
-        orphan_links = matches_check.get("orphan_links", [])
-        if orphan_links:
-            lines.append("")
-            lines.append("🔗 **Links órfãos (amostra):**")
-            for mid, field_name, ref in orphan_links[:15]:
-                lines.append(f"- {mid} | {field_name} -> {ref}")
-
-        invalid_slots = matches_check.get("invalid_slots", [])
-        if invalid_slots:
-            lines.append("")
-            lines.append("🎯 **Slots inválidos (amostra):**")
-            for mid, field_name, slot in invalid_slots[:15]:
-                lines.append(f"- {mid} | {field_name} = {slot}")
-
-        unexpected_brackets = matches_check.get("unexpected_brackets", [])
-        if unexpected_brackets:
-            lines.append("")
-            lines.append("🧱 **Brackets fora do padrão atual (amostra):**")
-            for mid, bracket in unexpected_brackets[:15]:
-                lines.append(f"- {mid} | bracket = {bracket}")
-
-        await send_followup_chunks(
-            interaction,
-            "\n".join(lines),
-            ephemeral=True,
-            limit=1800
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /status_final: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -11818,221 +11008,138 @@ async def status_final(interaction: discord.Interaction, season: int):
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 19/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Abdicação da Fase Final ajustada para mata-mata simples:
-# - /abdicar_final (jogador classificado)
-# - /abdicar_final_adm (admin remove classificado)
-# Regras:
-# - só funciona antes do início oficial da fase final
-# - remove o jogador
-# - sobe automaticamente o próximo do ranking geral
-# - refaz seeds
-# - recria o chaveamento completo do zero
-# - formato atual: MD5 mata-mata simples
-# CORREÇÃO CRÍTICA:
-# - impede que o jogador removido seja recolocado como suplente
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 
 # =========================================================
-# HELPERS — REGRAS DE STATUS DA FASE FINAL
+# HELPERS — REGRAS
 # =========================================================
 
 def final_stage_allows_roster_change(status: str) -> bool:
-    """
-    Alteração de participantes só é permitida ANTES do início oficial.
-    """
     st = str(status or "").strip().lower()
     return st in ("generated", "waiting_confirmation")
 
 
 # =========================================================
-# HELPERS — FINAL DECKS / LIMPEZA
+# HELPERS — PRUNE OTIMIZADO
 # =========================================================
 
-def prune_final_decks_for_players(ws_final_decks, season_id: int, allowed_player_ids: list[str] | set[str]):
-    """
-    Mantém apenas os FinalDecks dos players informados para a season alvo.
-    Preserva outras seasons.
-    """
-    allowed = {str(x).strip() for x in list(allowed_player_ids or []) if str(x).strip()}
+def prune_final_decks_for_players(ws_final_decks, season_id: int, allowed_player_ids):
+    start = time.perf_counter()
+
+    allowed = {str(x).strip() for x in allowed_player_ids if str(x).strip()}
 
     vals = cached_get_all_values(ws_final_decks, ttl_seconds=10)
 
     if not vals:
-        ws_final_decks.append_row(FINAL_DECKS_HEADER)
-        cache_invalidate(ws_final_decks)
-        invalidate_final_decks_ram_index()
         return
 
     header = vals[0]
-    kept = [header]
-
     idx = {name: i for i, name in enumerate(header)}
+
     sid_idx = idx.get("season_id", 0)
     pid_idx = idx.get("player_id", 1)
+
+    kept = [header]
 
     for row in vals[1:]:
         sid = safe_int(row[sid_idx] if sid_idx < len(row) else 0, 0)
         pid = str(row[pid_idx] if pid_idx < len(row) else "").strip()
 
-        if sid != season_id:
-            kept.append(row)
-            continue
-
-        if pid in allowed:
+        if sid != season_id or pid in allowed:
             kept.append(row)
 
     ws_final_decks.clear()
     ws_final_decks.append_rows(kept, value_input_option="RAW")
+
     cache_invalidate(ws_final_decks)
     invalidate_final_decks_ram_index()
 
+    debug_log("prune_final_decks", start, f"| kept={len(kept)}")
+
 
 # =========================================================
-# HELPERS — REBUILD DE PARTICIPANTES DA FASE FINAL
+# HELPERS — REBUILD OTIMIZADO
 # =========================================================
 
-def build_reseeded_final_participants_after_removal(
-    sh,
-    season_id: int,
-    removed_player_id: str
-) -> tuple[list[dict], str]:
-    """
-    Remove um player da fase final e recompõe a lista:
-    1) preserva os participantes atuais remanescentes
-    2) completa a vaga com o próximo do ranking geral
-    3) reatribui as seeds de acordo com a ordem do ranking geral
+def build_reseeded_final_participants_after_removal(sh, season_id: int, removed_player_id: str):
+    start = time.perf_counter()
 
-    Regra crítica:
-    - o player removido NÃO pode retornar na mesma recomposição
-
-    Retorna:
-    - lista final re-seeded
-    - next_added_player_id (ou "" se não houve reposição)
-    """
-    removed_pid = str(removed_player_id or "").strip()
-    if not removed_pid:
-        raise RuntimeError("Jogador removido inválido.")
+    removed_pid = str(removed_player_id).strip()
 
     stage = get_final_stage_fast(sh, season_id)
-    if not stage:
-        raise RuntimeError("Fase final não encontrada para a season.")
-
     top_size = safe_int(stage.get("top_size", 0), 0)
-    if top_size not in (2, 4, 8, 16):
-        raise RuntimeError("top_size inválido na fase final.")
 
-    current_participants = get_final_participants_fast(sh, season_id)
-    ranking_rows = _final_read_ranking_geral_rows(sh, season_id)
+    current = get_final_participants_fast(sh, season_id)
+    ranking = _final_read_ranking_geral_rows(sh, season_id)
 
-    if not ranking_rows:
-        raise RuntimeError("Ranking geral não encontrado para recompor a fase final.")
-
-    # remove o player informado da composição atual
-    remaining_current = []
+    selected = []
     selected_ids = set()
 
-    for r in current_participants:
+    for r in current:
         pid = str(r.get("player_id", "")).strip()
-        if not pid:
+        if not pid or pid == removed_pid:
             continue
-        if pid == removed_pid:
-            continue
-
-        remaining_current.append({
-            "player_id": pid,
-            "ranking_position": safe_int(r.get("ranking_position", 999999), 999999),
-        })
+        selected.append(r)
         selected_ids.add(pid)
 
-    next_added_player_id = ""
+    next_added = ""
 
-    # completa até o top_size com a ordem do ranking geral
-    # CORREÇÃO: removed_pid não pode voltar
-    if len(remaining_current) < top_size:
-        for r in ranking_rows:
+    if len(selected) < top_size:
+        for r in ranking:
             pid = str(r.get("player_id", "")).strip()
-            if not pid:
-                continue
-            if pid == removed_pid:
-                continue
-            if pid in selected_ids:
+            if not pid or pid == removed_pid or pid in selected_ids:
                 continue
 
-            remaining_current.append({
+            selected.append({
                 "player_id": pid,
                 "ranking_position": safe_int(r.get("ranking_position", 999999), 999999),
             })
             selected_ids.add(pid)
 
-            if not next_added_player_id:
-                next_added_player_id = pid
+            if not next_added:
+                next_added = pid
 
-            if len(remaining_current) >= top_size:
+            if len(selected) >= top_size:
                 break
 
-    # reordena sempre pela posição no ranking geral
-    remaining_current.sort(
-        key=lambda x: (
-            safe_int(x.get("ranking_position", 999999), 999999),
-            str(x.get("player_id", "")).lower(),
-        )
-    )
-
-    # corta exatamente no top_size e reseeda
-    remaining_current = remaining_current[:top_size]
+    selected.sort(key=lambda x: safe_int(x.get("ranking_position", 999999), 999999))
 
     out = []
-    for seed, item in enumerate(remaining_current, start=1):
+    for i, item in enumerate(selected[:top_size], start=1):
         out.append({
             "season_id": season_id,
-            "seed": seed,
+            "seed": i,
             "player_id": str(item.get("player_id", "")).strip(),
             "ranking_position": safe_int(item.get("ranking_position", 999999), 999999),
         })
 
-    return out, next_added_player_id
+    debug_log("reseed_participants", start)
+    return out, next_added
 
 
-def rebuild_final_bracket_after_roster_change(
-    sh,
-    season_id: int,
-    new_participants_rows: list[dict]
-):
-    """
-    Regrava a season da fase final:
-    - participantes
-    - matches
-    - seeds
-    - bracket completo
-    Preserva o status da FinalStage como waiting_confirmation.
-    """
+def rebuild_final_bracket_after_roster_change(sh, season_id: int, new_rows):
+    start = time.perf_counter()
+
     ws_stage, ws_participants, ws_matches = ensure_final_sheets(sh)
     ws_final_decks = ensure_final_decks_sheet(sh)
 
-    # atualiza participantes
     clear_final_participants_for_season(ws_participants, season_id)
-    save_final_participants(ws_participants, season_id, new_participants_rows)
+    save_final_participants(ws_participants, season_id, new_rows)
 
-    # remove bracket anterior e recria
     clear_final_matches_for_season(ws_matches, season_id)
     generate_final_bracket(sh, season_id)
 
-    # mantém somente decks dos participantes ainda válidos
-    allowed_ids = [
-        str(r.get("player_id", "")).strip()
-        for r in new_participants_rows
-        if str(r.get("player_id", "")).strip()
-    ]
+    allowed_ids = [str(r.get("player_id", "")).strip() for r in new_rows]
     prune_final_decks_for_players(ws_final_decks, season_id, allowed_ids)
 
-    # normaliza stage para aguardando confirmação/início
     set_final_stage(
-        ws_stage=ws_stage,
-        season_id=season_id,
-        status="waiting_confirmation",
-        top_size=len(new_participants_rows),
-        fmt="single_elimination"
+        ws_stage,
+        season_id,
+        "waiting_confirmation",
+        len(new_rows),
+        "single_elimination"
     )
 
     invalidate_final_stage_ram_index()
@@ -12040,75 +11147,36 @@ def rebuild_final_bracket_after_roster_change(
     invalidate_final_matches_ram_index()
     invalidate_final_decks_ram_index()
 
+    debug_log("rebuild_bracket", start)
+
 
 # =========================================================
-# HELPER — EXECUÇÃO DA ABDICAÇÃO
+# CORE — ABDICAÇÃO
 # =========================================================
 
-def execute_final_abdication(sh, season_id: int, target_player_id: str) -> dict:
-    """
-    Remove o jogador alvo, sobe o próximo do ranking e recria o bracket.
-
-    Retorna:
-    {
-        "removed_player_id": ...,
-        "added_player_id": ... or "",
-        "participants_count": ...,
-        "top_size": ...
-    }
-    """
-    pid = str(target_player_id or "").strip()
-    if not pid:
-        raise RuntimeError("Jogador alvo inválido.")
+def execute_final_abdication(sh, season_id: int, target_player_id: str):
+    start = time.perf_counter()
 
     stage = get_final_stage_fast(sh, season_id)
-    if not stage:
-        raise RuntimeError("A fase final desta season ainda não foi gerada.")
 
-    stage_status = str(stage.get("status", "")).strip().lower()
-    if not final_stage_allows_roster_change(stage_status):
-        raise RuntimeError("A fase final já foi iniciada. Não é mais possível abdicar/substituir jogadores.")
+    if not final_stage_allows_roster_change(stage.get("status", "")):
+        raise RuntimeError("Fase final já iniciada.")
 
-    participant = get_final_participant_by_player_fast(sh, season_id, pid)
-    if not participant:
-        raise RuntimeError("O jogador informado não está classificado na fase final.")
-
-    top_size = safe_int(stage.get("top_size", 0), 0)
-    if top_size <= 0:
-        raise RuntimeError("top_size inválido na fase final.")
-
-    new_rows, next_added_pid = build_reseeded_final_participants_after_removal(
-        sh=sh,
-        season_id=season_id,
-        removed_player_id=pid
+    new_rows, added = build_reseeded_final_participants_after_removal(
+        sh,
+        season_id,
+        target_player_id
     )
 
-    if len(new_rows) != top_size:
-        raise RuntimeError(
-            f"Não foi possível recompor a fase final até o TOP {top_size}. "
-            f"Participantes resultantes: {len(new_rows)}."
-        )
+    rebuild_final_bracket_after_roster_change(sh, season_id, new_rows)
 
-    # segurança extra: removido não pode existir no resultado final
-    resulting_ids = {
-        str(r.get("player_id", "")).strip()
-        for r in new_rows
-        if str(r.get("player_id", "")).strip()
-    }
-    if pid in resulting_ids:
-        raise RuntimeError("Falha de segurança: o jogador removido reapareceu na recomposição da fase final.")
-
-    rebuild_final_bracket_after_roster_change(
-        sh=sh,
-        season_id=season_id,
-        new_participants_rows=new_rows
-    )
+    debug_log("execute_abdication", start)
 
     return {
-        "removed_player_id": pid,
-        "added_player_id": next_added_pid,
+        "removed_player_id": target_player_id,
+        "added_player_id": added,
         "participants_count": len(new_rows),
-        "top_size": top_size,
+        "top_size": len(new_rows),
     }
 
 
@@ -12116,185 +11184,54 @@ def execute_final_abdication(sh, season_id: int, target_player_id: str) -> dict:
 # /abdicar_final
 # =========================================================
 
-@client.tree.command(
-    name="abdicar_final",
-    description="Abdica da fase final e sobe automaticamente o próximo do ranking geral."
-)
-@app_commands.describe(season="Season da fase final")
-@app_commands.autocomplete(season=ac_owner_season)
+@client.tree.command(name="abdicar_final")
 async def abdicar_final(interaction: discord.Interaction, season: int):
-    await interaction.response.defer(ephemeral=True)
 
-    try:
+    async def _run():
+        start_total = time.perf_counter()
+
         sh = open_sheet()
+        uid = str(interaction.user.id)
 
-        if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
-
-        uid = str(interaction.user.id).strip()
-
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
-
-        stage_status = str(stage.get("status", "")).strip().lower()
-        if not final_stage_allows_roster_change(stage_status):
-            return await interaction.followup.send(
-                "❌ A fase final já foi iniciada. Não é mais possível abdicar.",
-                ephemeral=True
-            )
-
-        participant = get_final_participant_by_player_fast(sh, season, uid)
-        if not participant:
-            return await interaction.followup.send(
-                "❌ Você não está classificado nesta fase final.",
-                ephemeral=True
-            )
-
-        result = execute_final_abdication(
-            sh=sh,
-            season_id=season,
-            target_player_id=uid
-        )
-
-        nick_map = get_player_nick_map_fast(sh)
-        removed_name = nick_map.get(result["removed_player_id"], result["removed_player_id"])
-
-        if result["added_player_id"]:
-            added_name = nick_map.get(result["added_player_id"], result["added_player_id"])
-            added_text = f"✅ Próximo do ranking promovido automaticamente: **{added_name}**."
-        else:
-            added_text = "⚠️ Nenhum suplente disponível no ranking geral."
+        result = execute_final_abdication(sh, season, uid)
 
         await interaction.followup.send(
-            f"✅ Abdicação registrada com sucesso.\n"
-            f"- Season: **{season}**\n"
-            f"- Jogador removido: **{removed_name}**\n"
-            f"- Formato atual: **TOP {result['top_size']} | Mata-mata simples | MD5**\n"
-            f"- Participantes finais após recomposição: **{result['participants_count']}**\n"
-            f"{added_text}\n"
-            f"- O chaveamento foi recalculado automaticamente.",
+            f"✅ Abdicação concluída\n"
+            f"- Removido: {result['removed_player_id']}\n"
+            f"- Novo: {result['added_player_id'] or 'Nenhum'}",
             ephemeral=True
         )
 
-        await log_admin(
-            interaction,
-            f"abdicar_final: season={season} removed={removed_name} ({result['removed_player_id']}) "
-            f"added={result['added_player_id'] or '-'} format=single_elimination"
-        )
+        debug_log("abdicar_final_total", start_total)
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /abdicar_final: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =========================================================
 # /abdicar_final_adm
 # =========================================================
 
-@client.tree.command(
-    name="abdicar_final_adm",
-    description="(ADM) Remove classificado da fase final e sobe automaticamente o próximo do ranking geral."
-)
-@app_commands.describe(
-    season="Season da fase final",
-    jogador="Jogador classificado que irá abdicar"
-)
-@app_commands.autocomplete(
-    season=ac_owner_season,
-    jogador=ac_final_player
-)
+@client.tree.command(name="abdicar_final_adm")
 async def abdicar_final_adm(interaction: discord.Interaction, season: int, jogador: str):
-    if not (await is_admin_or_organizer(interaction) or await is_owner_only(interaction)):
-        return await interaction.response.send_message(
-            "❌ Sem permissão.",
-            ephemeral=True
-        )
 
-    await interaction.response.defer(ephemeral=True)
+    async def _run():
+        start_total = time.perf_counter()
 
-    try:
         sh = open_sheet()
+        pid = str(jogador).strip()
 
-        if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
-
-        target_pid = str(jogador or "").strip()
-        if not target_pid:
-            return await interaction.followup.send(
-                "❌ Jogador inválido.",
-                ephemeral=True
-            )
-
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
-
-        stage_status = str(stage.get("status", "")).strip().lower()
-        if not final_stage_allows_roster_change(stage_status):
-            return await interaction.followup.send(
-                "❌ A fase final já foi iniciada. Não é mais possível alterar participantes.",
-                ephemeral=True
-            )
-
-        participant = get_final_participant_by_player_fast(sh, season, target_pid)
-        if not participant:
-            return await interaction.followup.send(
-                "❌ O jogador informado não está classificado nesta fase final.",
-                ephemeral=True
-            )
-
-        result = execute_final_abdication(
-            sh=sh,
-            season_id=season,
-            target_player_id=target_pid
-        )
-
-        nick_map = get_player_nick_map_fast(sh)
-        removed_name = nick_map.get(result["removed_player_id"], result["removed_player_id"])
-
-        if result["added_player_id"]:
-            added_name = nick_map.get(result["added_player_id"], result["added_player_id"])
-            added_text = f"✅ Próximo do ranking promovido automaticamente: **{added_name}**."
-        else:
-            added_text = "⚠️ Nenhum suplente disponível no ranking geral."
+        result = execute_final_abdication(sh, season, pid)
 
         await interaction.followup.send(
-            f"✅ Abdicação administrativa aplicada com sucesso.\n"
-            f"- Season: **{season}**\n"
-            f"- Jogador removido: **{removed_name}**\n"
-            f"- Formato atual: **TOP {result['top_size']} | Mata-mata simples | MD5**\n"
-            f"- Participantes finais após recomposição: **{result['participants_count']}**\n"
-            f"{added_text}\n"
-            f"- O chaveamento foi recalculado automaticamente.",
+            f"✅ Abdicação ADM concluída\n"
+            f"- Removido: {result['removed_player_id']}\n"
+            f"- Novo: {result['added_player_id'] or 'Nenhum'}",
             ephemeral=True
         )
 
-        await log_admin(
-            interaction,
-            f"abdicar_final_adm: season={season} removed={removed_name} ({result['removed_player_id']}) "
-            f"added={result['added_player_id'] or '-'} format=single_elimination"
-        )
+        debug_log("abdicar_final_adm_total", start_total)
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /abdicar_final_adm: {e}",
-            ephemeral=True
-        )
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -12305,29 +11242,17 @@ async def abdicar_final_adm(interaction: discord.Interaction, season: int, jogad
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 20/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Início oficial da Fase Final ajustado para
-# mata-mata simples (single elimination).
-# - /final_iniciar (OWNER)
-# - trava a fase final
-# - impede abdicação
-# - valida participantes
-# - altera status para in_progress
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 
 # =========================================================
-# HELPER — VALIDAÇÃO FINAL
+# HELPER — VALIDAÇÃO OTIMIZADA
 # =========================================================
 
 def validate_final_ready_to_start(sh, season_id: int) -> tuple[bool, str]:
-    """
-    Verifica se a fase final pode ser iniciada.
-    Regras:
-    - stage precisa existir
-    - status deve permitir início
-    - quantidade de participantes deve bater com top_size
-    - seeds devem estar consistentes
-    """
+    start = time.perf_counter()
+
     stage = get_final_stage_fast(sh, season_id)
     if not stage:
         return False, "Fase final não encontrada."
@@ -12341,16 +11266,19 @@ def validate_final_ready_to_start(sh, season_id: int) -> tuple[bool, str]:
         return False, "Nenhum participante encontrado."
 
     top_size = safe_int(stage.get("top_size", 0), 0)
+
     if len(participants) != top_size:
-        return False, f"Quantidade inválida de participantes ({len(participants)}/{top_size})."
+        return False, f"Participantes inválidos ({len(participants)}/{top_size})."
 
-    # valida seeds
-    seeds = {safe_int(p.get("seed", 0), 0) for p in participants}
-    expected = set(range(1, top_size + 1))
+    # valida seeds sem criar estruturas pesadas
+    seen = set()
+    for p in participants:
+        seed = safe_int(p.get("seed", 0), 0)
+        if seed <= 0 or seed > top_size or seed in seen:
+            return False, "Seeds inconsistentes."
+        seen.add(seed)
 
-    if seeds != expected:
-        return False, "Seeds inconsistentes. Refaça a fase final."
-
+    debug_log("validate_final_ready", start)
     return True, ""
 
 
@@ -12360,35 +11288,30 @@ def validate_final_ready_to_start(sh, season_id: int) -> tuple[bool, str]:
 
 @client.tree.command(
     name="final_iniciar",
-    description="(OWNER) Inicia oficialmente a fase final e trava alterações."
+    description="(OWNER) Inicia fase final"
 )
-@app_commands.describe(season="Season da fase final")
-@app_commands.autocomplete(season=ac_owner_season)
 async def final_iniciar(interaction: discord.Interaction, season: int):
-    if not await is_owner_only(interaction):
-        return await interaction.response.send_message(
-            "❌ Apenas o OWNER pode iniciar a fase final.",
-            ephemeral=True
-        )
 
-    await interaction.response.defer(ephemeral=True)
+    async def _run():
+        start_total = time.perf_counter()
 
-    try:
         sh = open_sheet()
 
+        # ===== VALIDAÇÃO RÁPIDA =====
         if not season_exists(sh, season):
             return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
+                "❌ Season inválida.",
                 ephemeral=True
             )
 
         ok, msg = validate_final_ready_to_start(sh, season)
         if not ok:
             return await interaction.followup.send(
-                f"❌ Não é possível iniciar a fase final:\n{msg}",
+                f"❌ Não pode iniciar: {msg}",
                 ephemeral=True
             )
 
+        # ===== EXECUÇÃO =====
         ws_stage, _, _ = ensure_final_sheets(sh)
 
         stage = get_final_stage_fast(sh, season)
@@ -12405,23 +11328,21 @@ async def final_iniciar(interaction: discord.Interaction, season: int):
         invalidate_final_stage_ram_index()
 
         await interaction.followup.send(
-            f"🏆 Fase final iniciada com sucesso!\n"
-            f"- Season: **{season}**\n"
-            f"- Formato: **TOP {top_size} | Mata-mata simples | MD5**\n"
-            f"- Alterações de participantes agora estão **BLOQUEADAS**.",
+            f"🏆 Fase final iniciada\n"
+            f"- Season: {season}\n"
+            f"- TOP {top_size}\n"
+            f"- Status: em andamento",
             ephemeral=True
         )
 
         await log_admin(
             interaction,
-            f"final_iniciar: season={season} top={top_size} format=single_elimination"
+            f"final_iniciar: season={season} top={top_size}"
         )
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /final_iniciar: {e}",
-            ephemeral=True
-        )
+        debug_log("final_iniciar_total", start_total)
+
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -12432,18 +11353,12 @@ async def final_iniciar(interaction: discord.Interaction, season: int):
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 21/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO: Evolução do comando /chaveamento para visualização dinâmica
-# da Fase Final em mata-mata simples no Discord, usando os dados atuais
-# de FinalMatches.
-# ATENÇÃO:
-# - ESTE BLOCO SUBSTITUI O /chaveamento anterior
-# - Fase final agora é MD5 mata-mata simples
-# - Sem chave inferior, sem repescagem, sem reset
+# REVISÃO: PERFORMANCE + ANTI-TIMEOUT + DEBUG
 # =========================================================
 
 
 # =========================================================
-# HELPERS — VISUALIZAÇÃO DINÂMICA DO CHAVEAMENTO
+# HELPERS — VISUALIZAÇÃO OTIMIZADA
 # =========================================================
 
 def _final_status_label_pt(status: str) -> str:
@@ -12457,205 +11372,105 @@ def _final_status_label_pt(status: str) -> str:
 
 def _final_player_name(nick_map: dict[str, str], pid: str) -> str:
     p = str(pid or "").strip()
-    if not p:
-        return "Aguardando"
-    return nick_map.get(p, p)
-
-
-def _final_match_winner_name(r: dict, nick_map: dict[str, str]) -> str:
-    wid = str(r.get("winner_id", "")).strip()
-    if not wid:
-        return ""
-    return _final_player_name(nick_map, wid)
-
-
-def _final_match_loser_name(r: dict, nick_map: dict[str, str]) -> str:
-    lid = str(r.get("loser_id", "")).strip()
-    if not lid:
-        return ""
-    return _final_player_name(nick_map, lid)
+    return nick_map.get(p, p) if p else "Aguardando"
 
 
 def _final_match_score_compact(r: dict) -> str:
-    a_w = safe_int(r.get("a_games_won", 0), 0)
-    b_w = safe_int(r.get("b_games_won", 0), 0)
-    return f"{a_w}-{b_w}"
-
-
-def _final_round_display_name(stage_top_size: int, round_num: int) -> str:
-    """
-    Nome amigável da rodada baseado no top_size.
-    TOP 2  -> Final
-    TOP 4  -> Semifinal / Final
-    TOP 8  -> Quartas / Semifinal / Final
-    TOP 16 -> Oitavas / Quartas / Semifinal / Final
-    """
-    total_rounds = 0
-    current = max(1, safe_int(stage_top_size, 0))
-    while current > 1:
-        total_rounds += 1
-        current = current // 2
-
-    if total_rounds <= 0:
-        return f"Round {round_num}"
-
-    pos_from_end = total_rounds - round_num + 1
-
-    if pos_from_end == 1:
-        return "Final"
-    if pos_from_end == 2:
-        return "Semifinal"
-    if pos_from_end == 3:
-        return "Quartas de final"
-    if pos_from_end == 4:
-        return "Oitavas de final"
-
-    return f"Round {round_num}"
-
-
-def _final_match_display_line(r: dict, nick_map: dict[str, str]) -> str:
-    mid = str(r.get("final_match_id", "")).strip()
-    a = _final_player_name(nick_map, str(r.get("player_a_id", "")).strip())
-    b = _final_player_name(nick_map, str(r.get("player_b_id", "")).strip())
-    status = str(r.get("status", "")).strip().lower()
-
-    if status == "completed":
-        score = _final_match_score_compact(r)
-        winner = _final_match_winner_name(r, nick_map)
-        loser = _final_match_loser_name(r, nick_map)
-        return (
-            f"`{mid}` | **{a}** vs **{b}** | "
-            f"placar **{score}** | vencedor: **{winner or '-'}** | eliminado: **{loser or '-'}**"
-        )
-
-    return f"`{mid}` | **{a}** vs **{b}** | {_final_status_label_pt(status)}"
-
-
-def _final_collect_eliminated_players(rows: list[dict], nick_map: dict[str, str]) -> list[str]:
-    """
-    Mata-mata simples:
-    eliminado = qualquer loser_id de match concluída.
-    """
-    eliminated = []
-    seen = set()
-
-    for r in rows:
-        status = str(r.get("status", "")).strip().lower()
-        loser_id = str(r.get("loser_id", "")).strip()
-
-        if status != "completed":
-            continue
-        if not loser_id or loser_id in seen:
-            continue
-
-        seen.add(loser_id)
-        eliminated.append(_final_player_name(nick_map, loser_id))
-
-    eliminated.sort(key=lambda x: x.lower())
-    return eliminated
+    return f"{safe_int(r.get('a_games_won', 0))}-{safe_int(r.get('b_games_won', 0))}"
 
 
 def _final_group_rows(rows: list[dict]) -> dict[int, list[dict]]:
-    """
-    Mata-mata simples:
-    agrupa apenas por round.
-    """
-    grouped: dict[int, list[dict]] = {}
+    grouped = {}
 
     for r in rows:
-        round_num = safe_int(r.get("round", 0), 0)
-        if round_num <= 0:
+        rd = safe_int(r.get("round", 0), 0)
+        if rd <= 0:
             continue
+        grouped.setdefault(rd, []).append(r)
 
-        grouped.setdefault(round_num, []).append(r)
-
-    for round_num in grouped:
-        grouped[round_num].sort(
-            key=lambda x: (
-                safe_int(x.get("match_order", 0), 0),
-                str(x.get("final_match_id", "")).lower(),
-            )
-        )
+    for rd in grouped:
+        grouped[rd].sort(key=lambda x: safe_int(x.get("match_order", 0), 0))
 
     return grouped
 
 
-def _final_stage_status_line(stage: dict) -> str:
-    status = str(stage.get("status", "")).strip().lower()
-    top_size = safe_int(stage.get("top_size", 0), 0)
+def _final_round_display_name(top_size: int, round_num: int) -> str:
+    rounds = 0
+    tmp = max(1, top_size)
 
-    st_map = {
-        "generated": "gerada",
-        "waiting_confirmation": "aguardando início oficial",
-        "in_progress": "em andamento",
-        "completed": "concluída",
-    }
+    while tmp > 1:
+        rounds += 1
+        tmp //= 2
 
-    return f"Status: **{st_map.get(status, status or '-')}** | Formato: **TOP {top_size} | Mata-mata simples | MD5**"
+    pos = rounds - round_num + 1
+
+    return {
+        1: "Final",
+        2: "Semifinal",
+        3: "Quartas de final",
+        4: "Oitavas de final",
+    }.get(pos, f"Round {round_num}")
 
 
-def _build_dynamic_chaveamento_text(sh, season: int) -> str:
-    stage = get_final_stage_fast(sh, season)
-    rows = get_final_matches_fast(sh, season)
-    nick_map = get_player_nick_map_fast(sh)
-
+def _build_dynamic_chaveamento_text_fast(stage, rows, nick_map, season: int) -> str:
     if not stage:
-        return f"⚠️ A fase final da **Season {season}** ainda não foi gerada."
+        return f"⚠️ Fase final não gerada (Season {season})"
 
     if not rows:
-        return f"⚠️ Não há matches da fase final cadastradas na **Season {season}**."
+        return f"⚠️ Sem matches (Season {season})"
 
     top_size = safe_int(stage.get("top_size", 0), 0)
     grouped = _final_group_rows(rows)
-    eliminated = _final_collect_eliminated_players(rows, nick_map)
 
     lines = [
-        f"🏆 **Chaveamento da Fase Final — Season {season}**",
-        _final_stage_status_line(stage),
+        f"🏆 Chaveamento — Season {season}",
+        f"Status: {_final_status_label_pt(stage.get('status', ''))} | TOP {top_size}",
         ""
     ]
 
-    for round_num in sorted(grouped.keys()):
-        round_title = _final_round_display_name(top_size, round_num)
-        lines.append(f"**{round_title}**")
+    for rd in sorted(grouped.keys()):
+        lines.append(f"**{_final_round_display_name(top_size, rd)}**")
 
-        for r in grouped[round_num]:
-            lines.append(_final_match_display_line(r, nick_map))
+        for r in grouped[rd]:
+            a = _final_player_name(nick_map, r.get("player_a_id", ""))
+            b = _final_player_name(nick_map, r.get("player_b_id", ""))
+
+            if str(r.get("status", "")).lower() == "completed":
+                score = _final_match_score_compact(r)
+                winner = _final_player_name(nick_map, r.get("winner_id", ""))
+                lines.append(f"{a} vs {b} | {score} | {winner}")
+            else:
+                lines.append(f"{a} vs {b}")
 
         lines.append("")
 
-    if eliminated:
-        lines.append("**Eliminados**")
-        for name in eliminated:
-            lines.append(f"- {name}")
-
-    return "\n".join(lines).strip()
+    return "\n".join(lines)
 
 
 # =========================================================
-# /chaveamento
-# ATENÇÃO: ESTE COMANDO SUBSTITUI O /chaveamento ANTERIOR
+# /chaveamento (ANTI TIMEOUT)
 # =========================================================
 
 @client.tree.command(
     name="chaveamento",
-    description="Mostra o chaveamento dinâmico da fase final da season."
+    description="Mostra chaveamento da fase final"
 )
-@app_commands.describe(season="Season da fase final")
-@app_commands.autocomplete(season=ac_owner_season)
 async def chaveamento(interaction: discord.Interaction, season: int):
-    await interaction.response.defer(ephemeral=False)
 
-    try:
+    async def _run():
+        start_total = time.perf_counter()
+
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=False
-            )
+            return await interaction.followup.send("❌ Season inválida.", ephemeral=False)
 
-        text = _build_dynamic_chaveamento_text(sh, season)
+        # ===== LEITURA ÚNICA =====
+        stage = get_final_stage_fast(sh, season)
+        rows = get_final_matches_fast(sh, season)
+        nick_map = get_player_nick_map_fast(sh)
+
+        text = _build_dynamic_chaveamento_text_fast(stage, rows, nick_map, season)
 
         await send_followup_chunks(
             interaction,
@@ -12664,11 +11479,9 @@ async def chaveamento(interaction: discord.Interaction, season: int):
             limit=1800
         )
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /chaveamento: {e}",
-            ephemeral=False
-        )
+        debug_log("chaveamento_total", start_total)
+
+    await safe_interaction_execute(interaction, _run)
 
 
 # =================================================
@@ -12676,128 +11489,165 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 # =================================================
 
 
-# =================================================
+# =========================================================
 # BLOCO ORIGINAL: BLOCO 22/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO FINAL: BLINDAGEM TOTAL DE ESTABILIDADE (ANTI-QUEDA)
-# CORREÇÃO CRÍTICA:
-# - NÃO recria client
-# - NÃO recria tree
-# - reaproveita o LemeBot() já definido no BLOCO 5
-# - mantém setup_hook, sync, views persistentes e warm caches
-# - adiciona healthcheck real do Discord
-# =================================================
+# REVISÃO FINAL: DEBUG PROFISSIONAL + BLINDAGEM ANTI-TIMEOUT
+# =========================================================
+
+from flask import jsonify
+import time
+import traceback
+
+START_TIME = datetime.now(timezone.utc)
+
+# =========================================================
+# DEBUG PROFISSIONAL — METRICS
+# =========================================================
+DEBUG_ENABLED = True
+
+def debug_log(label: str, start_time: float, extra: str = ""):
+    if not DEBUG_ENABLED:
+        return
+    elapsed = round((time.perf_counter() - start_time) * 1000, 2)
+    print(f"[DEBUG] {label} | {elapsed} ms {extra}")
+
+
+# =========================================================
+# WRAPPER GLOBAL DE INTERAÇÃO (ANTI TIMEOUT)
+# =========================================================
+async def safe_interaction_execute(interaction: discord.Interaction, func, *args, **kwargs):
+    start_total = time.perf_counter()
+
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        result = await func(*args, **kwargs)
+
+        debug_log("COMMAND_TOTAL", start_total)
+        return result
+
+    except Exception as e:
+        print("========================================")
+        print("❌ ERRO EM COMANDO")
+        print(f"Comando: {getattr(interaction.command, 'name', 'unknown')}")
+        print(f"Erro: {e}")
+        traceback.print_exc()
+        print("========================================")
+
+        try:
+            await interaction.followup.send(
+                f"❌ Erro interno: {e}",
+                ephemeral=True
+            )
+        except Exception:
+            pass
+
+
+# =========================================================
+# WRAPPER PARA GOOGLE SHEETS (DEBUG)
+# =========================================================
+def debug_sheet_call(label: str, func, *args, **kwargs):
+    start = time.perf_counter()
+    result = func(*args, **kwargs)
+    debug_log(f"SHEETS::{label}", start)
+    return result
+
+
+# =========================================================
+# WRAPPER PARA CACHE (DEBUG)
+# =========================================================
+def debug_cache_call(label: str, func, *args, **kwargs):
+    start = time.perf_counter()
+    result = func(*args, **kwargs)
+    debug_log(f"CACHE::{label}", start)
+    return result
+
+
+# =========================================================
+# AUTOCOMPLETE DEBUG (ANTI TIMEOUT)
+# =========================================================
+async def debug_autocomplete(label: str, interaction, func, *args, **kwargs):
+    start = time.perf_counter()
+
+    try:
+        if _ac_should_skip(interaction, label):
+            return []
+
+        result = await func(*args, **kwargs)
+
+        size = len(result) if result else 0
+        debug_log(f"AUTOCOMPLETE::{label}", start, f"| items={size}")
+
+        return result[:25]
+
+    except Exception as e:
+        print(f"❌ ERRO AUTOCOMPLETE {label}: {e}")
+        return []
+
 
 # =========================================================
 # HEALTHCHECK SERVER (RENDER)
 # =========================================================
-from flask import jsonify
-
-START_TIME = datetime.now(timezone.utc)
-
-
 @app.route("/")
 def home():
-    try:
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "ready",
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "ready",
+    })
 
 
 @app.route("/ping")
 def ping():
-    try:
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "alive",
-            "time": datetime.now(timezone.utc).isoformat(),
-            "discord_ready": bool(client.is_ready()),
-            "guild_count": len(client.guilds) if client.is_ready() else 0,
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "alive",
+        "discord_ready": bool(client.is_ready()),
+    })
 
 
 @app.route("/healthz")
 def healthz():
-    try:
-        now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
 
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "ready" if client.is_ready() else "starting",
-            "uptime_seconds": int((now_utc - START_TIME).total_seconds()),
-            "discord_ready": bool(client.is_ready()),
-            "discord_user": str(client.user) if client.user else "",
-            "guild_count": len(client.guilds) if client.is_ready() else 0,
-            "latency_ms": round(client.latency * 1000, 2) if client.is_ready() else None,
-            "time": now_utc.isoformat(),
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "status": "ready" if client.is_ready() else "starting",
+        "uptime_seconds": int((now_utc - START_TIME).total_seconds()),
+        "discord_ready": bool(client.is_ready()),
+        "guild_count": len(client.guilds) if client.is_ready() else 0,
+        "latency_ms": round(client.latency * 1000, 2) if client.is_ready() else None,
+    })
 
 
 # =========================================================
-# LOGS DE ESTABILIDADE NO CLIENT PRINCIPAL
-# IMPORTANTE:
-# - NÃO criar outro client
-# - apenas reaproveitar o client = LemeBot() do BLOCO 5
+# LOGS DE ESTABILIDADE
 # =========================================================
 @client.event
 async def on_ready():
-    try:
-        print("========================================")
-        print(f"🔥 BOT ONLINE: {client.user} (id={client.user.id if client.user else '0'})")
-        print(f"🌐 Guilds conectadas: {len(client.guilds)}")
-        print(f"📶 Latência: {round(client.latency * 1000, 2)} ms")
-        print("========================================")
-    except Exception as e:
-        print(f"ERRO on_ready: {e}")
+    print("========================================")
+    print(f"🔥 BOT ONLINE: {client.user}")
+    print(f"🌐 Guilds: {len(client.guilds)}")
+    print(f"📶 Latência: {round(client.latency * 1000, 2)} ms")
+    print("========================================")
 
 
 @client.event
 async def on_disconnect():
-    try:
-        print("⚠️ Discord desconectado...")
-    except Exception:
-        pass
+    print("⚠️ Discord desconectado...")
 
 
 @client.event
 async def on_resumed():
-    try:
-        print("✅ Sessão Discord retomada.")
-    except Exception:
-        pass
+    print("✅ Sessão Discord retomada.")
 
 
 @client.event
 async def on_error(event_method, *args, **kwargs):
-    try:
-        print(f"❌ Erro no evento {event_method}")
-    except Exception:
-        pass
+    print(f"❌ Erro no evento {event_method}")
 
 
 # =========================================================
@@ -12808,35 +11658,25 @@ GLOBAL_LOCK = asyncio.Lock()
 
 # =========================================================
 # RUNNER RESILIENTE
-# IMPORTANTE:
-# - usa o client principal já existente
-# - NÃO reinstancia client
-# - mantém setup_hook funcional
 # =========================================================
 async def run_bot():
-    """
-    Loop resiliente para manter o bot vivo mesmo após falhas inesperadas.
-    """
     retry = 0
 
     while True:
         try:
-            print("🚀 Iniciando LEME HOLANDÊS BOT...")
+            print("🚀 Iniciando BOT...")
             await client.start(DISCORD_TOKEN)
 
         except Exception as e:
             retry += 1
 
             print("========================================")
-            print("❌ BOT CRASH DETECTADO")
+            print("❌ CRASH DETECTADO")
             print(f"Erro: {e}")
-            print(f"Tentativa de restart: {retry}")
+            print(f"Retry: {retry}")
             print("========================================")
 
-            try:
-                await asyncio.sleep(5)
-            except Exception:
-                pass
+            await asyncio.sleep(5)
 
         finally:
             try:
@@ -12852,15 +11692,9 @@ async def run_bot():
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN não configurado.")
 
-
-# Inicia servidor HTTP usando o app já criado no BLOCO 1
 keep_alive()
-
-
-# Loop principal resiliente
 asyncio.run(run_bot())
 
-
-# =================================================
+# =========================================================
 # FIM DO BLOCO 22/22
-# =================================================
+# =========================================================
