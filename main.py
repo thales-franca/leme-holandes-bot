@@ -12676,350 +12676,136 @@ async def chaveamento(interaction: discord.Interaction, season: int):
 # =================================================
 
 
-# =========================================================
+# =================================================
 # BLOCO ORIGINAL: BLOCO 22/22
 # SUB-BLOCO: ÚNICO
-# REVISÃO V2: estabilidade total com heartbeat garantido via tasks.loop
-# - separação entre liveness (/ping) e readiness (/healthz)
-# - endpoint raiz estável para inspeção manual
-# - heartbeat periódico robusto
-# - captura de exceções fatais do processo principal
-# - simplificação do estado do Discord
-# Deve ficar no FINAL ABSOLUTO do main.py.
-# =========================================================
-
-import sys
-import traceback
-from discord.ext import tasks
+# REVISÃO: BLINDAGEM TOTAL DE ESTABILIDADE (ANTI-QUEDA)
+# =================================================
 
 
 # =========================================================
-# HEALTH STATE GLOBAL
+# CLIENTE RESILIENTE
 # =========================================================
-_APP_BOOT_STARTED_AT = now_iso_utc()
-_APP_BOOT_COMPLETED_AT = ""
-_LAST_FATAL_ERROR_AT = ""
-_LAST_FATAL_ERROR_TEXT = ""
-_READY_ONCE = False
+class StableClient(discord.Client):
+    async def on_ready(self):
+        print(f"🔥 BOT ONLINE: {self.user}")
+
+    async def on_disconnect(self):
+        print("⚠️ Discord desconectado...")
+
+    async def on_resumed(self):
+        print("✅ Sessão Discord retomada")
+
+    async def on_error(self, event_method, *args, **kwargs):
+        print(f"❌ Erro no evento {event_method}")
 
 
-def _set_fatal_error(err_text: str):
-    global _LAST_FATAL_ERROR_AT, _LAST_FATAL_ERROR_TEXT
-    _LAST_FATAL_ERROR_AT = now_iso_utc()
-    _LAST_FATAL_ERROR_TEXT = str(err_text or "").strip()[:4000]
+# =========================================================
+# INICIALIZAÇÃO DO CLIENT
+# =========================================================
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+client = StableClient(intents=intents)
+tree = app_commands.CommandTree(client)
 
 
-def _mark_boot_completed():
-    global _APP_BOOT_COMPLETED_AT
-    if not _APP_BOOT_COMPLETED_AT:
-        _APP_BOOT_COMPLETED_AT = now_iso_utc()
+# =========================================================
+# GLOBAL LOCK (ANTI CONCORRÊNCIA)
+# =========================================================
+GLOBAL_LOCK = asyncio.Lock()
 
 
-def get_runtime_health_snapshot() -> dict:
+# =========================================================
+# RUNNER RESILIENTE
+# =========================================================
+async def run_bot():
     """
-    Snapshot leve do estado atual do serviço.
+    Loop infinito que mantém o bot vivo mesmo após falhas.
     """
-    try:
-        discord_ready = bool(client.is_ready())
-    except Exception:
-        discord_ready = False
+    retry = 0
 
-    try:
-        guild_count = len(getattr(client, "guilds", []) or [])
-    except Exception:
-        guild_count = 0
+    while True:
+        try:
+            print("🚀 Iniciando LEME HOLANDÊS BOT...")
 
-    return {
-        "service": "LEME HOLANDÊS BOT",
-        "boot_started_at": _APP_BOOT_STARTED_AT,
-        "boot_completed_at": _APP_BOOT_COMPLETED_AT,
-        "discord_ready": discord_ready,
-        "guild_count": guild_count,
-        "last_fatal_error_at": _LAST_FATAL_ERROR_AT,
-        "last_fatal_error_text": _LAST_FATAL_ERROR_TEXT,
-    }
+            await client.start(DISCORD_TOKEN)
+
+        except Exception as e:
+            retry += 1
+
+            print("========================================")
+            print(f"❌ BOT CRASH DETECTADO")
+            print(f"Erro: {e}")
+            print(f"Tentativa de restart: {retry}")
+            print("========================================")
+
+            await asyncio.sleep(5)
+
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
 
 
 # =========================================================
-# HTTP keep-alive / healthcheck
+# HEALTHCHECK SERVER (OBRIGATÓRIO RENDER)
 # =========================================================
+from flask import Flask, jsonify
+import threading
 
-@app.get("/")
+app = Flask(__name__)
+
+START_TIME = datetime.now(timezone.utc)
+
+@app.route("/")
 def home():
-    """
-    Endpoint estável para inspeção manual no navegador.
-    Sempre responde 200 se o processo HTTP estiver vivo.
-    """
-    snap = get_runtime_health_snapshot()
-    status = "ready" if snap["discord_ready"] else "starting"
-
-    return {
+    return jsonify({
         "ok": True,
-        "status": status,
-        **snap,
-    }, 200
-
-
-@app.get("/ping")
-def ping():
-    """
-    Endpoint de liveness para monitor externo.
-    Regra:
-    - se o processo HTTP respondeu, está vivo
-    - sempre 200
-    """
-    return {
-        "ok": True,
-        "status": "alive",
         "service": "LEME HOLANDÊS BOT",
-        "time": now_iso_utc(),
-    }, 200
+        "status": "ready"
+    })
 
+@app.route("/ping")
+def ping():
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "alive",
+        "time": datetime.now(timezone.utc).isoformat()
+    })
 
-@app.get("/healthz")
+@app.route("/healthz")
 def healthz():
-    """
-    Endpoint de readiness real do bot.
-    Regra:
-    - 200 quando o Discord estiver ready
-    - 503 quando ainda estiver subindo
-    """
-    snap = get_runtime_health_snapshot()
-
-    if snap["discord_ready"]:
-        return {
-            "ok": True,
-            "status": "ready",
-            **snap,
-        }, 200
-
-    return {
-        "ok": False,
-        "status": "not_ready",
-        **snap,
-    }, 503
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "ready",
+        "uptime_seconds": int((datetime.now(timezone.utc) - START_TIME).total_seconds()),
+        "discord_ready": client.is_ready(),
+        "guild_count": len(client.guilds) if client.is_ready() else 0
+    })
 
 
-# =========================================================
-# HEARTBEAT ROBUSTO
-# =========================================================
-
-@tasks.loop(minutes=5)
-async def health_heartbeat_loop():
-    try:
-        snap = get_runtime_health_snapshot()
-
-        match_snapshot = {}
-        player_snapshot = {}
-        cycle_snapshot = {}
-        season_snapshot = {}
-
-        try:
-            match_snapshot = get_match_ram_index_snapshot()
-        except Exception:
-            match_snapshot = {}
-
-        try:
-            player_snapshot = get_player_ram_index_snapshot()
-        except Exception:
-            player_snapshot = {}
-
-        try:
-            cycle_snapshot = get_cycle_ram_index_snapshot()
-        except Exception:
-            cycle_snapshot = {}
-
-        try:
-            season_snapshot = get_season_ram_index_snapshot()
-        except Exception:
-            season_snapshot = {}
-
-        print(
-            "[HEARTBEAT] "
-            f"time={now_iso_utc()} | "
-            f"ready={snap.get('discord_ready')} | "
-            f"guilds={snap.get('guild_count')} | "
-            f"match_idx={match_snapshot.get('matches_indexed', '-')} | "
-            f"player_idx={player_snapshot.get('players_indexed', '-')} | "
-            f"cycle_idx={cycle_snapshot.get('cycles_indexed', '-')} | "
-            f"season_idx={season_snapshot.get('seasons_indexed', '-')}"
-        )
-
-    except Exception as e:
-        print(f"[HEARTBEAT] erro: {e}")
-
-
-@health_heartbeat_loop.before_loop
-async def before_health_heartbeat_loop():
-    try:
-        await client.wait_until_ready()
-    except Exception:
-        pass
-
-
-def _start_heartbeat_once():
-    if health_heartbeat_loop.is_running():
-        return
-
-    try:
-        health_heartbeat_loop.start()
-        print("[BOOT] Heartbeat iniciado com sucesso.")
-    except Exception as e:
-        print(f"[BOOT] Falha ao iniciar heartbeat: {e}")
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
 
 
 # =========================================================
 # START FINAL
 # =========================================================
-
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN não configurado.")
 
 
-def _final_warmup():
-    """
-    Warmup final desativado para evitar custo duplicado de inicialização.
-    Os índices leves já são aquecidos no setup_hook.
-    Índices pesados ficam em lazy load no primeiro uso.
-    """
-    return
+# Inicia servidor HTTP em thread separada
+threading.Thread(target=run_flask, daemon=True).start()
 
 
-def _install_global_exception_hooks():
-    """
-    Captura exceções fatais fora do fluxo normal para melhorar diagnóstico no Render.
-    """
-
-    def _handle_exception(exc_type, exc_value, exc_tb):
-        try:
-            tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        except Exception:
-            tb_text = f"{exc_type}: {exc_value}"
-
-        _set_fatal_error(tb_text)
-
-        print("\n" + "=" * 80)
-        print("FATAL EXCEPTION CAPTURED BY sys.excepthook")
-        print(tb_text)
-        print("=" * 80 + "\n")
-
-        try:
-            sys.__excepthook__(exc_type, exc_value, exc_tb)
-        except Exception:
-            pass
-
-    sys.excepthook = _handle_exception
-
-    def _threading_excepthook(args):
-        try:
-            tb_text = "".join(
-                traceback.format_exception(
-                    args.exc_type,
-                    args.exc_value,
-                    args.exc_traceback
-                )
-            )
-        except Exception:
-            tb_text = f"{args.exc_type}: {args.exc_value}"
-
-        _set_fatal_error(tb_text)
-
-        print("\n" + "=" * 80)
-        print("FATAL THREAD EXCEPTION CAPTURED BY threading.excepthook")
-        print(tb_text)
-        print("=" * 80 + "\n")
-
-    try:
-        threading.excepthook = _threading_excepthook
-    except Exception:
-        pass
-
-
-@client.event
-async def on_ready():
-    global _READY_ONCE
-
-    try:
-        if not _READY_ONCE:
-            _READY_ONCE = True
-            _mark_boot_completed()
-
-            print("\n" + "=" * 80)
-            print("LEME HOLANDÊS BOT READY")
-            print(f"User: {client.user}")
-            print(f"Guilds carregadas: {len(client.guilds)}")
-            print(f"Ready at (UTC): {_APP_BOOT_COMPLETED_AT}")
-            print("=" * 80 + "\n")
-        else:
-            print(
-                f"[READY] Reconexão detectada em {now_iso_utc()} | "
-                f"user={client.user} | guilds={len(client.guilds)}"
-            )
-    except Exception:
-        pass
-
-    try:
-        _start_heartbeat_once()
-    except Exception as e:
-        print(f"[READY] erro ao iniciar heartbeat: {e}")
-
-
-try:
-    _install_global_exception_hooks()
-except Exception as e:
-    print(f"ERRO instalando exception hooks globais: {e}")
-
-try:
-    _final_warmup()
-except Exception as e:
-    print(f"ERRO no _final_warmup: {e}")
-
-try:
-    print("\n" + "=" * 80)
-    print("INICIANDO LEME HOLANDÊS BOT")
-    print(f"Boot started at (UTC): {_APP_BOOT_STARTED_AT}")
-    print("Subindo servidor HTTP de healthcheck...")
-    print("Endpoints:")
-    print(" - /ping    -> liveness para monitor")
-    print(" - /healthz -> readiness real do bot")
-    print(" - /        -> status manual")
-    print("=" * 80 + "\n")
-except Exception:
-    pass
-
-
-try:
-    keep_alive()
-except Exception:
-    tb_text = traceback.format_exc()
-    _set_fatal_error(tb_text)
-
-    print("\n" + "=" * 80)
-    print("FALHA AO SUBIR keep_alive()")
-    print(tb_text)
-    print("=" * 80 + "\n")
-    raise
-
-
-try:
-    print("\n" + "=" * 80)
-    print("INICIANDO client.run(DISCORD_TOKEN)")
-    print("=" * 80 + "\n")
-    client.run(DISCORD_TOKEN)
-except KeyboardInterrupt:
-    print("\n" + "=" * 80)
-    print("PROCESSO ENCERRADO MANUALMENTE (KeyboardInterrupt)")
-    print("=" * 80 + "\n")
-    raise
-except Exception:
-    tb_text = traceback.format_exc()
-    _set_fatal_error(tb_text)
-
-    print("\n" + "=" * 80)
-    print("FALHA FATAL NO client.run(DISCORD_TOKEN)")
-    print(tb_text)
-    print("=" * 80 + "\n")
-    raise
+# Loop principal resiliente
+asyncio.run(run_bot())
 
 
 # =================================================
