@@ -3376,7 +3376,7 @@ def _montar_nome_deck(guilda: str, arquetipo: str) -> str:
     return f"{g} {a}".strip()
 
 
-# =========================================================
+# =================================================
 # /inscrever (AJUSTADO)
 # =========================================================
 
@@ -3411,7 +3411,7 @@ async def inscrever(interaction: discord.Interaction, guilda: str, arquetipo: st
 
         pid = str(interaction.user.id).strip()
 
-        player_record = get_player_record_by_discord_id(ws_players, pid)
+        player_record = get_player_row_fast(sh, pid)
         if not player_record:
             return await interaction.followup.send("❌ Cadastro não encontrado.", ephemeral=True)
 
