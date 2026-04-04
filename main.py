@@ -3220,13 +3220,18 @@ def ensure_deck_row(ws_decks, season_id: int, cycle: int, player_id: str) -> int
 DECK_GUILDAS = [
     "Sem Guilda",
     "Tribal",
+    "Mono Black",
+    "Mono Blue",
+    "Mono Green",
+    "Mono Red",
+    "Mono White",
+    "Colorless",
     "5C",
     "4C",
     "Abzan",
     "Azorius",
     "Bant",
     "Boros",
-    "Colorless",
     "Dimir",
     "Esper",
     "Golgari",
@@ -3236,11 +3241,6 @@ DECK_GUILDAS = [
     "Jeskai",
     "Jund",
     "Mardu",
-    "Mono Black",
-    "Mono Blue",
-    "Mono Green",
-    "Mono Red",
-    "Mono White",
     "Naya",
     "Orzhov",
     "Rakdos",
@@ -3260,6 +3260,7 @@ DECK_ARQUETIPOS = [
     "Blink",
     "Broodscale",
     "Burn",
+    "Cascade",
     "Combo",
     "Control",
     "Creativity",
@@ -3302,6 +3303,7 @@ DECK_ARQUETIPOS = [
     "Tempo",
     "Through the Breach",
     "Tron",
+    "Twiddle Storm",
     "Valakut",
     "Vampire",
     "Wizards",
@@ -12409,7 +12411,6 @@ async def final_iniciar(interaction: discord.Interaction, season: int):
 # - Sem chave inferior, sem repescagem, sem reset
 # =========================================================
 
-
 # =========================================================
 # HELPERS — VISUALIZAÇÃO DINÂMICA DO CHAVEAMENTO
 # =========================================================
@@ -12426,6 +12427,9 @@ def _final_status_label_pt(status: str) -> str:
 
 
 def _final_stage_started(stage: dict) -> bool:
+    """
+    Deck e decklist só aparecem após início oficial.
+    """
     st = str((stage or {}).get("status", "")).strip().lower()
     return st in {"in_progress", "completed"}
 
@@ -12510,7 +12514,10 @@ def _final_player_block(
     seed_map: dict[str, int],
 ) -> list[str]:
     """
-    Retorna bloco:
+    Antes do início oficial:
+    #1 Nome
+
+    Após início oficial:
     #1 Nome | Deck
     link
     """
@@ -12708,6 +12715,10 @@ def _build_dynamic_chaveamento_sections(sh, season: int) -> list[str]:
         return [f"⚠️ Não há matches da fase final cadastradas na **Season {season}**."]
 
     top_size = safe_int(stage.get("top_size", 0), 0)
+
+    # REGRA COMBINADA:
+    # antes do início oficial = sem deck/decklist
+    # após início oficial = com deck/decklist
     show_deck = _final_stage_started(stage)
 
     deck_map = _final_extract_player_deck_map(sh, season) if show_deck else {}
@@ -12716,7 +12727,6 @@ def _build_dynamic_chaveamento_sections(sh, season: int) -> list[str]:
 
     sections = []
 
-    # Cabeçalho
     sections.append(
         "\n".join([
             f"🏆 **Chaveamento da Fase Final — Season {season}**",
@@ -12724,7 +12734,6 @@ def _build_dynamic_chaveamento_sections(sh, season: int) -> list[str]:
         ]).strip()
     )
 
-    # Rodadas fixas em ordem visual
     ordered_titles = [
         "Oitavas de final",
         "Quartas de final",
@@ -12774,6 +12783,32 @@ def _build_dynamic_chaveamento_sections(sh, season: int) -> list[str]:
     return sections
 
 
+def _split_text_for_discord(text: str, limit: int = 1900) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+
+    if len(raw) <= limit:
+        return [raw]
+
+    chunks = []
+    current = ""
+
+    for line in raw.split("\n"):
+        add = line + "\n"
+        if len(current) + len(add) > limit:
+            if current.strip():
+                chunks.append(current.strip())
+            current = add
+        else:
+            current += add
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
 # =========================================================
 # /chaveamento
 # =========================================================
@@ -12804,40 +12839,18 @@ async def chaveamento(interaction: discord.Interaction, season: int):
                 ephemeral=True
             )
 
-        first = True
-        for part in sections:
-            text = str(part or "").strip()
-            if not text:
-                continue
+        sent_any = False
 
-            if len(text) > 1900:
-                # fallback simples e seguro
-                chunks = []
-                current = ""
+        for section in sections:
+            for chunk in _split_text_for_discord(section, limit=1900):
+                await interaction.followup.send(chunk, ephemeral=False)
+                sent_any = True
 
-                for line in text.split("\n"):
-                    add = line + "\n"
-                    if len(current) + len(add) > 1900:
-                        chunks.append(current.strip())
-                        current = add
-                    else:
-                        current += add
-
-                if current.strip():
-                    chunks.append(current.strip())
-
-                for chunk in chunks:
-                    if first:
-                        await interaction.followup.send(chunk, ephemeral=False)
-                        first = False
-                    else:
-                        await interaction.channel.send(chunk)
-            else:
-                if first:
-                    await interaction.followup.send(text, ephemeral=False)
-                    first = False
-                else:
-                    await interaction.channel.send(text)
+        if not sent_any:
+            await interaction.followup.send(
+                "⚠️ Não foi possível montar o chaveamento.",
+                ephemeral=True
+            )
 
     except Exception as e:
         await interaction.followup.send(
