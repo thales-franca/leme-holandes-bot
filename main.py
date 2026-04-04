@@ -12420,6 +12420,8 @@ def _final_status_label_pt(status: str) -> str:
         return "concluída"
     if st == "open":
         return "aberta"
+    if st == "pending":
+        return "aguardando confirmação"
     return st or "-"
 
 
@@ -12438,16 +12440,32 @@ def _final_extract_player_deck_map(sh, season: int) -> dict[str, dict]:
         return out
 
     for r in rows:
-        if safe_int(r.get("season_id", 0), 0) != season:
+        if safe_int(r.get("season_id", 0), 0) != safe_int(season, 0):
             continue
 
-        pid = str(r.get("player_id") or "").strip()
+        pid = str(
+            r.get("player_id")
+            or r.get("discord_id")
+            or r.get("final_player_id")
+            or ""
+        ).strip()
         if not pid:
             continue
 
         out[pid] = {
-            "deck": str(r.get("deck", "")).strip(),
-            "decklist_url": str(r.get("decklist_url", "")).strip(),
+            "deck": str(
+                r.get("deck")
+                or r.get("arquetipo")
+                or r.get("archetype")
+                or r.get("deck_name")
+                or ""
+            ).strip(),
+            "decklist_url": str(
+                r.get("decklist_url")
+                or r.get("decklist")
+                or r.get("deck_url")
+                or ""
+            ).strip(),
         }
 
     return out
@@ -12462,7 +12480,11 @@ def _final_extract_seed_map(sh, season: int) -> dict[str, int]:
         return out
 
     for p in participants or []:
-        pid = str(p.get("player_id") or "").strip()
+        pid = str(
+            p.get("player_id")
+            or p.get("discord_id")
+            or ""
+        ).strip()
         if not pid:
             continue
 
@@ -12488,7 +12510,7 @@ def _final_player_block(
     seed_map: dict[str, int],
 ) -> list[str]:
     """
-    Retorna bloco de linhas do jogador:
+    Retorna bloco:
     #1 Nome | Deck
     link
     """
@@ -12497,19 +12519,16 @@ def _final_player_block(
         return ["Aguardando"]
 
     name = _final_player_name(nick_map, p)
-    seed = seed_map.get(p)
+    seed = safe_int(seed_map.get(p, 0), 0)
 
-    if seed:
-        base = f"#{seed} {name}"
-    else:
-        base = name
+    base = f"#{seed} {name}" if seed > 0 else name
 
     if not show_deck:
         return [base]
 
     info = deck_map.get(p, {})
-    deck = info.get("deck", "")
-    link = info.get("decklist_url", "")
+    deck = str(info.get("deck", "")).strip()
+    link = str(info.get("decklist_url", "")).strip()
 
     lines = [f"{base} | {deck}" if deck else base]
 
@@ -12526,24 +12545,23 @@ def _final_match_display_block(
     deck_map: dict[str, dict],
     seed_map: dict[str, int],
 ) -> list[str]:
-
     a_block = _final_player_block(
-        nick_map,
-        r.get("player_a_id"),
-        show_deck,
-        deck_map,
-        seed_map
+        nick_map=nick_map,
+        pid=str(r.get("player_a_id", "")).strip(),
+        show_deck=show_deck,
+        deck_map=deck_map,
+        seed_map=seed_map,
     )
 
     b_block = _final_player_block(
-        nick_map,
-        r.get("player_b_id"),
-        show_deck,
-        deck_map,
-        seed_map
+        nick_map=nick_map,
+        pid=str(r.get("player_b_id", "")).strip(),
+        show_deck=show_deck,
+        deck_map=deck_map,
+        seed_map=seed_map,
     )
 
-    status = str(r.get("status", "")).lower()
+    status = str(r.get("status", "")).strip().lower()
     lines = []
 
     lines.extend(a_block)
@@ -12551,15 +12569,26 @@ def _final_match_display_block(
     lines.extend(b_block)
 
     if status == "completed":
-        score = f"{safe_int(r.get('a_games_won',0))}-{safe_int(r.get('b_games_won',0))}"
+        a_w = safe_int(r.get("a_games_won", 0), 0)
+        b_w = safe_int(r.get("b_games_won", 0), 0)
 
-        winner = r.get("winner_id")
-        loser = r.get("loser_id")
+        winner_id = str(r.get("winner_id", "")).strip()
+        loser_id = str(r.get("loser_id", "")).strip()
 
-        w_name = _final_player_name(nick_map, winner)
-        l_name = _final_player_name(nick_map, loser)
+        winner_name = _final_player_name(nick_map, winner_id)
+        loser_name = _final_player_name(nick_map, loser_id)
 
-        lines.append(f"placar {score} | vencedor: {w_name} | eliminado: {l_name}")
+        winner_seed = safe_int(seed_map.get(winner_id, 0), 0)
+        loser_seed = safe_int(seed_map.get(loser_id, 0), 0)
+
+        if winner_seed > 0:
+            winner_name = f"#{winner_seed} {winner_name}"
+        if loser_seed > 0:
+            loser_name = f"#{loser_seed} {loser_name}"
+
+        lines.append(
+            f"placar **{a_w}-{b_w}** | vencedor: **{winner_name or '-'}** | eliminado: **{loser_name or '-'}**"
+        )
     else:
         lines.append(_final_status_label_pt(status))
 
@@ -12567,46 +12596,95 @@ def _final_match_display_block(
 
 
 def _final_round_display_name(stage_top_size: int, round_num: int) -> str:
-    total = 0
-    cur = max(1, stage_top_size)
+    """
+    TOP 2  -> Final
+    TOP 4  -> Semifinal / Final
+    TOP 8  -> Quartas / Semifinal / Final
+    TOP 16 -> Oitavas / Quartas / Semifinal / Final
+    """
+    total_rounds = 0
+    current = max(1, safe_int(stage_top_size, 0))
 
-    while cur > 1:
-        total += 1
-        cur //= 2
+    while current > 1:
+        total_rounds += 1
+        current //= 2
 
-    pos = total - round_num + 1
+    if total_rounds <= 0:
+        return f"Round {round_num}"
 
-    if pos == 1:
+    pos_from_end = total_rounds - round_num + 1
+
+    if pos_from_end == 1:
         return "Final"
-    if pos == 2:
+    if pos_from_end == 2:
         return "Semifinal"
-    if pos == 3:
+    if pos_from_end == 3:
         return "Quartas de final"
-    if pos == 4:
+    if pos_from_end == 4:
         return "Oitavas de final"
 
     return f"Round {round_num}"
 
 
 def _final_group_rows(rows: list[dict]) -> dict[int, list[dict]]:
-    grouped = {}
+    grouped: dict[int, list[dict]] = {}
 
     for r in rows:
-        rd = safe_int(r.get("round", 0))
+        rd = safe_int(r.get("round", 0), 0)
         if rd <= 0:
             continue
 
         grouped.setdefault(rd, []).append(r)
 
     for rd in grouped:
-        grouped[rd].sort(key=lambda x: safe_int(x.get("match_order", 0)))
+        grouped[rd].sort(
+            key=lambda x: (
+                safe_int(x.get("match_order", 0), 0),
+                str(x.get("final_match_id", "")).strip().lower(),
+            )
+        )
 
     return grouped
 
 
+def _final_collect_eliminated_players(
+    rows: list[dict],
+    nick_map: dict[str, str],
+    show_deck: bool,
+    deck_map: dict[str, dict],
+    seed_map: dict[str, int],
+) -> list[str]:
+    eliminated = []
+    seen = set()
+
+    for r in rows:
+        status = str(r.get("status", "")).strip().lower()
+        loser_id = str(r.get("loser_id", "")).strip()
+
+        if status != "completed":
+            continue
+        if not loser_id or loser_id in seen:
+            continue
+
+        seen.add(loser_id)
+
+        block = _final_player_block(
+            nick_map=nick_map,
+            pid=loser_id,
+            show_deck=show_deck,
+            deck_map=deck_map,
+            seed_map=seed_map,
+        )
+
+        eliminated.append("\n".join(block))
+
+    eliminated.sort(key=lambda x: x.lower())
+    return eliminated
+
+
 def _final_stage_status_line(stage: dict) -> str:
-    st = str(stage.get("status", "")).lower()
-    top = safe_int(stage.get("top_size", 0))
+    st = str(stage.get("status", "")).strip().lower()
+    top = safe_int(stage.get("top_size", 0), 0)
 
     mp = {
         "generated": "gerada",
@@ -12615,70 +12693,157 @@ def _final_stage_status_line(stage: dict) -> str:
         "completed": "concluída",
     }
 
-    return f"Status: {mp.get(st, st)} | Formato: TOP {top} | Mata-mata simples | MD5"
+    return f"Status: **{mp.get(st, st or '-')}** | Formato: **TOP {top} | Mata-mata simples | MD5**"
 
 
-def _build_dynamic_chaveamento_text(sh, season: int) -> str:
+def _build_dynamic_chaveamento_sections(sh, season: int) -> list[str]:
     stage = get_final_stage_fast(sh, season)
     rows = get_final_matches_fast(sh, season)
     nick_map = get_player_nick_map_fast(sh)
 
     if not stage:
-        return "Fase final não encontrada."
+        return [f"⚠️ A fase final da **Season {season}** ainda não foi gerada."]
 
     if not rows:
-        return "Sem matches cadastradas."
+        return [f"⚠️ Não há matches da fase final cadastradas na **Season {season}**."]
 
+    top_size = safe_int(stage.get("top_size", 0), 0)
     show_deck = _final_stage_started(stage)
+
     deck_map = _final_extract_player_deck_map(sh, season) if show_deck else {}
     seed_map = _final_extract_seed_map(sh, season)
-
     grouped = _final_group_rows(rows)
 
-    lines = []
-    lines.append(f"🏆 Chaveamento da Fase Final — Season {season}")
-    lines.append(_final_stage_status_line(stage))
-    lines.append("")
+    sections = []
+
+    # Cabeçalho
+    sections.append(
+        "\n".join([
+            f"🏆 **Chaveamento da Fase Final — Season {season}**",
+            _final_stage_status_line(stage)
+        ]).strip()
+    )
+
+    # Rodadas fixas em ordem visual
+    ordered_titles = [
+        "Oitavas de final",
+        "Quartas de final",
+        "Semifinal",
+        "Final",
+    ]
+
+    round_blocks: dict[str, list[str]] = {}
 
     for rd in sorted(grouped.keys()):
-        lines.append(_final_round_display_name(stage.get("top_size", 0), rd))
+        title = _final_round_display_name(top_size, rd)
+        block_lines = [f"**{title}**", ""]
 
         for r in grouped[rd]:
-            lines.extend(
+            block_lines.extend(
                 _final_match_display_block(
-                    r,
-                    nick_map,
-                    show_deck,
-                    deck_map,
-                    seed_map
+                    r=r,
+                    nick_map=nick_map,
+                    show_deck=show_deck,
+                    deck_map=deck_map,
+                    seed_map=seed_map,
                 )
             )
-            lines.append("")
+            block_lines.append("")
 
-    return "\n".join(lines).strip()
+        round_blocks[title] = block_lines
+
+    for title in ordered_titles:
+        if title in round_blocks:
+            sections.append("\n".join(round_blocks[title]).strip())
+
+    eliminated = _final_collect_eliminated_players(
+        rows=rows,
+        nick_map=nick_map,
+        show_deck=show_deck,
+        deck_map=deck_map,
+        seed_map=seed_map,
+    )
+
+    if eliminated:
+        elim_lines = ["**Eliminados**", ""]
+        for item in eliminated:
+            elim_lines.append(item)
+            elim_lines.append("")
+        sections.append("\n".join(elim_lines).strip())
+
+    return sections
 
 
 # =========================================================
 # /chaveamento
 # =========================================================
 
-@client.tree.command(name="chaveamento", description="Exibe o chaveamento da fase final.")
-@app_commands.describe(season="Season")
+@client.tree.command(
+    name="chaveamento",
+    description="Exibe o chaveamento da fase final."
+)
+@app_commands.describe(season="Season da fase final")
 @app_commands.autocomplete(season=ac_owner_season)
 async def chaveamento(interaction: discord.Interaction, season: int):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=False)
 
     try:
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send("Season não encontrada.")
+            return await interaction.followup.send(
+                f"❌ A season {season} não existe.",
+                ephemeral=True
+            )
 
-        txt = _build_dynamic_chaveamento_text(sh, season)
-        await send_long_message(interaction, txt)
+        sections = _build_dynamic_chaveamento_sections(sh, season)
+
+        if not sections:
+            return await interaction.followup.send(
+                "⚠️ Não foi possível montar o chaveamento.",
+                ephemeral=True
+            )
+
+        first = True
+        for part in sections:
+            text = str(part or "").strip()
+            if not text:
+                continue
+
+            if len(text) > 1900:
+                # fallback simples e seguro
+                chunks = []
+                current = ""
+
+                for line in text.split("\n"):
+                    add = line + "\n"
+                    if len(current) + len(add) > 1900:
+                        chunks.append(current.strip())
+                        current = add
+                    else:
+                        current += add
+
+                if current.strip():
+                    chunks.append(current.strip())
+
+                for chunk in chunks:
+                    if first:
+                        await interaction.followup.send(chunk, ephemeral=False)
+                        first = False
+                    else:
+                        await interaction.channel.send(chunk)
+            else:
+                if first:
+                    await interaction.followup.send(text, ephemeral=False)
+                    first = False
+                else:
+                    await interaction.channel.send(text)
 
     except Exception as e:
-        await interaction.followup.send(f"Erro: {e}")
+        await interaction.followup.send(
+            f"❌ Erro no /chaveamento: {e}",
+            ephemeral=True
+        )
 
 
 # =================================================
