@@ -10617,10 +10617,12 @@ def _propagate_final_match_result(sh, final_match: dict, winner_id: str, loser_i
         loser_id=loser_id
     )
 
-
 # =========================================================
 # HELPERS — RESULTADO FINAL
 # =========================================================
+
+FINAL_AUTO_CONFIRM_HOURS = 12
+
 
 def parse_final_md5_score(score: str) -> tuple[int, int, int] | None:
     parsed = parse_score_3parts(score)
@@ -10629,7 +10631,6 @@ def parse_final_md5_score(score: str) -> tuple[int, int, int] | None:
 
     a, b, d = parsed
 
-    # Fase final: sem draw
     if d != 0:
         return None
 
@@ -10648,18 +10649,51 @@ def parse_final_md5_score(score: str) -> tuple[int, int, int] | None:
     return (a, b, d)
 
 
-def _final_match_score_text(r: dict, viewer_pid: str = "") -> str:
-    a_w = safe_int(r.get("a_games_won", 0), 0)
-    b_w = safe_int(r.get("b_games_won", 0), 0)
+def final_auto_confirm_deadline_iso(dt_utc):
+    return (dt_utc + timedelta(hours=FINAL_AUTO_CONFIRM_HOURS)).isoformat()
 
-    a = str(r.get("player_a_id", "")).strip()
-    b = str(r.get("player_b_id", "")).strip()
-    pid = str(viewer_pid or "").strip()
 
-    if pid and pid == b:
-        return f"{b_w}-{a_w}-0"
+# =========================================================
+# VIEW — CONFIRMAÇÃO FINAL (SEM REJEIÇÃO)
+# =========================================================
 
-    return f"{a_w}-{b_w}-0"
+class FinalResultConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Confirmar Resultado", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+        try:
+            match_id = interaction.message.embeds[0].footer.text.replace("match_id:", "").strip()
+
+            sh = open_sheet()
+            ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
+
+            rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
+            if rown is None:
+                return await interaction.response.send_message("Match não encontrada.", ephemeral=True)
+
+            vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+            header = vals[0]
+            idx = {name: i for i, name in enumerate(header)}
+
+            winner_id = row[idx["winner_id"]]
+            loser_id = row[idx["loser_id"]]
+
+            final_match = get_final_match_by_id_fast(sh, match_id)
+
+            _propagate_final_match_result(
+                sh=sh,
+                final_match=final_match,
+                winner_id=winner_id,
+                loser_id=loser_id
+            )
+
+            await interaction.response.send_message("✅ Resultado confirmado com sucesso.", ephemeral=True)
+
+        except Exception as e:
+            await interaction.response.send_message(f"Erro: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -10672,8 +10706,8 @@ def _final_match_score_text(r: dict, viewer_pid: str = "") -> str:
 )
 @app_commands.describe(
     season="Season da fase final",
-    match_id="Selecione sua match da fase final",
-    placar="Formato MD5 sem draw (ex: 3-1-0)"
+    match_id="Selecione sua match",
+    placar="Formato MD5 (ex: 3-1-0)"
 )
 @app_commands.autocomplete(
     season=ac_owner_season,
@@ -10687,180 +10721,115 @@ async def resultado_final(interaction: discord.Interaction, season: int, match_i
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Season não existe.", ephemeral=True)
 
         stage = get_final_stage_fast(sh, season)
         if not stage:
-            return await interaction.followup.send(
-                "❌ A fase final desta season ainda não foi gerada.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Fase final não encontrada.", ephemeral=True)
 
-        stage_status = str(stage.get("status", "")).strip().lower()
-        if stage_status == "completed":
+        if str(stage.get("status")).lower() != "in_progress":
             return await interaction.followup.send(
-                "❌ A fase final desta season já foi concluída.",
-                ephemeral=True
-            )
-
-        if stage_status != "in_progress":
-            return await interaction.followup.send(
-                "❌ A fase final ainda não foi iniciada oficialmente. Use `/final_iniciar` antes de reportar resultados.",
+                "❌ Fase final não iniciada.",
                 ephemeral=True
             )
 
         parsed = parse_final_md5_score(placar)
         if not parsed:
-            return await interaction.followup.send(
-                "❌ Placar inválido para a fase final. Use apenas MD5 sem draw, por exemplo: 3-0-0, 3-1-0 ou 3-2-0.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("❌ Placar inválido.", ephemeral=True)
 
-        my_v, my_d, my_e = parsed
-        uid = str(interaction.user.id).strip()
+        v, d, e = parsed
+        uid = str(interaction.user.id)
 
-        final_match = get_final_match_by_id_fast(sh, match_id)
-        if not final_match:
-            return await interaction.followup.send(
-                "❌ Match da fase final não encontrada.",
-                ephemeral=True
-            )
+        match = get_final_match_by_id_fast(sh, match_id)
+        if not match:
+            return await interaction.followup.send("❌ Match não encontrada.", ephemeral=True)
 
-        if safe_int(final_match.get("season_id", 0), 0) != season:
-            return await interaction.followup.send(
-                "❌ Esta match não pertence à season informada.",
-                ephemeral=True
-            )
+        if str(match.get("status")).lower() != "open":
+            return await interaction.followup.send("❌ Match já concluída.", ephemeral=True)
 
-        status = str(final_match.get("status", "")).strip().lower()
-        if status != "open":
-            return await interaction.followup.send(
-                "❌ Esta match da fase final já foi concluída.",
-                ephemeral=True
-            )
-
-        a = str(final_match.get("player_a_id", "")).strip()
-        b = str(final_match.get("player_b_id", "")).strip()
-
-        if not a or not b:
-            return await interaction.followup.send(
-                "❌ Esta match ainda não está pronta. Aguarde definição dos participantes.",
-                ephemeral=True
-            )
+        a = str(match.get("player_a_id"))
+        b = str(match.get("player_b_id"))
 
         if uid not in (a, b):
-            return await interaction.followup.send(
-                "❌ Você não participa desta match da fase final.",
-                ephemeral=True
-            )
-
-        ws_stage, _ws_participants, ws_final_matches = ensure_final_sheets(sh)
-
-        rown, row = find_final_match_sheet_row(ws_final_matches, match_id)
-        if rown is None:
-            return await interaction.followup.send(
-                "❌ Não encontrei a linha da match da fase final na planilha.",
-                ephemeral=True
-            )
-
-        vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
-        header = vals[0] if vals else FINAL_MATCHES_HEADER
-        idx = {name: i for i, name in enumerate(header)}
+            return await interaction.followup.send("❌ Você não participa.", ephemeral=True)
 
         if uid == a:
-            a_w, b_w, _ = my_v, my_d, my_e
+            a_w, b_w = v, d
+            opponent_id = b
         else:
-            a_w, b_w, _ = my_d, my_v, my_e
-
-        if a_w == b_w:
-            return await interaction.followup.send(
-                "❌ A fase final não permite empate.",
-                ephemeral=True
-            )
+            a_w, b_w = d, v
+            opponent_id = a
 
         winner_id = a if a_w > b_w else b
         loser_id = b if a_w > b_w else a
 
-        updated_at = now_iso_utc()
+        ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
 
-        updates = [
-            {
-                "range": f"{col_letter(idx['a_games_won'])}{rown}",
-                "values": [[str(a_w)]]
-            },
-            {
-                "range": f"{col_letter(idx['b_games_won'])}{rown}",
-                "values": [[str(b_w)]]
-            },
-            {
-                "range": f"{col_letter(idx['result_type'])}{rown}",
-                "values": [["final"]]
-            },
-            {
-                "range": f"{col_letter(idx['status'])}{rown}",
-                "values": [["completed"]]
-            },
-            {
-                "range": f"{col_letter(idx['winner_id'])}{rown}",
-                "values": [[winner_id]]
-            },
-            {
-                "range": f"{col_letter(idx['loser_id'])}{rown}",
-                "values": [[loser_id]]
-            },
-            {
-                "range": f"{col_letter(idx['updated_at'])}{rown}",
-                "values": [[updated_at]]
-            },
-        ]
+        rown, _ = find_final_match_sheet_row(ws_final_matches, match_id)
+        vals = cached_get_all_values(ws_final_matches, ttl_seconds=10)
+        header = vals[0]
+        idx = {name: i for i, name in enumerate(header)}
 
-        ws_final_matches.batch_update(updates)
+        ws_final_matches.batch_update([
+            {"range": f"{col_letter(idx['a_games_won'])}{rown}", "values": [[a_w]]},
+            {"range": f"{col_letter(idx['b_games_won'])}{rown}", "values": [[b_w]]},
+            {"range": f"{col_letter(idx['winner_id'])}{rown}", "values": [[winner_id]]},
+            {"range": f"{col_letter(idx['loser_id'])}{rown}", "values": [[loser_id]]},
+            {"range": f"{col_letter(idx['status'])}{rown}", "values": [["pending"]]},
+            {"range": f"{col_letter(idx['auto_confirm_at'])}{rown}", "values": [[final_auto_confirm_deadline_iso(utc_now_dt())]]},
+            {"range": f"{col_letter(idx['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
+        ])
+
         cache_invalidate(ws_final_matches)
         invalidate_final_matches_ram_index()
 
-        # recarrega já concluída para propagar corretamente
-        final_match_done = get_final_match_by_id_fast(sh, match_id)
-        if not final_match_done:
-            final_match_done = dict(final_match)
-            final_match_done["a_games_won"] = a_w
-            final_match_done["b_games_won"] = b_w
-            final_match_done["winner_id"] = winner_id
-            final_match_done["loser_id"] = loser_id
-            final_match_done["status"] = "completed"
-
-        _propagate_final_match_result(
-            sh=sh,
-            final_match=final_match_done,
-            winner_id=winner_id,
-            loser_id=loser_id
-        )
-
         nick_map = get_player_nick_map_fast(sh)
-        winner_name = nick_map.get(winner_id, winner_id)
-        loser_name = nick_map.get(loser_id, loser_id)
 
-        await interaction.followup.send(
-            f"✅ Resultado da fase final registrado com sucesso.\n"
-            f"- Match: **{match_id}**\n"
-            f"- Placar: **{placar}**\n"
-            f"- Vencedor: **{winner_name}**\n"
-            f"- Eliminado: **{loser_name}**",
-            ephemeral=True
+        opponent = await client.fetch_user(int(opponent_id))
+
+        embed = discord.Embed(
+            title="Confirmação de resultado — Fase Final",
+            description=(
+                f"Match: `{match_id}`\n"
+                f"Placar: **{placar}**\n\n"
+                f"Confirme o resultado abaixo.\n"
+                f"Auto confirmação em {FINAL_AUTO_CONFIRM_HOURS}h."
+            )
         )
+        embed.set_footer(text=f"match_id:{match_id}")
+
+        try:
+            await opponent.send(embed=embed, view=FinalResultConfirmView())
+        except Exception:
+            pass
+
+        await interaction.followup.send("✅ Resultado enviado para confirmação.", ephemeral=True)
 
         await log_admin(
             interaction,
-            f"resultado_final: season={season} match={match_id} placar={placar} winner={winner_name} loser={loser_name}"
+            f"resultado_final pending: match={match_id} placar={placar}"
         )
 
+        # 🔥 AUTO FINALIZAÇÃO (se for final depois da confirmação futura)
+        if safe_int(match.get("round"), 0) == safe_int(stage.get("top_size"), 0).bit_length() - 1:
+            set_final_stage(
+                ws_stage,
+                season_id=season,
+                status="completed",
+                top_size=stage.get("top_size"),
+                fmt="single_elimination"
+            )
+
+            winner_name = nick_map.get(winner_id, winner_id)
+
+            await interaction.followup.send(
+                f"🏆 **Temos um campeão!**\n\n"
+                f"Parabéns **{winner_name}** pela conquista da Season {season}!",
+                ephemeral=False
+            )
+
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /resultado_final: {e}",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 
 # =================================================
@@ -12436,7 +12405,6 @@ async def final_iniciar(interaction: discord.Interaction, season: int):
 # da Fase Final em mata-mata simples no Discord, usando os dados atuais
 # de FinalMatches.
 # ATENÇÃO:
-# - ESTE BLOCO SUBSTITUI O /chaveamento anterior
 # - Fase final agora é MD5 mata-mata simples
 # - Sem chave inferior, sem repescagem, sem reset
 # =========================================================
@@ -12455,6 +12423,56 @@ def _final_status_label_pt(status: str) -> str:
     return st or "-"
 
 
+def _final_stage_started(stage: dict) -> bool:
+    st = str((stage or {}).get("status", "")).strip().lower()
+    return st in {"in_progress", "completed"}
+
+
+def _final_extract_player_deck_map(sh, season: int) -> dict[str, dict]:
+    out = {}
+
+    try:
+        ws = ensure_worksheet(sh, "FinalDecks", FINAL_DECKS_HEADER)
+        rows = cached_get_all_records(ws, ttl_seconds=10)
+    except Exception:
+        return out
+
+    for r in rows:
+        if safe_int(r.get("season_id", 0), 0) != season:
+            continue
+
+        pid = str(r.get("player_id") or "").strip()
+        if not pid:
+            continue
+
+        out[pid] = {
+            "deck": str(r.get("deck", "")).strip(),
+            "decklist_url": str(r.get("decklist_url", "")).strip(),
+        }
+
+    return out
+
+
+def _final_extract_seed_map(sh, season: int) -> dict[str, int]:
+    out = {}
+
+    try:
+        participants = get_final_participants_fast(sh, season)
+    except Exception:
+        return out
+
+    for p in participants or []:
+        pid = str(p.get("player_id") or "").strip()
+        if not pid:
+            continue
+
+        seed = safe_int(p.get("seed", 0), 0)
+        if seed > 0:
+            out[pid] = seed
+
+    return out
+
+
 def _final_player_name(nick_map: dict[str, str], pid: str) -> str:
     p = str(pid or "").strip()
     if not p:
@@ -12462,136 +12480,142 @@ def _final_player_name(nick_map: dict[str, str], pid: str) -> str:
     return nick_map.get(p, p)
 
 
-def _final_match_winner_name(r: dict, nick_map: dict[str, str]) -> str:
-    wid = str(r.get("winner_id", "")).strip()
-    if not wid:
-        return ""
-    return _final_player_name(nick_map, wid)
+def _final_player_block(
+    nick_map: dict[str, str],
+    pid: str,
+    show_deck: bool,
+    deck_map: dict[str, dict],
+    seed_map: dict[str, int],
+) -> list[str]:
+    """
+    Retorna bloco de linhas do jogador:
+    #1 Nome | Deck
+    link
+    """
+    p = str(pid or "").strip()
+    if not p:
+        return ["Aguardando"]
+
+    name = _final_player_name(nick_map, p)
+    seed = seed_map.get(p)
+
+    if seed:
+        base = f"#{seed} {name}"
+    else:
+        base = name
+
+    if not show_deck:
+        return [base]
+
+    info = deck_map.get(p, {})
+    deck = info.get("deck", "")
+    link = info.get("decklist_url", "")
+
+    lines = [f"{base} | {deck}" if deck else base]
+
+    if link:
+        lines.append(link)
+
+    return lines
 
 
-def _final_match_loser_name(r: dict, nick_map: dict[str, str]) -> str:
-    lid = str(r.get("loser_id", "")).strip()
-    if not lid:
-        return ""
-    return _final_player_name(nick_map, lid)
+def _final_match_display_block(
+    r: dict,
+    nick_map: dict[str, str],
+    show_deck: bool,
+    deck_map: dict[str, dict],
+    seed_map: dict[str, int],
+) -> list[str]:
 
+    a_block = _final_player_block(
+        nick_map,
+        r.get("player_a_id"),
+        show_deck,
+        deck_map,
+        seed_map
+    )
 
-def _final_match_score_compact(r: dict) -> str:
-    a_w = safe_int(r.get("a_games_won", 0), 0)
-    b_w = safe_int(r.get("b_games_won", 0), 0)
-    return f"{a_w}-{b_w}"
+    b_block = _final_player_block(
+        nick_map,
+        r.get("player_b_id"),
+        show_deck,
+        deck_map,
+        seed_map
+    )
+
+    status = str(r.get("status", "")).lower()
+    lines = []
+
+    lines.extend(a_block)
+    lines.append("vs")
+    lines.extend(b_block)
+
+    if status == "completed":
+        score = f"{safe_int(r.get('a_games_won',0))}-{safe_int(r.get('b_games_won',0))}"
+
+        winner = r.get("winner_id")
+        loser = r.get("loser_id")
+
+        w_name = _final_player_name(nick_map, winner)
+        l_name = _final_player_name(nick_map, loser)
+
+        lines.append(f"placar {score} | vencedor: {w_name} | eliminado: {l_name}")
+    else:
+        lines.append(_final_status_label_pt(status))
+
+    return lines
 
 
 def _final_round_display_name(stage_top_size: int, round_num: int) -> str:
-    """
-    Nome amigável da rodada baseado no top_size.
-    TOP 2  -> Final
-    TOP 4  -> Semifinal / Final
-    TOP 8  -> Quartas / Semifinal / Final
-    TOP 16 -> Oitavas / Quartas / Semifinal / Final
-    """
-    total_rounds = 0
-    current = max(1, safe_int(stage_top_size, 0))
-    while current > 1:
-        total_rounds += 1
-        current = current // 2
+    total = 0
+    cur = max(1, stage_top_size)
 
-    if total_rounds <= 0:
-        return f"Round {round_num}"
+    while cur > 1:
+        total += 1
+        cur //= 2
 
-    pos_from_end = total_rounds - round_num + 1
+    pos = total - round_num + 1
 
-    if pos_from_end == 1:
+    if pos == 1:
         return "Final"
-    if pos_from_end == 2:
+    if pos == 2:
         return "Semifinal"
-    if pos_from_end == 3:
+    if pos == 3:
         return "Quartas de final"
-    if pos_from_end == 4:
+    if pos == 4:
         return "Oitavas de final"
 
     return f"Round {round_num}"
 
 
-def _final_match_display_line(r: dict, nick_map: dict[str, str]) -> str:
-    mid = str(r.get("final_match_id", "")).strip()
-    a = _final_player_name(nick_map, str(r.get("player_a_id", "")).strip())
-    b = _final_player_name(nick_map, str(r.get("player_b_id", "")).strip())
-    status = str(r.get("status", "")).strip().lower()
-
-    if status == "completed":
-        score = _final_match_score_compact(r)
-        winner = _final_match_winner_name(r, nick_map)
-        loser = _final_match_loser_name(r, nick_map)
-        return (
-            f"`{mid}` | **{a}** vs **{b}** | "
-            f"placar **{score}** | vencedor: **{winner or '-'}** | eliminado: **{loser or '-'}**"
-        )
-
-    return f"`{mid}` | **{a}** vs **{b}** | {_final_status_label_pt(status)}"
-
-
-def _final_collect_eliminated_players(rows: list[dict], nick_map: dict[str, str]) -> list[str]:
-    """
-    Mata-mata simples:
-    eliminado = qualquer loser_id de match concluída.
-    """
-    eliminated = []
-    seen = set()
-
-    for r in rows:
-        status = str(r.get("status", "")).strip().lower()
-        loser_id = str(r.get("loser_id", "")).strip()
-
-        if status != "completed":
-            continue
-        if not loser_id or loser_id in seen:
-            continue
-
-        seen.add(loser_id)
-        eliminated.append(_final_player_name(nick_map, loser_id))
-
-    eliminated.sort(key=lambda x: x.lower())
-    return eliminated
-
-
 def _final_group_rows(rows: list[dict]) -> dict[int, list[dict]]:
-    """
-    Mata-mata simples:
-    agrupa apenas por round.
-    """
-    grouped: dict[int, list[dict]] = {}
+    grouped = {}
 
     for r in rows:
-        round_num = safe_int(r.get("round", 0), 0)
-        if round_num <= 0:
+        rd = safe_int(r.get("round", 0))
+        if rd <= 0:
             continue
 
-        grouped.setdefault(round_num, []).append(r)
+        grouped.setdefault(rd, []).append(r)
 
-    for round_num in grouped:
-        grouped[round_num].sort(
-            key=lambda x: (
-                safe_int(x.get("match_order", 0), 0),
-                str(x.get("final_match_id", "")).lower(),
-            )
-        )
+    for rd in grouped:
+        grouped[rd].sort(key=lambda x: safe_int(x.get("match_order", 0)))
 
     return grouped
 
 
 def _final_stage_status_line(stage: dict) -> str:
-    status = str(stage.get("status", "")).strip().lower()
-    top_size = safe_int(stage.get("top_size", 0), 0)
+    st = str(stage.get("status", "")).lower()
+    top = safe_int(stage.get("top_size", 0))
 
-    st_map = {
+    mp = {
         "generated": "gerada",
         "waiting_confirmation": "aguardando início oficial",
         "in_progress": "em andamento",
         "completed": "concluída",
     }
 
-    return f"Status: **{st_map.get(status, status or '-')}** | Formato: **TOP {top_size} | Mata-mata simples | MD5**"
+    return f"Status: {mp.get(st, st)} | Formato: TOP {top} | Mata-mata simples | MD5"
 
 
 def _build_dynamic_chaveamento_text(sh, season: int) -> str:
@@ -12600,75 +12624,61 @@ def _build_dynamic_chaveamento_text(sh, season: int) -> str:
     nick_map = get_player_nick_map_fast(sh)
 
     if not stage:
-        return f"⚠️ A fase final da **Season {season}** ainda não foi gerada."
+        return "Fase final não encontrada."
 
     if not rows:
-        return f"⚠️ Não há matches da fase final cadastradas na **Season {season}**."
+        return "Sem matches cadastradas."
 
-    top_size = safe_int(stage.get("top_size", 0), 0)
+    show_deck = _final_stage_started(stage)
+    deck_map = _final_extract_player_deck_map(sh, season) if show_deck else {}
+    seed_map = _final_extract_seed_map(sh, season)
+
     grouped = _final_group_rows(rows)
-    eliminated = _final_collect_eliminated_players(rows, nick_map)
 
-    lines = [
-        f"🏆 **Chaveamento da Fase Final — Season {season}**",
-        _final_stage_status_line(stage),
-        ""
-    ]
+    lines = []
+    lines.append(f"🏆 Chaveamento da Fase Final — Season {season}")
+    lines.append(_final_stage_status_line(stage))
+    lines.append("")
 
-    for round_num in sorted(grouped.keys()):
-        round_title = _final_round_display_name(top_size, round_num)
-        lines.append(f"**{round_title}**")
+    for rd in sorted(grouped.keys()):
+        lines.append(_final_round_display_name(stage.get("top_size", 0), rd))
 
-        for r in grouped[round_num]:
-            lines.append(_final_match_display_line(r, nick_map))
-
-        lines.append("")
-
-    if eliminated:
-        lines.append("**Eliminados**")
-        for name in eliminated:
-            lines.append(f"- {name}")
+        for r in grouped[rd]:
+            lines.extend(
+                _final_match_display_block(
+                    r,
+                    nick_map,
+                    show_deck,
+                    deck_map,
+                    seed_map
+                )
+            )
+            lines.append("")
 
     return "\n".join(lines).strip()
 
 
 # =========================================================
 # /chaveamento
-# ATENÇÃO: ESTE COMANDO SUBSTITUI O /chaveamento ANTERIOR
 # =========================================================
 
-@client.tree.command(
-    name="chaveamento",
-    description="Mostra o chaveamento dinâmico da fase final da season."
-)
-@app_commands.describe(season="Season da fase final")
+@client.tree.command(name="chaveamento", description="Exibe o chaveamento da fase final.")
+@app_commands.describe(season="Season")
 @app_commands.autocomplete(season=ac_owner_season)
 async def chaveamento(interaction: discord.Interaction, season: int):
-    await interaction.response.defer(ephemeral=False)
+    await interaction.response.defer()
 
     try:
         sh = open_sheet()
 
         if not season_exists(sh, season):
-            return await interaction.followup.send(
-                f"❌ A season {season} não existe.",
-                ephemeral=False
-            )
+            return await interaction.followup.send("Season não encontrada.")
 
-        text = _build_dynamic_chaveamento_text(sh, season)
-
-        await send_followup_chunks(
-            interaction,
-            text,
-            ephemeral=False,
-            limit=1800
-        )
+        txt = _build_dynamic_chaveamento_text(sh, season)
+        await send_long_message(interaction, txt)
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erro no /chaveamento: {e}",
-            ephemeral=False
-        )
+        await interaction.followup.send(f"Erro: {e}")
 
 
 # =================================================
