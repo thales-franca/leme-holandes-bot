@@ -11321,7 +11321,7 @@ async def resultado_final(interaction: discord.Interaction, oponente: str, placa
         match_id = str(final_match.get("final_match_id", "")).strip()
 
         ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
-        col = ensure_sheet_columns(ws_final_matches, FINAL_MATCHES_REQUIRED_COLS)
+        col = ensure_sheet_columns(ws_final_matches, FINAL_MATCHES_PENDING_REQUIRED_COLS)
 
         rown, _ = find_final_match_sheet_row(ws_final_matches, match_id)
         if rown is None:
