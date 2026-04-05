@@ -10623,7 +10623,7 @@ def _propagate_final_match_result(sh, final_match: dict, winner_id: str, loser_i
 # HELPERS — RESULTADO FINAL
 # =========================================================
 
-FINAL_RESULT_AUTO_CONFIRM_HOURS = 12
+FINAL_RESULT_AUTO_CONFIRM_HOURS = 1
 
 FINAL_MATCHES_PENDING_REQUIRED_COLS = [
     "final_match_id",
