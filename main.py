@@ -11218,147 +11218,86 @@ async def ac_final_oponente_user_open(
     except Exception:
         return []
 
-# =========================================================
-# /resultado_final
-# =========================================================
+# 🔥 SALVA COMO PENDING
+ws_final_matches.batch_update([
+    {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[str(a_w)]]},
+    {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[str(b_w)]]},
+    {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["final"]]},
+    {"range": f"{col_letter(col['status'])}{rown}", "values": [["pending"]]},
+    {"range": f"{col_letter(col['winner_id'])}{rown}", "values": [[winner_id]]},
+    {"range": f"{col_letter(col['loser_id'])}{rown}", "values": [[loser_id]]},
+    {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [[uid]]},
+    {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[""]]},
+    {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[final_auto_confirm_deadline_iso(utc_now_dt())]]},
+    {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
+])
 
-@client.tree.command(
-    name="resultado_final",
-    description="Reporta resultado de uma match da fase final (MD5, sem draw)."
+cache_invalidate(ws_final_matches)
+invalidate_final_matches_ram_index()
+
+# =====================================================
+# 🔥 CORREÇÃO CRÍTICA — REBUILD DO CHAVEAMENTO
+# =====================================================
+
+# 1) limpa descendentes dessa match
+_final_clear_match_and_descendants(
+    ws_final_matches=ws_final_matches,
+    season_id=season,
+    root_match_id=match_id,
+    preserve_root_players=True
 )
-@app_commands.describe(
-    oponente="Selecione seu oponente",
-    placar="Formato MD5 sem draw (ex: 3-1-0)"
+
+# 2) recarrega matches
+rows_after = get_final_matches_fast(sh, season)
+
+# 3) reaplica todas as matches já concluídas (exceto a atual)
+replay = []
+
+for r in rows_after:
+    mid = str(r.get("final_match_id", "")).strip()
+    status_r = str(r.get("status", "")).strip().lower()
+
+    if mid == match_id:
+        continue
+
+    if status_r != "completed":
+        continue
+
+    a_prev = safe_int(r.get("a_games_won", 0), 0)
+    b_prev = safe_int(r.get("b_games_won", 0), 0)
+
+    if a_prev == b_prev:
+        continue
+
+    replay.append({
+        "match_id": mid,
+        "round": safe_int(r.get("round", 0), 0),
+        "order": safe_int(r.get("match_order", 0), 0),
+        "a": a_prev,
+        "b": b_prev
+    })
+
+replay.sort(key=lambda x: (x["round"], x["order"], x["match_id"]))
+
+for item in replay:
+    _final_apply_match_result_direct(
+        sh=sh,
+        ws_final_matches=ws_final_matches,
+        season_id=season,
+        match_id=item["match_id"],
+        a_w=item["a"],
+        b_w=item["b"]
+    )
+
+# 4) aplica a atual por último (PENDING)
+_final_apply_match_result_direct(
+    sh=sh,
+    ws_final_matches=ws_final_matches,
+    season_id=season,
+    match_id=match_id,
+    a_w=a_w,
+    b_w=b_w
 )
-@app_commands.autocomplete(
-    oponente=ac_final_oponente_user_open,
-    placar=ac_score_final_md5
-)
-async def resultado_final(interaction: discord.Interaction, oponente: str, placar: str):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        parsed = parse_final_md5_score(placar)
-        if not parsed:
-            return await interaction.followup.send(
-                "❌ Placar inválido. Use apenas MD5 sem draw (ex: 3-1-0).",
-                ephemeral=True
-            )
-
-        sh = open_sheet()
-
-        season = _get_latest_in_progress_final_season(sh)
-        if not season:
-            return await interaction.followup.send(
-                "❌ Não há fase final em andamento.",
-                ephemeral=True
-            )
-
-        stage = get_final_stage_fast(sh, season)
-        if not stage:
-            return await interaction.followup.send(
-                "❌ Fase final não encontrada.",
-                ephemeral=True
-            )
-
-        if str(stage.get("status", "")).lower() != "in_progress":
-            return await interaction.followup.send(
-                "❌ A fase final ainda não foi iniciada.",
-                ephemeral=True
-            )
-
-        uid = str(interaction.user.id).strip()
-        opponent_id = str(oponente).strip()
-
-        final_match = _find_user_open_or_pending_final_match_against_opponent(
-            sh=sh,
-            season_id=season,
-            user_id=uid,
-            opponent_id=opponent_id
-        )
-
-        if not final_match:
-            return await interaction.followup.send(
-                "❌ Não encontrei uma match da fase final contra esse oponente.",
-                ephemeral=True
-            )
-
-        status = str(final_match.get("status", "")).lower()
-
-        if status == "pending":
-            return await interaction.followup.send(
-                "❌ Já existe um resultado pendente para essa match.",
-                ephemeral=True
-            )
-
-        a = str(final_match.get("player_a_id", "")).strip()
-        b = str(final_match.get("player_b_id", "")).strip()
-
-        if uid not in (a, b):
-            return await interaction.followup.send(
-                "❌ Você não participa desta match.",
-                ephemeral=True
-            )
-
-        v, d, e = parsed
-
-        if uid == a:
-            a_w, b_w = v, d
-            opponent_real = b
-        else:
-            a_w, b_w = d, v
-            opponent_real = a
-
-        if a_w == b_w:
-            return await interaction.followup.send(
-                "❌ Não é permitido empate na fase final.",
-                ephemeral=True
-            )
-
-        winner_id = a if a_w > b_w else b
-        loser_id = b if a_w > b_w else a
-
-        match_id = str(final_match.get("final_match_id", "")).strip()
-
-        ws_stage, _, ws_final_matches = ensure_final_sheets(sh)
-        col = ensure_sheet_columns(ws_final_matches, FINAL_MATCHES_PENDING_REQUIRED_COLS)
-
-        rown, _ = find_final_match_sheet_row(ws_final_matches, match_id)
-        if rown is None:
-            return await interaction.followup.send(
-                "❌ Não encontrei a match na planilha.",
-                ephemeral=True
-            )
-
-        # 🔥 SALVA COMO PENDING
-        ws_final_matches.batch_update([
-            {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[str(a_w)]]},
-            {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[str(b_w)]]},
-            {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["final"]]},
-            {"range": f"{col_letter(col['status'])}{rown}", "values": [["pending"]]},
-            {"range": f"{col_letter(col['winner_id'])}{rown}", "values": [[winner_id]]},
-            {"range": f"{col_letter(col['loser_id'])}{rown}", "values": [[loser_id]]},
-            {"range": f"{col_letter(col['reported_by_id'])}{rown}", "values": [[uid]]},
-            {"range": f"{col_letter(col['confirmed_by_id'])}{rown}", "values": [[""]]},
-            {"range": f"{col_letter(col['auto_confirm_at'])}{rown}", "values": [[final_auto_confirm_deadline_iso(utc_now_dt())]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
-        ])
-
-        cache_invalidate(ws_final_matches)
-        invalidate_final_matches_ram_index()
-
-        # 🔥 PROPAGA IMEDIATO (base do chaveamento)
-        final_match_pending = dict(final_match)
-        final_match_pending["winner_id"] = winner_id
-        final_match_pending["loser_id"] = loser_id
-        final_match_pending["status"] = "pending"
-
-        _propagate_final_match_result(
-            sh=sh,
-            final_match=final_match_pending,
-            winner_id=winner_id,
-            loser_id=loser_id
-        )
 
         # =====================================================
         # DM PARA CONFIRMAÇÃO
@@ -11695,7 +11634,7 @@ def _final_apply_match_result_direct(
 @app_commands.describe(
     season="Season da fase final",
     match_id="ID da match da fase final",
-    placar="Formato MD5 sem draw (ex: 3-1-0)"
+    placar="Formato MD5 sem draw (ex: 3-0-0, 3-1-0 ou 3-2-0)"
 )
 @app_commands.autocomplete(
     season=ac_owner_season,
@@ -11764,7 +11703,9 @@ async def admin_resultado_final_editar(
                 ephemeral=True
             )
 
-        # rollback da match e de tudo que depende dela
+        # =====================================================
+        # 1) LIMPA A MATCH RAIZ E TUDO QUE DEPENDE DELA
+        # =====================================================
         affected = _final_clear_match_and_descendants(
             ws_final_matches=ws_final_matches,
             season_id=season,
@@ -11774,6 +11715,63 @@ async def admin_resultado_final_editar(
 
         _final_reopen_stage_if_completed(ws_stage, season)
 
+        # =====================================================
+        # 2) RECARREGA O ESTADO APÓS LIMPEZA
+        # =====================================================
+        rows_after_clear = get_final_matches_fast(sh, season)
+
+        # =====================================================
+        # 3) REAPLICA TODAS AS MATCHES JÁ CONCLUÍDAS
+        #    (exceto a raiz editada, que será reaplicada com o novo placar)
+        # =====================================================
+        replay_matches = []
+
+        for r in rows_after_clear:
+            mid = str(r.get("final_match_id", "")).strip()
+            status = str(r.get("status", "")).strip().lower()
+
+            if mid == match_id:
+                continue
+
+            if status != "completed":
+                continue
+
+            a_w = safe_int(r.get("a_games_won", 0), 0)
+            b_w = safe_int(r.get("b_games_won", 0), 0)
+
+            # segurança extra
+            if a_w == b_w:
+                continue
+
+            replay_matches.append({
+                "match_id": mid,
+                "round": safe_int(r.get("round", 0), 0),
+                "match_order": safe_int(r.get("match_order", 0), 0),
+                "a_w": a_w,
+                "b_w": b_w,
+            })
+
+        replay_matches.sort(
+            key=lambda x: (
+                x["round"],
+                x["match_order"],
+                x["match_id"],
+            )
+        )
+
+        for item in replay_matches:
+            _final_apply_match_result_direct(
+                sh=sh,
+                ws_final_matches=ws_final_matches,
+                season_id=season,
+                match_id=item["match_id"],
+                a_w=item["a_w"],
+                b_w=item["b_w"]
+            )
+
+        # =====================================================
+        # 4) REAPLICA A MATCH EDITADA COM O NOVO PLACAR
+        # =====================================================
         result = _final_apply_match_result_direct(
             sh=sh,
             ws_final_matches=ws_final_matches,
@@ -11808,8 +11806,6 @@ async def admin_resultado_final_editar(
             f"❌ Erro no /admin_resultado_final_editar: {e}",
             ephemeral=True
         )
-
-
 # =========================================================
 # /admin_resultado_final_cancelar
 # =========================================================
