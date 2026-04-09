@@ -10859,51 +10859,79 @@ async def resultado_final(interaction: discord.Interaction, oponente: str, placa
                 ephemeral=True
             )
 
-        ws_final_matches.batch_update([
-            {"range": f"{col_letter(col['a_games_won'])}{rown}", "values": [[str(a_w)]]},
-            {"range": f"{col_letter(col['b_games_won'])}{rown}", "values": [[str(b_w)]]},
-            {"range": f"{col_letter(col['result_type'])}{rown}", "values": [["final"]]},
-            {"range": f"{col_letter(col['status'])}{rown}", "values": [["completed"]]},
-            {"range": f"{col_letter(col['winner_id'])}{rown}", "values": [[winner_id]]},
-            {"range": f"{col_letter(col['loser_id'])}{rown}", "values": [[loser_id]]},
-            {"range": f"{col_letter(col['updated_at'])}{rown}", "values": [[now_iso_utc()]]},
-        ])
+        affected = _final_clear_match_and_descendants(
+            ws_final_matches=ws_final_matches,
+            season_id=season,
+            root_match_id=match_id,
+            preserve_root_players=True
+        )
 
-        cache_invalidate(ws_final_matches)
-        invalidate_final_matches_ram_index()
+        rows_after_clear = get_final_matches_fast(sh, season)
 
-        final_match_done = get_final_match_by_id_fast(sh, match_id)
-        if not final_match_done:
-            final_match_done = dict(final_match)
-            final_match_done["a_games_won"] = a_w
-            final_match_done["b_games_won"] = b_w
-            final_match_done["winner_id"] = winner_id
-            final_match_done["loser_id"] = loser_id
-            final_match_done["status"] = "completed"
+        replay_matches = []
 
-        _propagate_final_match_result(
+        for r in rows_after_clear:
+            mid = str(r.get("final_match_id", "")).strip()
+            status_r = str(r.get("status", "")).strip().lower()
+
+            if mid == match_id:
+                continue
+
+            if status_r != "completed":
+                continue
+
+            a_prev = safe_int(r.get("a_games_won", 0), 0)
+            b_prev = safe_int(r.get("b_games_won", 0), 0)
+
+            if a_prev == b_prev:
+                continue
+
+            replay_matches.append({
+                "match_id": mid,
+                "round": safe_int(r.get("round", 0), 0),
+                "order": safe_int(r.get("match_order", 0), 0),
+                "a": a_prev,
+                "b": b_prev
+            })
+
+        replay_matches.sort(key=lambda x: (x["round"], x["order"], x["match_id"]))
+
+        for item in replay_matches:
+            _final_apply_match_result_direct(
+                sh=sh,
+                ws_final_matches=ws_final_matches,
+                season_id=season,
+                match_id=item["match_id"],
+                a_w=item["a"],
+                b_w=item["b"]
+            )
+
+        result = _final_apply_match_result_direct(
             sh=sh,
-            final_match=final_match_done,
-            winner_id=winner_id,
-            loser_id=loser_id
+            ws_final_matches=ws_final_matches,
+            season_id=season,
+            match_id=match_id,
+            a_w=a_w,
+            b_w=b_w
         )
 
         nick_map = get_player_nick_map_fast(sh)
-        winner_name = nick_map.get(winner_id, winner_id)
-        loser_name = nick_map.get(loser_id, loser_id)
+        winner_name = nick_map.get(result["winner_id"], result["winner_id"])
+        loser_name = nick_map.get(result["loser_id"], result["loser_id"])
 
         await interaction.followup.send(
             f"✅ Resultado da fase final registrado com sucesso.\n"
             f"- Match: **{match_id}**\n"
             f"- Placar: **{placar}**\n"
             f"- Vencedor: **{winner_name}**\n"
-            f"- Eliminado: **{loser_name}**",
+            f"- Eliminado: **{loser_name}**\n"
+            f"- Matches recalculadas/limpas na cadeia: **{affected}**",
             ephemeral=True
         )
 
         await log_admin(
             interaction,
-            f"resultado_final: season={season} match={match_id} placar={placar} winner={winner_name} loser={loser_name}"
+            f"resultado_final: season={season} match={match_id} placar={placar} winner={winner_name} loser={loser_name} affected={affected}"
         )
 
     except Exception as e:
