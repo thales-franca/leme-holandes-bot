@@ -3469,6 +3469,12 @@ async def inscrever(interaction: discord.Interaction, guilda: str, arquetipo: st
             ephemeral=True
         )
 
+        await log_admin(
+            interaction,
+            f"inscrever: {nick_atual or interaction.user.display_name} ({pid}) "
+            f"season={season} ciclo={cycle} deck='{nome_deck}' decklist='{val}'"
+        )
+
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
