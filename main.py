@@ -5112,10 +5112,6 @@ async def final(interaction: discord.Interaction, cycle: int):
         if not end_br:
             return await interaction.followup.send("❌ Ciclo sem prazo definido.", ephemeral=True)
 
-        deadline_dt = parse_br_dt(end_br)
-        if deadline_dt and now_br_dt() < deadline_dt:
-            return await interaction.followup.send("❌ Deadline ainda não chegou.", ephemeral=True)
-
         col = ensure_sheet_columns(ws_matches, MATCHES_REQUIRED_COLS)
         rows = cached_get_all_values(ws_matches, ttl_seconds=10)
 
