@@ -5135,7 +5135,6 @@ async def final(interaction: discord.Interaction, cycle: int):
                 continue
 
             status = str(getc("confirmed_status") or "").strip().lower()
-            reported_by = str(getc("reported_by_id") or "").strip()
 
             # 1) confirma tudo que estiver pending
             if status == "pending":
@@ -5147,8 +5146,8 @@ async def final(interaction: discord.Interaction, cycle: int):
                 pending_confirmed += 1
                 continue
 
-            # 2) aplica 0-0-3 apenas nas matches ainda sem resultado reportado
-            if reported_by:
+            # 2) aplica 0-0-3 apenas nas matches OPEN
+            if status != "open":
                 continue
 
             updates.extend([
@@ -5174,7 +5173,7 @@ async def final(interaction: discord.Interaction, cycle: int):
         await interaction.followup.send(
             f"✅ FINAL aplicado.\n"
             f"- Pending confirmadas: **{pending_confirmed}**\n"
-            f"- Matches ajustadas com 0-0-3: **{id_applied}**\n"
+            f"- Matches OPEN ajustadas com 0-0-3: **{id_applied}**\n"
             f"- Linhas standings recalculadas: **{len(rows_recalc)}**",
             ephemeral=True
         )
