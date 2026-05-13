@@ -6550,11 +6550,6 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
     try:
         sh = open_sheet()
 
-        rows = cached_get_all_records(
-            ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30),
-            ttl_seconds=10
-        )
-
         a_id = str(jogador_a.id)
         b_id = str(jogador_b.id)
 
@@ -6564,7 +6559,15 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
         draws = 0
         details = []
 
-        for r in rows:
+        # =========================================================
+        # HISTÓRICO DA FASE REGULAR - Matches
+        # =========================================================
+        regular_rows = cached_get_all_records(
+            ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=30),
+            ttl_seconds=10
+        )
+
+        for r in regular_rows:
             if not as_bool(r.get("active", "TRUE")):
                 continue
             if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
@@ -6580,29 +6583,78 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
 
             total += 1
 
-            a_gw = safe_int(r.get("a_games_won", 0), 0)
-            b_gw = safe_int(r.get("b_games_won", 0), 0)
+            a_gw_sheet = safe_int(r.get("a_games_won", 0), 0)
+            b_gw_sheet = safe_int(r.get("b_games_won", 0), 0)
             d_g = safe_int(r.get("draw_games", 0), 0)
 
             if pa == a_id:
-                if a_gw > b_gw:
-                    a_wins += 1
-                elif b_gw > a_gw:
-                    b_wins += 1
-                else:
-                    draws += 1
-                score = f"{a_gw}-{b_gw}-{d_g}"
+                score_a = a_gw_sheet
+                score_b = b_gw_sheet
             else:
-                if b_gw > a_gw:
-                    a_wins += 1
-                elif a_gw > b_gw:
-                    b_wins += 1
-                else:
-                    draws += 1
-                score = f"{b_gw}-{a_gw}-{d_g}"
+                score_a = b_gw_sheet
+                score_b = a_gw_sheet
+
+            if score_a > score_b:
+                a_wins += 1
+            elif score_b > score_a:
+                b_wins += 1
+            else:
+                draws += 1
+
+            score = f"{score_a}-{score_b}-{d_g}"
 
             details.append(
-                f"• S{r.get('season_id')} C{r.get('cycle')} | `{r.get('match_id')}` | placar {score}"
+                f"• Regular | S{r.get('season_id')} C{r.get('cycle')} | `{r.get('match_id')}` | placar {score}"
+            )
+
+        # =========================================================
+        # HISTÓRICO DA FASE FINAL - FinalMatches
+        # =========================================================
+        final_rows = cached_get_all_records(
+            ensure_worksheet(sh, "FinalMatches", FINAL_MATCHES_HEADER, rows=5000, cols=30),
+            ttl_seconds=10
+        )
+
+        for r in final_rows:
+            if str(r.get("status", "")).strip().lower() != "completed":
+                continue
+            if str(r.get("result_type", "")).strip().lower() == "bye":
+                continue
+
+            pa = str(r.get("player_a_id", "")).strip()
+            pb = str(r.get("player_b_id", "")).strip()
+
+            if {pa, pb} != {a_id, b_id}:
+                continue
+
+            total += 1
+
+            a_gw_sheet = safe_int(r.get("a_games_won", 0), 0)
+            b_gw_sheet = safe_int(r.get("b_games_won", 0), 0)
+
+            if pa == a_id:
+                score_a = a_gw_sheet
+                score_b = b_gw_sheet
+            else:
+                score_a = b_gw_sheet
+                score_b = a_gw_sheet
+
+            if score_a > score_b:
+                a_wins += 1
+            elif score_b > score_a:
+                b_wins += 1
+            else:
+                draws += 1
+
+            score = f"{score_a}-{score_b}"
+
+            season_id = r.get("season_id")
+            bracket = str(r.get("bracket", "")).strip()
+            round_number = r.get("round")
+            match_id = r.get("final_match_id")
+
+            details.append(
+                f"• Final | S{season_id} | {bracket} R{round_number} | `{match_id}` | placar {score}"
             )
 
         if total == 0:
@@ -6612,7 +6664,7 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
             )
 
         lines = [
-            f"⚔️ **Histórico de confronto**",
+            "⚔️ **Histórico de confronto**",
             f"**{jogador_a.display_name}** x **{jogador_b.display_name}**",
             f"Matches: **{total}**",
             f"Vitórias {jogador_a.display_name}: **{a_wins}**",
@@ -6628,7 +6680,6 @@ async def historico_confronto(interaction: discord.Interaction, jogador_a: disco
 
     except Exception as e:
         await interaction.followup.send(f"❌ Erro no /historico_confronto: {e}", ephemeral=True)
-
 
 # =========================================================
 # /estatisticas
