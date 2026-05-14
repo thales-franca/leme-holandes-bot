@@ -28186,8 +28186,7 @@ def get_final_status_snapshot(
     season="Season da fase final"
 )
 @app_commands.autocomplete(
-    formato=ac_formatos
-)
+    formato=ac_formatos,
     season=ac_owner_season
 )
 async def status_final(
