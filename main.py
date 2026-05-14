@@ -31006,11 +31006,11 @@ keep_alive()
 
 
 # =========================================================
-# LOOP PRINCIPAL RESILIENTE
+# LOOP PRINCIPAL DO DISCORD
 # =========================================================
 
-asyncio.run(
-    run_bot()
+client.run(
+    DISCORD_TOKEN
 )
 
 
