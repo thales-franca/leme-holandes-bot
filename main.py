@@ -10760,11 +10760,95 @@ async def ciclo_abrir(
             tournament_id=tournament_id
         )
 
+        # =================================================
+        # ATUALIZA CICLO ATUAL NA ABA TOURNAMENTS
+        # =================================================
+
+        ws_tournaments = ensure_worksheet(
+            sh,
+            "Tournaments",
+            TOURNAMENTS_HEADER,
+            rows=100,
+            cols=20
+        )
+
+        col_t = ensure_sheet_columns(
+            ws_tournaments,
+            TOURNAMENTS_REQUIRED
+        )
+
+        vals_t = cached_get_all_values(
+            ws_tournaments,
+            ttl_seconds=10
+        )
+
+        nowb = now_br_str()
+
+        for rown in range(
+            2,
+            len(vals_t) + 1
+        ):
+
+            row = vals_t[rown - 1]
+
+            row_tid = safe_int(
+                row[col_t["tournament_id"]]
+                if col_t["tournament_id"] < len(row)
+                else 0,
+                0
+            )
+
+            if row_tid != tournament_id:
+                continue
+
+            updates = [
+                {
+                    "range":
+                        f"{col_letter(col_t['current_season'])}{rown}",
+                    "values":
+                        [[str(season_id)]]
+                },
+                {
+                    "range":
+                        f"{col_letter(col_t['current_cycle'])}{rown}",
+                    "values":
+                        [[str(cycle)]]
+                },
+                {
+                    "range":
+                        f"{col_letter(col_t['status'])}{rown}",
+                    "values":
+                        [["active"]]
+                },
+                {
+                    "range":
+                        f"{col_letter(col_t['updated_at'])}{rown}",
+                    "values":
+                        [[nowb]]
+                },
+            ]
+
+            ws_tournaments.batch_update(
+                updates
+            )
+
+            cache_invalidate(
+                ws_tournaments
+            )
+
+            break
+
+        invalidate_cycle_ram_index()
+        invalidate_season_ram_index()
+        invalidate_match_ac_index()
+
         await interaction.followup.send(
             f"✅ Ciclo **{cycle}** aberto "
             f"para inscrições.\n"
             f"Formato: "
-            f"**{format_label(formato)}**",
+            f"**{format_label(formato)}**\n"
+            f"Season ativa: "
+            f"**{season_id}**",
             ephemeral=True
         )
 
@@ -10782,7 +10866,6 @@ async def ciclo_abrir(
             f"❌ Erro no /ciclo_abrir: {e}",
             ephemeral=True
         )
-
 
 # =========================================================
 # /ciclo_fechar
