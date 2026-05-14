@@ -1480,6 +1480,46 @@ def _infer_open_season_id_from_seasons_ws(
     return max(open_ids)
 
 
+def _get_tournament_row_number(
+    ws_tournaments,
+    tournament_id: int
+) -> int | None:
+
+    vals = cached_get_all_values(
+        ws_tournaments,
+        ttl_seconds=10
+    )
+
+    if len(vals) <= 1:
+        return None
+
+    col = ensure_sheet_columns(
+        ws_tournaments,
+        TOURNAMENTS_REQUIRED
+    )
+
+    tid = safe_int(
+        tournament_id,
+        DEFAULT_TOURNAMENT_ID
+    )
+
+    for rown in range(2, len(vals) + 1):
+
+        row = vals[rown - 1]
+
+        row_tid = safe_int(
+            row[col["tournament_id"]]
+            if col["tournament_id"] < len(row)
+            else 0,
+            0
+        )
+
+        if row_tid == tid:
+            return rown
+
+    return None
+
+
 def get_current_season_id(
     arg,
     tournament_id: int = DEFAULT_TOURNAMENT_ID
@@ -1514,6 +1554,53 @@ def get_current_season_id(
         pass
 
     sh = arg
+
+    try:
+
+        ws_tournaments = ensure_worksheet(
+            sh,
+            "Tournaments",
+            TOURNAMENTS_HEADER,
+            rows=100,
+            cols=20
+        )
+
+        ensure_sheet_columns(
+            ws_tournaments,
+            TOURNAMENTS_REQUIRED
+        )
+
+        rows = cached_get_all_records(
+            ws_tournaments,
+            ttl_seconds=10
+        )
+
+        for r in rows:
+
+            row_tid = safe_int(
+                r.get(
+                    "tournament_id",
+                    DEFAULT_TOURNAMENT_ID
+                ),
+                DEFAULT_TOURNAMENT_ID
+            )
+
+            if row_tid != tid:
+                continue
+
+            sid = safe_int(
+                r.get(
+                    "current_season",
+                    0
+                ),
+                0
+            )
+
+            if sid > 0:
+                return sid
+
+    except Exception:
+        pass
 
     try:
 
@@ -1584,6 +1671,79 @@ def set_current_season_id(
         DEFAULT_TOURNAMENT_ID
     )
 
+    sid = safe_int(
+        season_id,
+        0
+    )
+
+    nowb = now_br_str()
+
+    # =====================================================
+    # 1) ATUALIZA ABA TOURNAMENTS
+    # =====================================================
+
+    ws_tournaments = ensure_worksheet(
+        sh,
+        "Tournaments",
+        TOURNAMENTS_HEADER,
+        rows=100,
+        cols=20
+    )
+
+    col_t = ensure_sheet_columns(
+        ws_tournaments,
+        TOURNAMENTS_REQUIRED
+    )
+
+    rown = _get_tournament_row_number(
+        ws_tournaments,
+        tid
+    )
+
+    if rown is not None:
+
+        updates = [
+            {
+                "range":
+                    f"{col_letter(col_t['current_season'])}{rown}",
+                "values":
+                    [[str(sid)]]
+            },
+            {
+                "range":
+                    f"{col_letter(col_t['status'])}{rown}",
+                "values":
+                    [["active" if sid > 0 else "inactive"]]
+            },
+            {
+                "range":
+                    f"{col_letter(col_t['updated_at'])}{rown}",
+                "values":
+                    [[nowb]]
+            },
+        ]
+
+        if "current_cycle" in col_t and sid == 0:
+
+            updates.append({
+                "range":
+                    f"{col_letter(col_t['current_cycle'])}{rown}",
+                "values":
+                    [["0"]]
+            })
+
+        ws_tournaments.batch_update(
+            updates
+        )
+
+        cache_invalidate(
+            ws_tournaments
+        )
+
+    # =====================================================
+    # 2) MANTÉM COMPATIBILIDADE COM SEASONSTATE
+    # =====================================================
+
     ws = ensure_worksheet(
         sh,
         "SeasonState",
@@ -1594,8 +1754,6 @@ def set_current_season_id(
         ws,
         ttl_seconds=10
     )
-
-    nowb = now_br_str()
 
     found = None
 
@@ -1616,6 +1774,7 @@ def set_current_season_id(
             row_tid == tid
             and row_key == "current_season_id"
         ):
+
             found = i
             break
 
@@ -1625,7 +1784,7 @@ def set_current_season_id(
             [
                 str(tid),
                 "current_season_id",
-                str(season_id),
+                str(sid),
                 nowb
             ],
             value_input_option="USER_ENTERED"
@@ -1636,7 +1795,7 @@ def set_current_season_id(
         ws.batch_update([
             {
                 "range": f"C{found}",
-                "values": [[str(season_id)]]
+                "values": [[str(sid)]]
             },
             {
                 "range": f"D{found}",
