@@ -1761,14 +1761,14 @@ def set_current_season_id(
 
         row = vals[i - 1]
 
+        row_key = (
+            row[0] if len(row) > 0 else ""
+        ).strip()
+
         row_tid = safe_int(
-            row[0] if len(row) > 0 else DEFAULT_TOURNAMENT_ID,
+            row[3] if len(row) > 3 else DEFAULT_TOURNAMENT_ID,
             DEFAULT_TOURNAMENT_ID
         )
-
-        row_key = (
-            row[1] if len(row) > 1 else ""
-        ).strip()
 
         if (
             row_tid == tid
@@ -1782,10 +1782,10 @@ def set_current_season_id(
 
         ws.append_row(
             [
-                str(tid),
                 "current_season_id",
                 str(sid),
-                nowb
+                nowb,
+                str(tid)
             ],
             value_input_option="USER_ENTERED"
         )
@@ -1794,11 +1794,11 @@ def set_current_season_id(
 
         ws.batch_update([
             {
-                "range": f"C{found}",
+                "range": f"B{found}",
                 "values": [[str(sid)]]
             },
             {
-                "range": f"D{found}",
+                "range": f"C{found}",
                 "values": [[nowb]]
             },
         ])
@@ -1941,14 +1941,14 @@ def set_season_status(
 
         row = data[i - 1]
 
-        row_tid = safe_int(
-            row[0] if len(row) > 0 else DEFAULT_TOURNAMENT_ID,
-            DEFAULT_TOURNAMENT_ID
+        sid = safe_int(
+            row[0] if len(row) > 0 else 0,
+            0
         )
 
-        sid = safe_int(
-            row[1] if len(row) > 1 else 0,
-            0
+        row_tid = safe_int(
+            row[1] if len(row) > 1 else DEFAULT_TOURNAMENT_ID,
+            DEFAULT_TOURNAMENT_ID
         )
 
         if row_tid == tid and sid == season_id:
@@ -1961,8 +1961,8 @@ def set_season_status(
 
         ws.append_row(
             [
-                str(tid),
                 str(season_id),
+                str(tid),
                 status,
                 nm,
                 nowb,
@@ -2031,14 +2031,14 @@ def close_all_other_seasons(
 
         row = data[i - 1]
 
-        row_tid = safe_int(
-            row[0] if len(row) > 0 else DEFAULT_TOURNAMENT_ID,
-            DEFAULT_TOURNAMENT_ID
+        sid = safe_int(
+            row[0] if len(row) > 0 else 0,
+            0
         )
 
-        sid = safe_int(
-            row[1] if len(row) > 1 else 0,
-            0
+        row_tid = safe_int(
+            row[1] if len(row) > 1 else DEFAULT_TOURNAMENT_ID,
+            DEFAULT_TOURNAMENT_ID
         )
 
         if row_tid != tid:
@@ -2261,8 +2261,8 @@ def set_cycle_status(
 
         ws_cycles.append_row(
             [
-                str(tid),
                 str(season_id),
+                str(tid),
                 str(cycle),
                 status,
                 "",
@@ -2321,8 +2321,8 @@ def set_cycle_times(
 
         ws_cycles.append_row(
             [
-                str(tid),
                 str(season_id),
+                str(tid),
                 str(cycle),
                 "open",
                 start_at_br,
@@ -2567,8 +2567,8 @@ def set_cycle_bonus_percent(
 
         ws_bonus.append_row(
             [
-                str(tid),
                 str(season_id),
+                str(tid),
                 str(cycle),
                 bonus_text,
                 nowb
