@@ -31009,9 +31009,7 @@ keep_alive()
 # LOOP PRINCIPAL DO DISCORD
 # =========================================================
 
-client.run(
-    DISCORD_TOKEN
-)
+asyncio.run( run_bot() )
 
 
 # =================================================
