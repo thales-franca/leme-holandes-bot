@@ -3580,6 +3580,106 @@ def _get_cycle_choices_snapshot(
 
     return out
 
+# =========================================================
+# AUTOCOMPLETE — FORMATOS
+# Busca diretamente da aba Tournaments usando format_key
+# =========================================================
+
+async def ac_formatos(
+    interaction: discord.Interaction,
+    current: str
+):
+
+    try:
+
+        if _ac_should_skip(
+            interaction,
+            "ac_formatos"
+        ):
+            return []
+
+        sh = open_sheet()
+
+        ws = ensure_worksheet(
+            sh,
+            "Tournaments",
+            TOURNAMENTS_HEADER,
+            rows=100,
+            cols=20
+        )
+
+        rows = cached_get_all_records(
+            ws,
+            ttl_seconds=10
+        )
+
+        q = str(
+            current or ""
+        ).strip().lower()
+
+        out = []
+
+        seen = set()
+
+        for r in rows:
+
+            format_key = str(
+                r.get(
+                    "format_key",
+                    ""
+                )
+            ).strip()
+
+            if not format_key:
+                continue
+
+            if format_key.lower() in seen:
+                continue
+
+            status = str(
+                r.get(
+                    "status",
+                    "active"
+                )
+            ).strip().lower()
+
+            # mostra apenas formatos ativos
+            if status != "active":
+                continue
+
+            display_name = str(
+                r.get(
+                    "name",
+                    format_key
+                )
+            ).strip()
+
+            search_blob = (
+                f"{format_key} "
+                f"{display_name}"
+            ).lower()
+
+            if q and q not in search_blob:
+                continue
+
+            out.append(
+                app_commands.Choice(
+                    name=display_name[:100],
+                    value=format_key
+                )
+            )
+
+            seen.add(
+                format_key.lower()
+            )
+
+            if len(out) >= 25:
+                break
+
+        return out[:25]
+
+    except Exception:
+        return []
 
 # =========================
 # AUTOCOMPLETE FUNCTIONS
@@ -7257,6 +7357,7 @@ def _montar_nome_deck(
     decklist="Link da decklist"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     guilda=ac_deck_guilda,
     arquetipo=ac_deck_arquetipo
 )
@@ -7762,6 +7863,7 @@ def resolve_drop_matches(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def drop(
@@ -8079,6 +8181,7 @@ async def ac_player_in_cycle(
     jogador="Jogador"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_season_open,
     cycle=ac_cycle_open,
     jogador=ac_player_in_cycle
@@ -8567,6 +8670,7 @@ async def ac_pods_ver_cycle(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_pods_ver_season,
     cycle=ac_pods_ver_cycle
 )
@@ -8860,6 +8964,7 @@ async def pods_ver(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_pods_ver_season,
     cycle=ac_pods_ver_cycle
 )
@@ -9008,6 +9113,7 @@ async def meta(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_pods_ver_season,
     cycle=ac_pods_ver_cycle
 )
@@ -9198,11 +9304,13 @@ def _find_match_sheet_row_by_match_id(
     placar="Formato V-D-E (ex: 2-1-0)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     oponente=ac_match_id_user_pending,
     placar=ac_score_vde
 )
 async def resultado(
     interaction: discord.Interaction,
+    formato: str,
     oponente: str,
     placar: str
 ):
@@ -10436,6 +10544,9 @@ async def forcesync(
     formato="Formato da liga",
     cycle="Número do ciclo"
 )
+    @app_commands.autocomplete(
+    formato=ac_formatos
+)
 async def ciclo_abrir(
     interaction: discord.Interaction,
     formato: str,
@@ -10525,6 +10636,9 @@ async def ciclo_abrir(
 @app_commands.describe(
     formato="Formato da liga",
     cycle="Número do ciclo"
+)
+@app_commands.autocomplete(
+    formato=ac_formatos
 )
 async def ciclo_fechar(
     interaction: discord.Interaction,
@@ -10629,6 +10743,9 @@ async def ciclo_fechar(
 @app_commands.describe(
     formato="Formato da liga",
     cycle="Número do ciclo"
+)
+@app_commands.autocomplete(
+    formato=ac_formatos
 )
 async def ciclo_encerrar(
     interaction: discord.Interaction,
@@ -10749,6 +10866,7 @@ async def ciclo_encerrar(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def prazo(
@@ -10899,6 +11017,7 @@ async def prazo(
     horas="Janela em horas (1..48)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def deadline(
@@ -11030,6 +11149,7 @@ async def deadline(
     bonus_percentual="Opcional. Se vazio, mantém o último bônus do ciclo."
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     cycle=ac_owner_cycle_for_season
 )
@@ -11247,6 +11367,7 @@ def fmt_num2(
     top="Quantidade de jogadores"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_pods_ver_season,
     cycle=ac_pods_ver_cycle
 )
@@ -11844,6 +11965,7 @@ def _format_standings_text(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def final(
@@ -12553,6 +12675,9 @@ async def admin_resultado_cancelar(
 @app_commands.describe(
     formato="Formato da liga"
 )
+@app_commands.autocomplete(
+    formato=ac_formatos
+)
 async def status_ciclo(
     interaction: discord.Interaction,
     formato: str
@@ -12736,6 +12861,7 @@ async def status_ciclo(
     top="Quantidade de jogadores (8..60)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_pods_ver_season
 )
 async def ranking_geral(
@@ -13352,6 +13478,9 @@ def _next_season_id(
     formato="Formato da liga",
     nome="Nome opcional da season (ex: Season 3)"
 )
+@app_commands.autocomplete(
+    formato=ac_formatos
+)
 async def startseason(
     interaction: discord.Interaction,
     formato: str,
@@ -13453,6 +13582,9 @@ async def startseason(
 @app_commands.describe(
     formato="Formato da liga"
 )
+@app_commands.autocomplete(
+    formato=ac_formatos
+)
 async def closeseason(
     interaction: discord.Interaction,
     formato: str
@@ -13551,6 +13683,7 @@ async def closeseason(
     decklist="Link (moxfield/ligamagic/mtgdecks/mtggoldfish/melee/mtgtop8)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     ciclo=ac_owner_cycle_for_season,
     guilda=ac_deck_guilda,
@@ -14329,6 +14462,7 @@ def _past_confirmed_pairs_from_records(
     tries="Tentativas anti-repetição (50..500)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def start_cycle(
@@ -14942,6 +15076,7 @@ async def start_cycle(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def exportar_ciclo(
@@ -15059,6 +15194,7 @@ async def exportar_ciclo(
     cycle="Número do ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def fechar_resultados_atrasados(
@@ -15153,6 +15289,7 @@ async def fechar_resultados_atrasados(
     cycle="Ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     cycle=ac_owner_cycle_for_season
 )
@@ -15472,6 +15609,7 @@ async def inscritos(
     novo="Novo jogador"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     cycle=ac_cycle_open
 )
 async def substituir_jogador(
@@ -15955,6 +16093,9 @@ async def substituir_jogador(
     jogador_a="Primeiro jogador",
     jogador_b="Segundo jogador"
 )
+        @app_commands.autocomplete(
+    formato=ac_formatos
+)
 async def historico_confronto(
     interaction: discord.Interaction,
     formato: str,
@@ -16342,6 +16483,9 @@ async def historico_confronto(
 )
 @app_commands.describe(
     formato="Formato da liga"
+)
+@app_commands.autocomplete(
+    formato=ac_formatos
 )
 async def estatisticas(
     interaction: discord.Interaction,
@@ -19265,6 +19409,7 @@ def _admin_match_sort_key(
     cycle="Ciclo"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     cycle=ac_owner_cycle_for_season
 )
@@ -24694,6 +24839,7 @@ async def fase_final(
     decklist="Link da decklist"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     jogador=ac_final_player,
     guilda=ac_deck_guilda,
@@ -24944,6 +25090,7 @@ async def cadastrar_final(
     decklist="Link da decklist"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     guilda=ac_deck_guilda,
     arquetipo=ac_deck_arquetipo
 )
@@ -26024,6 +26171,7 @@ async def ac_final_oponente_user_open(
     placar="Formato MD5 sem draw (ex: 3-1-0)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     oponente=ac_final_oponente_user_open,
     placar=ac_score_final_md5
 )
@@ -26813,6 +26961,7 @@ def _final_apply_match_result_direct(
     placar="Formato MD5 sem draw (ex: 3-0-0, 3-1-0 ou 3-2-0)"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     placar=ac_score_final_md5
 )
@@ -27112,6 +27261,9 @@ async def admin_resultado_final_editar(
     formato="Formato da liga",
     season="Season da fase final",
     match_id="ID da match da fase final"
+)
+@app_commands.autocomplete(
+    formato=ac_formatos
 )
 async def admin_resultado_final_cancelar(
     interaction: discord.Interaction,
@@ -28034,6 +28186,8 @@ def get_final_status_snapshot(
     season="Season da fase final"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos
+)
     season=ac_owner_season
 )
 async def status_final(
@@ -28850,6 +29004,7 @@ def execute_final_abdication(
     season="Season da fase final"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season
 )
 async def abdicar_final(
@@ -29013,6 +29168,7 @@ async def abdicar_final(
     jogador="Jogador classificado que irá abdicar"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season,
     jogador=ac_final_player
 )
@@ -29301,6 +29457,7 @@ def validate_final_ready_to_start(
     season="Season da fase final"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season
 )
 async def final_iniciar(
@@ -30222,6 +30379,7 @@ def _split_text_for_discord(
     season="Season da fase final"
 )
 @app_commands.autocomplete(
+    formato=ac_formatos,
     season=ac_owner_season
 )
 async def chaveamento(
