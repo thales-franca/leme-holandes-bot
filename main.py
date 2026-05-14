@@ -10544,7 +10544,7 @@ async def forcesync(
     formato="Formato da liga",
     cycle="Número do ciclo"
 )
-    @app_commands.autocomplete(
+@app_commands.autocomplete(
     formato=ac_formatos
 )
 async def ciclo_abrir(
@@ -16093,7 +16093,7 @@ async def substituir_jogador(
     jogador_a="Primeiro jogador",
     jogador_b="Segundo jogador"
 )
-        @app_commands.autocomplete(
+@app_commands.autocomplete(
     formato=ac_formatos
 )
 async def historico_confronto(
