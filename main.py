@@ -3795,17 +3795,6 @@ async def ac_formatos(
             if format_key.lower() in seen:
                 continue
 
-            status = str(
-                r.get(
-                    "status",
-                    "active"
-                )
-            ).strip().lower()
-
-            # mostra apenas formatos ativos
-            if status != "active":
-                continue
-
             display_name = str(
                 r.get(
                     "name",
@@ -3813,17 +3802,31 @@ async def ac_formatos(
                 )
             ).strip()
 
+            status = str(
+                r.get(
+                    "status",
+                    ""
+                )
+            ).strip().lower()
+
             search_blob = (
                 f"{format_key} "
-                f"{display_name}"
+                f"{display_name} "
+                f"{status}"
             ).lower()
 
             if q and q not in search_blob:
                 continue
 
+            label = (
+                f"{display_name} | {status}"
+                if status
+                else display_name
+            )
+
             out.append(
                 app_commands.Choice(
-                    name=display_name[:100],
+                    name=label[:100],
                     value=format_key
                 )
             )
