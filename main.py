@@ -1044,6 +1044,8 @@ TOURNAMENTS_HEADER = [
     "format_key",
     "name",
     "status",
+    "current_season",
+    "current_cycle",
     "created_at",
     "updated_at"
 ]
