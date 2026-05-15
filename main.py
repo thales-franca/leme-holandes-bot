@@ -108,6 +108,68 @@ def format_label(v: str) -> str:
         fk.capitalize()
     )
 
+def format_label_by_id(
+    sh,
+    tournament_id: int
+) -> str:
+
+    tid = safe_int(
+        tournament_id,
+        DEFAULT_TOURNAMENT_ID
+    )
+
+    try:
+
+        ws = ensure_worksheet(
+            sh,
+            "Tournaments",
+            TOURNAMENTS_HEADER,
+            rows=100,
+            cols=20
+        )
+
+        rows = cached_get_all_records(
+            ws,
+            ttl_seconds=10
+        )
+
+        for r in rows:
+
+            row_tid = safe_int(
+                r.get(
+                    "tournament_id",
+                    0
+                ),
+                0
+            )
+
+            if row_tid != tid:
+                continue
+
+            name = str(
+                r.get(
+                    "name",
+                    ""
+                )
+            ).strip()
+
+            format_key = str(
+                r.get(
+                    "format_key",
+                    ""
+                )
+            ).strip()
+
+            return (
+                name
+                or format_label(format_key)
+                or str(tid)
+            )
+
+    except Exception:
+        pass
+
+    return str(tid)
 
 # =========================
 # Time helpers (BR)
@@ -9454,7 +9516,6 @@ def _find_match_sheet_row_by_match_id(
 
     return None, None
 
-
 # =========================================================
 # /resultado
 # =========================================================
@@ -9768,7 +9829,7 @@ async def resultado(
                         "e sua confirmação é necessária.\n\n"
 
                         f"**Formato:** "
-                        f"{format_label_by_id(tournament_id)}\n"
+                        f"{format_label_by_id(sh, tournament_id)}\n"
 
                         f"**Match:** "
                         f"`{match_id}`\n"
@@ -9807,7 +9868,7 @@ async def resultado(
             interaction,
             f"resultado lançado: "
             f"{reporter_name} ({pid}) | "
-            f"formato={format_label_by_id(tournament_id)} | "
+            f"formato={format_label_by_id(sh, tournament_id)} | "
             f"season={season_id} | "
             f"cycle={cycle} | "
             f"match={match_id} | "
@@ -9852,7 +9913,7 @@ async def resultado(
             f"❌ Erro: {e}",
             ephemeral=True
         )
-
+        
 
 # =========================================================
 # /rejeitar
