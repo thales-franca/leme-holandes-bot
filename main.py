@@ -10702,19 +10702,17 @@ async def forcesync(
 
 @client.tree.command(
     name="ciclo_abrir",
-    description="(ADM) Abre um ciclo para inscrições."
+    description="(ADM) Abre o próximo ciclo para inscrições."
 )
 @app_commands.describe(
-    formato="Formato da liga",
-    cycle="Número do ciclo"
+    formato="Formato da liga"
 )
 @app_commands.autocomplete(
     formato=ac_formatos
 )
 async def ciclo_abrir(
     interaction: discord.Interaction,
-    formato: str,
-    cycle: int
+    formato: str
 ):
 
     if not await is_admin_or_organizer(
@@ -10747,6 +10745,11 @@ async def ciclo_abrir(
             )
 
         season_id = require_current_season(
+            sh,
+            tournament_id=tournament_id
+        )
+
+        cycle = _next_cycle_id(
             sh,
             tournament_id=tournament_id
         )
@@ -13667,48 +13670,41 @@ async def ranking_geral(
 # =========================================================
 # OWNER — START/CLOSE SEASON + CADASTRAR PLAYER + START_CYCLE
 # =========================================================
-
-def _next_season_id(
+def _next_cycle_id(
     sh,
     tournament_id: int = DEFAULT_TOURNAMENT_ID
 ) -> int:
 
     ws = ensure_worksheet(
         sh,
-        "Seasons",
-        SEASONS_HEADER,
-        rows=200,
+        "Tournaments",
+        TOURNAMENTS_HEADER,
+        rows=100,
         cols=20
     )
 
     col = ensure_sheet_columns(
         ws,
-        SEASONS_REQUIRED
+        TOURNAMENTS_REQUIRED
     )
 
-    rows = ws.get_all_values()
+    rows = cached_get_all_values(
+        ws,
+        ttl_seconds=10
+    )
 
     tid = safe_int(
         tournament_id,
         DEFAULT_TOURNAMENT_ID
     )
 
-    mx = 0
+    for rown in range(2, len(rows) + 1):
 
-    for i in range(2, len(rows) + 1):
-
-        r = rows[i - 1]
-
-        sid = safe_int(
-            r[col["season_id"]]
-            if col["season_id"] < len(r)
-            else 0,
-            0
-        )
+        row = rows[rown - 1]
 
         row_tid = safe_int(
-            r[col["tournament_id"]]
-            if col["tournament_id"] < len(r)
+            row[col["tournament_id"]]
+            if col["tournament_id"] < len(row)
             else 0,
             0
         )
@@ -13716,10 +13712,69 @@ def _next_season_id(
         if row_tid != tid:
             continue
 
-        if sid > mx:
-            mx = sid
+        current = safe_int(
+            row[col["current_cycle"]]
+            if col["current_cycle"] < len(row)
+            else 0,
+            0
+        )
 
-    return mx + 1 if mx > 0 else 1
+        return current + 1 if current > 0 else 1
+
+    return 1
+    
+def _next_season_id(
+    sh,
+    tournament_id: int = DEFAULT_TOURNAMENT_ID
+) -> int:
+
+    ws = ensure_worksheet(
+        sh,
+        "Tournaments",
+        TOURNAMENTS_HEADER,
+        rows=100,
+        cols=20
+    )
+
+    col = ensure_sheet_columns(
+        ws,
+        TOURNAMENTS_REQUIRED
+    )
+
+    rows = cached_get_all_values(
+        ws,
+        ttl_seconds=10
+    )
+
+    tid = safe_int(
+        tournament_id,
+        DEFAULT_TOURNAMENT_ID
+    )
+
+    for rown in range(2, len(rows) + 1):
+
+        row = rows[rown - 1]
+
+        row_tid = safe_int(
+            row[col["tournament_id"]]
+            if col["tournament_id"] < len(row)
+            else 0,
+            0
+        )
+
+        if row_tid != tid:
+            continue
+
+        current = safe_int(
+            row[col["current_season"]]
+            if col["current_season"] < len(row)
+            else 0,
+            0
+        )
+
+        return current + 1 if current > 0 else 1
+
+    return 1
 
 @client.tree.command(
     name="startseason",
