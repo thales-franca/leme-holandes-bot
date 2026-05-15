@@ -7165,7 +7165,7 @@ def ensure_deck_row(
 ) -> int:
     """
     Retorna a linha (1-based) do registro:
-    (tournament_id, season, cycle, player)
+    (season_id, tournament_id, cycle, player)
 
     Se não existir:
     cria e retorna a nova linha.
@@ -7198,8 +7198,8 @@ def ensure_deck_row(
 
     ws_decks.append_row(
         [
-            str(tid),
             str(season_id),
+            str(tid),
             str(cycle),
             pid,
             "",
@@ -7742,18 +7742,18 @@ async def inscrever(
 
         nowb = now_br_str()
 
-        ws_enr.append_row(
-            [
-                str(tournament_id),
-                str(season),
-                str(cycle),
-                pid,
-                "active",
-                nowb,
-                nowb
-            ],
-            value_input_option="USER_ENTERED"
-        )
+ws_enr.append_row(
+    [
+        str(season),
+        str(tournament_id),
+        str(cycle),
+        pid,
+        "active",
+        nowb,
+        nowb
+    ],
+    value_input_option="USER_ENTERED"
+)
 
         cache_invalidate(
             ws_enr
