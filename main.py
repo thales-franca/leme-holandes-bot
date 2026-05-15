@@ -13681,6 +13681,11 @@ def _next_season_id(
         cols=20
     )
 
+    ensure_sheet_columns(
+        ws,
+        SEASONS_REQUIRED
+    )
+
     rows = cached_get_all_records(
         ws,
         ttl_seconds=10
@@ -13698,21 +13703,24 @@ def _next_season_id(
         row_tid = safe_int(
             r.get(
                 "tournament_id",
-                DEFAULT_TOURNAMENT_ID
+                0
             ),
-            DEFAULT_TOURNAMENT_ID
+            0
         )
 
         if row_tid != tid:
             continue
 
-        mx = max(
-            mx,
-            safe_int(
-                r.get("season_id", 0),
+        sid = safe_int(
+            r.get(
+                "season_id",
                 0
-            )
+            ),
+            0
         )
+
+        if sid > mx:
+            mx = sid
 
     return mx + 1 if mx > 0 else 1
 
