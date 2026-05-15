@@ -30937,54 +30937,42 @@ GLOBAL_LOCK = asyncio.Lock()
 # =========================================================
 
 async def run_bot():
-
     """
-    Loop resiliente para manter o bot vivo mesmo após falhas inesperadas.
+    Runner resiliente real:
+    - tenta iniciar o bot
+    - se der erro, aguarda
+    - reinicia o processo inteiro para recriar o client limpo
     """
 
-    retry = 0
+    import sys
+    import os
 
-    while True:
+    try:
+
+        print("🚀 Iniciando LEME HOLANDÊS BOT...")
+
+        await client.start(
+            DISCORD_TOKEN,
+            reconnect=True
+        )
+
+    except Exception as e:
+
+        print("========================================")
+        print("❌ BOT CRASH DETECTADO")
+        print(f"Erro: {e}")
+        print("♻️ Reiniciando processo para recriar client limpo...")
+        print("========================================")
 
         try:
+            await asyncio.sleep(30)
+        except Exception:
+            pass
 
-            print(
-                "🚀 Iniciando LEME HOLANDÊS BOT..."
-            )
-
-            await client.start(
-                DISCORD_TOKEN
-            )
-
-        except Exception as e:
-
-            retry += 1
-
-            print("========================================")
-            print("❌ BOT CRASH DETECTADO")
-            print(f"Erro: {e}")
-            print(
-                f"Tentativa de restart: {retry}"
-            )
-            print("========================================")
-
-            try:
-
-                await asyncio.sleep(5)
-
-            except Exception:
-                pass
-
-        finally:
-
-            try:
-
-                if not client.is_closed():
-
-                    await client.close()
-
-            except Exception:
-                pass
+        os.execv(
+            sys.executable,
+            [sys.executable] + sys.argv
+        )
 
 
 # =========================================================
