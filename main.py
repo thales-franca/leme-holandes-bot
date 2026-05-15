@@ -13681,15 +13681,12 @@ def _next_season_id(
         cols=20
     )
 
-    ensure_sheet_columns(
+    col = ensure_sheet_columns(
         ws,
         SEASONS_REQUIRED
     )
 
-    rows = cached_get_all_records(
-        ws,
-        ttl_seconds=10
-    )
+    rows = ws.get_all_values()
 
     tid = safe_int(
         tournament_id,
@@ -13698,32 +13695,31 @@ def _next_season_id(
 
     mx = 0
 
-    for r in rows:
+    for i in range(2, len(rows) + 1):
+
+        r = rows[i - 1]
+
+        sid = safe_int(
+            r[col["season_id"]]
+            if col["season_id"] < len(r)
+            else 0,
+            0
+        )
 
         row_tid = safe_int(
-            r.get(
-                "tournament_id",
-                0
-            ),
+            r[col["tournament_id"]]
+            if col["tournament_id"] < len(r)
+            else 0,
             0
         )
 
         if row_tid != tid:
             continue
 
-        sid = safe_int(
-            r.get(
-                "season_id",
-                0
-            ),
-            0
-        )
-
         if sid > mx:
             mx = sid
 
     return mx + 1 if mx > 0 else 1
-
 
 @client.tree.command(
     name="startseason",
