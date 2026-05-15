@@ -7802,7 +7802,7 @@ async def inscrever(
                 ephemeral=True
             )
 
-                nowb = now_br_str()
+        nowb = now_br_str()
 
         ws_enr.append_row(
             [
