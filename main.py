@@ -7802,20 +7802,20 @@ async def inscrever(
                 ephemeral=True
             )
 
-        nowb = now_br_str()
+                nowb = now_br_str()
 
-ws_enr.append_row(
-    [
-        str(season),
-        str(tournament_id),
-        str(cycle),
-        pid,
-        "active",
-        nowb,
-        nowb
-    ],
-    value_input_option="USER_ENTERED"
-)
+        ws_enr.append_row(
+            [
+                str(season),
+                str(tournament_id),
+                str(cycle),
+                pid,
+                "active",
+                nowb,
+                nowb
+            ],
+            value_input_option="USER_ENTERED"
+        )
 
         cache_invalidate(
             ws_enr
