@@ -31181,11 +31181,12 @@ async def run_bot():
     Runner resiliente real:
     - tenta iniciar o bot
     - se der erro, aguarda
-    - reinicia o processo inteiro para recriar o client limpo
+    - reinicia o processo inteiro para recriar client limpo
     """
 
     import sys
     import os
+    import traceback
 
     try:
 
@@ -31193,13 +31194,38 @@ async def run_bot():
         print("🔌 Tentando conectar no Discord...")
         print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
         print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
+        print("🛰️ Chamando client.start...")
 
-        await client.start(
-            DISCORD_TOKEN,
-            reconnect=True
+        await asyncio.wait_for(
+            client.start(
+                DISCORD_TOKEN,
+                reconnect=True
+            ),
+            timeout=45
+        )
+
+        print("✅ client.start retornou")
+
+    except asyncio.TimeoutError:
+
+        print("========================================")
+        print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
+        print("O client.start não respondeu em 45 segundos.")
+        print("========================================")
+
+        try:
+            await asyncio.sleep(30)
+        except Exception:
+            pass
+
+        os.execv(
+            sys.executable,
+            [sys.executable] + sys.argv
         )
 
     except Exception as e:
+
+        traceback.print_exc()
 
         print("========================================")
         print("❌ BOT CRASH DETECTADO")
@@ -31249,4 +31275,3 @@ asyncio.run( run_bot() )
 # =================================================
 # FIM DO BLOCO 22/22
 # =================================================
-
