@@ -31192,9 +31192,9 @@ async def run_bot():
         print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
         print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
 
-    await client.start(
-    DISCORD_TOKEN,
-    reconnect=True
+        await client.start(
+            DISCORD_TOKEN,
+            reconnect=True
         )
 
     except Exception as e:
