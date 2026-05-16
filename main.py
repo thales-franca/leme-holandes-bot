@@ -31177,40 +31177,24 @@ GLOBAL_LOCK = asyncio.Lock()
 # =========================================================
 
 async def run_bot():
-    """
-    Runner resiliente real:
-    - tenta iniciar o bot
-    - se der erro, aguarda
-    - reinicia o processo inteiro para recriar client limpo
-    """
-
     import sys
     import os
-    import traceback
 
     try:
 
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
-        print("🔌 Tentando conectar no Discord...")
-        print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
-        print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
-        print("🛰️ Chamando client.start...")
 
-        await asyncio.wait_for(
-            client.start(
-                DISCORD_TOKEN,
-                reconnect=True
-            ),
-            timeout=45
+        await client.start(
+            DISCORD_TOKEN,
+            reconnect=True
         )
 
-        print("✅ client.start retornou")
-
-    except asyncio.TimeoutError:
+    except Exception as e:
 
         print("========================================")
-        print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
-        print("O client.start não respondeu em 45 segundos.")
+        print("❌ BOT CRASH DETECTADO")
+        print(f"Erro: {e}")
+        print("♻️ Reiniciando processo para recriar client limpo...")
         print("========================================")
 
         try:
@@ -31259,16 +31243,13 @@ if not DISCORD_TOKEN:
 # KEEP ALIVE
 # =========================================================
 
-print("ANTES DO KEEP_ALIVE")
 keep_alive()
-print("DEPOIS DO KEEP_ALIVE")
 
 
 # =========================================================
 # LOOP PRINCIPAL DO DISCORD
 # =========================================================
 
-print("ANTES DO ASYNCIO RUN")
 asyncio.run( run_bot() )
 
 
