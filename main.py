@@ -5290,8 +5290,10 @@ class LemeBot(discord.Client):
     def __init__(self):
 
         intents = discord.Intents.default()
-        intents.members = True  # necessário para fetch_member / on_member_join
+
+        intents.members = True
         intents.message_content = True
+        intents.presences = True
 
         super().__init__(
             intents=intents
