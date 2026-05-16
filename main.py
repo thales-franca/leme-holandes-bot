@@ -38,18 +38,49 @@ from postgres_sync import pg_ping
 
 app = Flask(__name__)
 
+WEB_STARTED = False
+
+
+@app.route("/")
+def home():
+    return "LEME HOLANDÊS BOT ONLINE", 200
+
+
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
+
 
 def _run_web():
+
     port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
 
 
 def keep_alive():
+
+    global WEB_STARTED
+
+    if WEB_STARTED:
+        print("🌐 Flask já iniciado. Ignorando novo start.")
+        return
+
+    WEB_STARTED = True
+
     t = threading.Thread(
         target=_run_web,
         daemon=True
     )
+
     t.start()
+
+    print("🌐 Flask keep_alive iniciado.")
 
 
 # =========================
