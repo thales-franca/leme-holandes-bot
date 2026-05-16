@@ -31200,22 +31200,31 @@ GLOBAL_LOCK = asyncio.Lock()
 async def run_bot():
     import sys
     import os
+    import traceback
 
     try:
 
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
+        print("🔌 Tentando conectar no Discord...")
+        print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
+        print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
+        print("🛰️ Chamando client.start...")
 
-        await client.start(
-            DISCORD_TOKEN,
-            reconnect=True
+        await asyncio.wait_for(
+            client.start(
+                DISCORD_TOKEN,
+                reconnect=True
+            ),
+            timeout=45
         )
 
-    except Exception as e:
+        print("✅ client.start retornou")
+
+    except asyncio.TimeoutError:
 
         print("========================================")
-        print("❌ BOT CRASH DETECTADO")
-        print(f"Erro: {e}")
-        print("♻️ Reiniciando processo para recriar client limpo...")
+        print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
+        print("O client.start não respondeu em 45 segundos.")
         print("========================================")
 
         try:
