@@ -7831,14 +7831,14 @@ async def inscrever(
             formato
         )
 
-              if fk == "modern":
+        if fk == "modern":
 
             arquetipo_final = _resolve_case_insensitive_choice(
                 arquetipo,
                 MODERN_DECK_ARQUETIPOS
             )
 
-            if not arquetipo_final:
+        if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
@@ -7852,7 +7852,7 @@ async def inscrever(
                 PAUPER_DECK_ARQUETIPOS
             )
 
-            if not arquetipo_final:
+        if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
@@ -7867,7 +7867,7 @@ async def inscrever(
                 ).strip().split()
             )
 
-            if not arquetipo_final:
+        if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
