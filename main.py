@@ -7325,6 +7325,7 @@ DECK_GUILDAS = [
 # =========================================================
 # ARQUÉTIPOS:
 # - Modern mantém autocomplete oficial
+# - Pauper mantém autocomplete oficial
 # - Outros formatos ficam livres
 # =========================================================
 
@@ -7386,6 +7387,78 @@ MODERN_DECK_ARQUETIPOS = [
     "Vampire",
     "Wizards",
     "Yawgmoth",
+    "Zombies",
+]
+
+PAUPER_DECK_ARQUETIPOS = [
+
+    "Affinity",
+    "Aggro",
+    "Altar Tron",
+    "Arcane Tide",
+    "Aristocrats",
+    "Blade",
+    "Bogles",
+    "Bully",
+    "Burn",
+    "Cawgate",
+    "Control",
+    "Cycling Storm",
+    "Delver",
+    "Dredge",
+    "Eggs Tron",
+    "Elves",
+    "Ephemerate",
+    "Ephemerate Tron",
+    "Faeries",
+    "Familiars",
+    "Fangren Tron",
+    "Flicker Tron",
+    "Gardens",
+    "Gates Soup",
+    "Gleezard",
+    "Glintblade",
+    "Glitters",
+    "Goblins",
+    "Heroic",
+    "Hot Dogs",
+    "Infect",
+    "Inside Out Combo",
+    "Kiln Fiend",
+    "Madness",
+    "Madness Burn",
+    "Metalcraft",
+    "Midnight Grond",
+    "Monarch",
+    "Monster Tron",
+    "Monsters",
+    "Pactdoll",
+    "Persistent Petitioners",
+    "Pestilence",
+    "Pinger Burn",
+    "Poison Storm",
+    "Ponza",
+    "Ramp",
+    "Reanimator",
+    "Rebels",
+    "Red Deck Wins",
+    "Rogue",
+    "Ruby Storm",
+    "Skred",
+    "Slivers",
+    "Spy Combo",
+    "Standard",
+    "Sticker Kuldotha",
+    "Stompy",
+    "Synthesizer",
+    "Terror",
+    "Tribe",
+    "Tron",
+    "Turbofog",
+    "Turbo Emblems",
+    "Walls Combo",
+    "White Weenie",
+    "Wildfire",
     "Zombies",
 ]
 
@@ -7758,11 +7831,25 @@ async def inscrever(
             formato
         )
 
-        if fk == "modern":
+              if fk == "modern":
 
             arquetipo_final = _resolve_case_insensitive_choice(
                 arquetipo,
                 MODERN_DECK_ARQUETIPOS
+            )
+
+            if not arquetipo_final:
+
+                return await interaction.followup.send(
+                    "❌ Arquétipo inválido.",
+                    ephemeral=True
+                )
+
+        elif fk == "pauper":
+
+            arquetipo_final = _resolve_case_insensitive_choice(
+                arquetipo,
+                PAUPER_DECK_ARQUETIPOS
             )
 
             if not arquetipo_final:
@@ -14173,6 +14260,20 @@ async def cadastrar_player(
                     ephemeral=True
                 )
 
+        elif fk == "pauper":
+
+            arquetipo_final = _resolve_case_insensitive_choice(
+                arquetipo,
+                PAUPER_DECK_ARQUETIPOS
+            )
+
+            if not arquetipo_final:
+
+                return await interaction.followup.send(
+                    "❌ Arquétipo inválido.",
+                    ephemeral=True
+                )
+
         else:
 
             arquetipo_final = " ".join(
@@ -14188,7 +14289,7 @@ async def cadastrar_player(
                     ephemeral=True
                 )
 
-        nm = _montar_nome_deck(
+        nome_deck = _montar_nome_deck(
             guilda_final,
             arquetipo_final
         )
@@ -24944,6 +25045,13 @@ def _resolve_final_arquetipo_by_format(
         return _resolve_case_insensitive_choice(
             arquetipo,
             MODERN_DECK_ARQUETIPOS
+        )
+
+    if fk == "pauper":
+
+        return _resolve_case_insensitive_choice(
+            arquetipo,
+            PAUPER_DECK_ARQUETIPOS
         )
 
     return " ".join(
