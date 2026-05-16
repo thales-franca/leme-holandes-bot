@@ -7577,9 +7577,15 @@ async def ac_deck_arquetipo(
             formato
         )
 
-        # Apenas Modern possui autocomplete fechado
+        if fk == "modern":
 
-        if fk != "modern":
+            base = MODERN_DECK_ARQUETIPOS
+
+        elif fk == "pauper":
+
+            base = PAUPER_DECK_ARQUETIPOS
+
+        else:
 
             q = str(
                 current or ""
@@ -7596,7 +7602,7 @@ async def ac_deck_arquetipo(
             ]
 
         items = _filter_preset_choices(
-            MODERN_DECK_ARQUETIPOS,
+            base,
             current
         )
 
@@ -7824,7 +7830,7 @@ async def inscrever(
             )
 
         # arquétipo
-        # Modern = fechado
+        # Modern e Pauper = fechado
         # Outros = livre
 
         fk = normalize_format_key(
@@ -7838,7 +7844,7 @@ async def inscrever(
                 MODERN_DECK_ARQUETIPOS
             )
 
-        if not arquetipo_final:
+            if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
@@ -7852,7 +7858,7 @@ async def inscrever(
                 PAUPER_DECK_ARQUETIPOS
             )
 
-        if not arquetipo_final:
+            if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
@@ -7867,13 +7873,13 @@ async def inscrever(
                 ).strip().split()
             )
 
-        if not arquetipo_final:
+            if not arquetipo_final:
 
                 return await interaction.followup.send(
                     "❌ Arquétipo inválido.",
                     ephemeral=True
                 )
-
+                
         nome_deck = _montar_nome_deck(
             guilda_final,
             arquetipo_final
