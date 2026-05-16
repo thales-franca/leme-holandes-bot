@@ -41,16 +41,6 @@ app = Flask(__name__)
 WEB_STARTED = False
 
 
-@app.route("/")
-def home():
-    return "LEME HOLANDÊS BOT ONLINE", 200
-
-
-@app.route("/healthz")
-def healthz():
-    return "ok", 200
-
-
 def _run_web():
 
     port = int(os.environ.get("PORT", "10000"))
