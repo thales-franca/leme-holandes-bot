@@ -24,6 +24,8 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
+from postgres_sync import pg_ping
+
 
 # =========================================================
 # LEME HOLANDÊS BOT
@@ -31088,6 +31090,8 @@ def healthz():
 async def on_ready():
 
     try:
+
+        print("POSTGRES:", pg_ping())
 
         print("========================================")
         print(
