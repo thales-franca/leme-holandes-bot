@@ -12,6 +12,7 @@ import threading
 import random
 import csv
 import io
+import aiohttp
 
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta, time as dtime, date
@@ -23,8 +24,6 @@ from flask import Flask
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
-
-from postgres_sync import pg_ping
 
 
 # =========================================================
@@ -31200,8 +31199,7 @@ GLOBAL_LOCK = asyncio.Lock()
 async def run_bot():
 
     import traceback
-    import urllib.request
-    import urllib.error
+    import aiohttp
 
     try:
 
@@ -31210,35 +31208,44 @@ async def run_bot():
         token = str(DISCORD_TOKEN or "").strip()
 
         if token.lower().startswith("bot "):
+
             print("⚠️ TOKEN veio com prefixo 'Bot '. Removendo prefixo automaticamente.")
+
             token = token[4:].strip()
 
         print("🔐 TOKEN existe:", bool(token))
         print("🔐 TOKEN tamanho:", len(token))
 
-        print("🧪 Testando token direto na API do Discord...")
+        # =================================================
+        # TESTE DIRETO API DISCORD
+        # =================================================
 
-        req = urllib.request.Request(
-            "https://discord.com/api/v10/users/@me",
-            headers={
-                "Authorization": f"Bot {token}",
-                "User-Agent": "LemeHolandesBot/1.0"
-            }
-        )
+        print("🧪 Testando token via aiohttp...")
 
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                print("✅ Token aceito pela API Discord. Status:", resp.status)
+        async with aiohttp.ClientSession() as session:
 
-        except urllib.error.HTTPError as e:
-            print("❌ Discord recusou o token. Status:", e.code)
-            print("❌ Resposta:", e.read().decode("utf-8", errors="ignore"))
-            return
+            async with session.get(
+                "https://discord.com/api/v10/users/@me",
+                headers={
+                    "Authorization": f"Bot {token}"
+                },
+                timeout=20
+            ) as resp:
 
-        except Exception as e:
-            print("❌ Falha ao acessar API do Discord:")
-            print(e)
-            return
+                print("📡 Status API Discord:", resp.status)
+
+                txt = await resp.text()
+
+                print("📡 Resposta Discord:", txt[:300])
+
+                if resp.status != 200:
+
+                    print("❌ Discord recusou o token.")
+                    return
+
+        # =================================================
+        # LOGIN DISCORD
+        # =================================================
 
         print("🔌 Tentando conectar no Discord...")
         print("🛰️ Chamando client.login...")
@@ -31246,6 +31253,10 @@ async def run_bot():
         await client.login(token)
 
         print("✅ LOGIN OK")
+
+        # =================================================
+        # WEBSOCKET
+        # =================================================
 
         print("🌐 Abrindo websocket Discord...")
 
@@ -31261,6 +31272,7 @@ async def run_bot():
         print("❌ BOT CRASH DETECTADO")
         print(f"Erro: {e}")
         print("========================================")
+
 
 # =========================================================
 # START FINAL
