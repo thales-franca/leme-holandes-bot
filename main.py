@@ -5386,7 +5386,9 @@ class LemeBot(discord.Client):
                 f"ERRO SETUP sync: {e}"
             )
 
-            raise
+            print(
+                "SETUP: sync falhou temporariamente. Bot seguirá online sem derrubar o processo."
+            )
 
         # Warm cache dos índices RAM leves
 
