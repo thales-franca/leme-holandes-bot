@@ -5329,6 +5329,8 @@ class LemeBot(discord.Client):
         intents = discord.Intents.default()
 
         intents.guilds = True
+        intents.members = True
+        intents.message_content = True
 
         super().__init__(
             intents=intents
@@ -5337,10 +5339,111 @@ class LemeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
         print(
-            "CLIENT: teste mínimo carregado."
+            "CLIENT: intents configuradas."
         )
 
-    # setup_hook temporariamente desativado para teste puro de conexão Discord
+    async def setup_hook(self):
+
+        print(
+            "SETUP: iniciado."
+        )
+
+        try:
+
+            self.add_view(
+                OnboardingStartView()
+            )
+
+            self.add_view(
+                ResultConfirmView()
+            )
+
+            print(
+                "SETUP: views persistentes registradas com sucesso."
+            )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP add_view: {e}"
+            )
+
+        try:
+
+            print(
+                "SETUP: iniciando sync..."
+            )
+
+            if GUILD_ID:
+
+                guild = discord.Object(
+                    id=GUILD_ID
+                )
+
+                self.tree.copy_global_to(
+                    guild=guild
+                )
+
+                synced = await self.tree.sync(
+                    guild=guild
+                )
+
+                print(
+                    f"SETUP: sync guild ok. Comandos sincronizados: {len(synced)}"
+                )
+
+            else:
+
+                synced = await self.tree.sync()
+
+                print(
+                    f"SETUP: sync global ok. Comandos sincronizados: {len(synced)}"
+                )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP sync: {e}"
+            )
+
+            print(
+                "SETUP: sync falhou temporariamente. Bot seguirá online."
+            )
+
+        try:
+
+            print(
+                "SETUP: iniciando warm_ram_indexes..."
+            )
+
+            await asyncio.wait_for(
+                warm_ram_indexes(),
+                timeout=30
+            )
+
+            print(
+                "SETUP: warm_ram_indexes ok."
+            )
+
+        except asyncio.TimeoutError:
+
+            print(
+                "SETUP: warm_ram_indexes demorou mais de 30s. Pulando warm cache inicial."
+            )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP warm_ram_indexes: {e}"
+            )
+
+            print(
+                "SETUP: warm cache falhou. Bot seguirá online."
+            )
+
+        print(
+            "SETUP: finalizado."
+        )
 
 
 client = LemeBot()
@@ -30917,8 +31020,9 @@ async def chaveamento(
 
 
 # =========================================================
-# HEALTHCHECK SERVER (RENDER)
+# HEALTHCHECK SERVER
 # =========================================================
+
 from flask import jsonify
 
 START_TIME = datetime.now(
@@ -30929,118 +31033,82 @@ START_TIME = datetime.now(
 @app.route("/")
 def home():
 
-    try:
-
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "ready",
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "ready",
+    })
 
 
 @app.route("/ping")
 def ping():
 
-    try:
-
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "alive",
-            "time": datetime.now(
-                timezone.utc
-            ).isoformat(),
-            "discord_ready": bool(
-                client.is_ready()
-            ),
-            "guild_count": (
-                len(client.guilds)
-                if client.is_ready()
-                else 0
-            ),
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": "alive",
+        "time": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "discord_ready": bool(
+            client.is_ready()
+        ),
+        "guild_count": (
+            len(client.guilds)
+            if client.is_ready()
+            else 0
+        ),
+    })
 
 
 @app.route("/healthz")
 def healthz():
 
-    try:
+    now_utc = datetime.now(
+        timezone.utc
+    )
 
-        now_utc = datetime.now(
-            timezone.utc
-        )
-
-        return jsonify({
-            "ok": True,
-            "service": "LEME HOLANDÊS BOT",
-            "status": (
-                "ready"
-                if client.is_ready()
-                else "starting"
-            ),
-            "uptime_seconds": int(
-                (
-                    now_utc
-                    - START_TIME
-                ).total_seconds()
-            ),
-            "discord_ready": bool(
-                client.is_ready()
-            ),
-            "discord_user": (
-                str(client.user)
-                if client.user
-                else ""
-            ),
-            "guild_count": (
-                len(client.guilds)
-                if client.is_ready()
-                else 0
-            ),
-            "latency_ms": (
-                round(
-                    client.latency * 1000,
-                    2
-                )
-                if client.is_ready()
-                else None
-            ),
-            "time": now_utc.isoformat(),
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "service": "LEME HOLANDÊS BOT",
-            "status": "error",
-            "error": str(e),
-        }), 500
+    return jsonify({
+        "ok": True,
+        "service": "LEME HOLANDÊS BOT",
+        "status": (
+            "ready"
+            if client.is_ready()
+            else "starting"
+        ),
+        "uptime_seconds": int(
+            (
+                now_utc
+                - START_TIME
+            ).total_seconds()
+        ),
+        "discord_ready": bool(
+            client.is_ready()
+        ),
+        "discord_user": (
+            str(client.user)
+            if client.user
+            else ""
+        ),
+        "guild_count": (
+            len(client.guilds)
+            if client.is_ready()
+            else 0
+        ),
+        "latency_ms": (
+            round(
+                client.latency * 1000,
+                2
+            )
+            if client.is_ready()
+            else None
+        ),
+        "time": now_utc.isoformat(),
+    })
 
 
 # =========================================================
 # LOGS DE ESTABILIDADE NO CLIENT PRINCIPAL
-# IMPORTANTE:
-# - NÃO criar outro client
-# - apenas reaproveitar o client = LemeBot() do BLOCO 5
 # =========================================================
 
 @client.event
@@ -31063,27 +31131,17 @@ async def on_ready():
 @client.event
 async def on_disconnect():
 
-    try:
-
-        print(
-            "⚠️ Discord desconectado..."
-        )
-
-    except Exception:
-        pass
+    print(
+        "⚠️ Discord desconectado..."
+    )
 
 
 @client.event
 async def on_resumed():
 
-    try:
-
-        print(
-            "✅ Sessão Discord retomada."
-        )
-
-    except Exception:
-        pass
+    print(
+        "✅ Sessão Discord retomada."
+    )
 
 
 @client.event
@@ -31093,14 +31151,9 @@ async def on_error(
     **kwargs
 ):
 
-    try:
-
-        print(
-            f"❌ Erro no evento {event_method}"
-        )
-
-    except Exception:
-        pass
+    print(
+        f"❌ Erro no evento {event_method}"
+    )
 
 
 # =========================================================
@@ -31120,7 +31173,7 @@ async def run_bot():
 
     try:
 
-        print("🚀 TESTE MINIMO DISCORD")
+        print("🚀 Iniciando LEME HOLANDÊS BOT...")
 
         token = str(DISCORD_TOKEN or "").strip()
 
@@ -31135,25 +31188,13 @@ async def run_bot():
         print("🔐 TOKEN existe:", bool(token))
         print("🔐 TOKEN tamanho:", len(token))
 
-        # =================================================
-        # EVENTO READY
-        # =================================================
-
-        @client.event
-        async def on_ready():
-
-            print("===================================")
-            print(f"✅ BOT ONLINE: {client.user}")
-            print("===================================")
-
-        # =================================================
-        # START DISCORD
-        # =================================================
-
         print("🔌 Tentando conectar no Discord...")
         print("🛰️ Chamando client.start...")
 
-        await client.start(token)
+        await client.start(
+            token,
+            reconnect=True
+        )
 
     except Exception as e:
 
@@ -31192,10 +31233,6 @@ print("DEPOIS DO KEEP_ALIVE")
 # =========================================================
 
 print("ANTES DO ASYNCIO RUN")
-
-asyncio.set_event_loop_policy(
-    asyncio.DefaultEventLoopPolicy()
-)
 
 socket.setdefaulttimeout(60)
 
