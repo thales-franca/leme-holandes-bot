@@ -31231,10 +31231,7 @@ async def run_bot():
         print("🔌 Tentando conectar no Discord...")
         print("🛰️ Chamando client.start...")
 
-        await client.start(
-            token,
-            reconnect=True
-        )
+        await client.start(token)
 
     except Exception as e:
 
