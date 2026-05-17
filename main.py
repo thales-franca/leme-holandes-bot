@@ -31127,8 +31127,6 @@ async def on_ready():
 
     try:
 
-        print("POSTGRES:", pg_ping())
-
         print("========================================")
         print(
             f"🔥 BOT ONLINE: "
@@ -31207,16 +31205,12 @@ GLOBAL_LOCK = asyncio.Lock()
 # =========================================================
 
 async def run_bot():
-
-    import traceback
+    import sys
+    import os
 
     try:
 
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
-        print("🔌 Tentando conectar no Discord...")
-        print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
-        print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
-        print("🛰️ Chamando client.start...")
 
         await client.start(
             DISCORD_TOKEN,
@@ -31225,12 +31219,21 @@ async def run_bot():
 
     except Exception as e:
 
-        traceback.print_exc()
-
         print("========================================")
         print("❌ BOT CRASH DETECTADO")
         print(f"Erro: {e}")
+        print("♻️ Reiniciando processo para recriar client limpo...")
         print("========================================")
+
+        try:
+            await asyncio.sleep(30)
+        except Exception:
+            pass
+
+        os.execv(
+            sys.executable,
+            [sys.executable] + sys.argv
+        )
 
 # =========================================================
 # START FINAL
