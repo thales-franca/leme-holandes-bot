@@ -31263,13 +31263,10 @@ if not DISCORD_TOKEN:
 
 # =========================================================
 # KEEP ALIVE
+# TEMPORARIAMENTE DESATIVADO PARA TESTE
 # =========================================================
 
-print("ANTES DO KEEP_ALIVE")
-
-keep_alive()
-
-print("DEPOIS DO KEEP_ALIVE")
+print("KEEP_ALIVE DESATIVADO")
 
 
 # =========================================================
