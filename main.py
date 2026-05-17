@@ -31193,22 +31193,62 @@ GLOBAL_LOCK = asyncio.Lock()
 # RUNNER RESILIENTE
 # =========================================================
 
+# =========================================================
+# RUNNER RESILIENTE
+# =========================================================
+
 async def run_bot():
 
     import traceback
+    import urllib.request
+    import urllib.error
 
     try:
 
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
-        print("🔌 Tentando conectar no Discord...")
-        print("🔐 TOKEN existe:", bool(DISCORD_TOKEN))
 
-        print("🔑 Executando login...")
-        await client.login(DISCORD_TOKEN)
+        token = str(DISCORD_TOKEN or "").strip()
+
+        if token.lower().startswith("bot "):
+            print("⚠️ TOKEN veio com prefixo 'Bot '. Removendo prefixo automaticamente.")
+            token = token[4:].strip()
+
+        print("🔐 TOKEN existe:", bool(token))
+        print("🔐 TOKEN tamanho:", len(token))
+
+        print("🧪 Testando token direto na API do Discord...")
+
+        req = urllib.request.Request(
+            "https://discord.com/api/v10/users/@me",
+            headers={
+                "Authorization": f"Bot {token}",
+                "User-Agent": "LemeHolandesBot/1.0"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                print("✅ Token aceito pela API Discord. Status:", resp.status)
+
+        except urllib.error.HTTPError as e:
+            print("❌ Discord recusou o token. Status:", e.code)
+            print("❌ Resposta:", e.read().decode("utf-8", errors="ignore"))
+            return
+
+        except Exception as e:
+            print("❌ Falha ao acessar API do Discord:")
+            print(e)
+            return
+
+        print("🔌 Tentando conectar no Discord...")
+        print("🛰️ Chamando client.login...")
+
+        await client.login(token)
 
         print("✅ LOGIN OK")
 
         print("🌐 Abrindo websocket Discord...")
+
         await client.connect(
             reconnect=True
         )
