@@ -5321,6 +5321,8 @@ class LemeBot(discord.Client):
         intents = discord.Intents.default()
 
         intents.guilds = True
+        intents.members = True
+        intents.message_content = True
 
         super().__init__(
             intents=intents
@@ -5329,7 +5331,7 @@ class LemeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
         print(
-            "CLIENT: intents MINIMAS carregadas."
+            "CLIENT: intents configuradas."
         )
 
     async def setup_hook(self):
@@ -5338,16 +5340,96 @@ class LemeBot(discord.Client):
             "SETUP: iniciado."
         )
 
+        try:
+            self.add_view(OnboardingStartView())
+            self.add_view(ResultConfirmView())
+
+            print(
+                "SETUP: views persistentes registradas com sucesso."
+            )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP add_view: {e}"
+            )
+
+        try:
+
+            print(
+                "SETUP: iniciando sync..."
+            )
+
+            if GUILD_ID:
+
+                guild = discord.Object(
+                    id=GUILD_ID
+                )
+
+                self.tree.copy_global_to(
+                    guild=guild
+                )
+
+                synced = await self.tree.sync(
+                    guild=guild
+                )
+
+                print(
+                    f"SETUP: sync guild ok. Comandos sincronizados: {len(synced)}"
+                )
+
+            else:
+
+                synced = await self.tree.sync()
+
+                print(
+                    f"SETUP: sync global ok. Comandos sincronizados: {len(synced)}"
+                )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP sync: {e}"
+            )
+
+            print(
+                "SETUP: sync falhou temporariamente. Bot seguirá online."
+            )
+
+        try:
+
+            print(
+                "SETUP: iniciando warm_ram_indexes..."
+            )
+
+            await asyncio.wait_for(
+                warm_ram_indexes(),
+                timeout=30
+            )
+
+            print(
+                "SETUP: warm_ram_indexes ok."
+            )
+
+        except asyncio.TimeoutError:
+
+            print(
+                "SETUP: warm_ram_indexes demorou mais de 30s. Pulando warm cache inicial."
+            )
+
+        except Exception as e:
+
+            print(
+                f"ERRO SETUP warm_ram_indexes: {e}"
+            )
+
+            print(
+                "SETUP: warm cache falhou. Bot seguirá online."
+            )
+
         print(
             "SETUP: finalizado."
         )
-
-    async def on_ready(self):
-
-        print("========================================")
-        print(f"🔥 BOT ONLINE: {self.user}")
-        print(f"🌐 Guilds: {len(self.guilds)}")
-        print("========================================")
 
 
 client = LemeBot()
