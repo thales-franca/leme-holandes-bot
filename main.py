@@ -31128,19 +31128,8 @@ async def on_ready():
     try:
 
         print("========================================")
-        print(
-            f"🔥 BOT ONLINE: "
-            f"{client.user} "
-            f"(id={client.user.id if client.user else '0'})"
-        )
-        print(
-            f"🌐 Guilds conectadas: "
-            f"{len(client.guilds)}"
-        )
-        print(
-            f"📶 Latência: "
-            f"{round(client.latency * 1000, 2)} ms"
-        )
+        print(f"🔥 BOT ONLINE: {client.user}")
+        print(f"🌐 Guilds: {len(client.guilds)}")
         print("========================================")
 
     except Exception as e:
@@ -31205,35 +31194,31 @@ GLOBAL_LOCK = asyncio.Lock()
 # =========================================================
 
 async def run_bot():
-    import sys
-    import os
+
+    import traceback
 
     try:
 
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
+        print("🔌 Tentando conectar no Discord...")
+        print("🔐 TOKEN existe:", bool(DISCORD_TOKEN))
+        print("🛰️ Chamando client.start...")
 
         await client.start(
             DISCORD_TOKEN,
             reconnect=True
         )
 
+        print("✅ client.start finalizado.")
+
     except Exception as e:
+
+        traceback.print_exc()
 
         print("========================================")
         print("❌ BOT CRASH DETECTADO")
         print(f"Erro: {e}")
-        print("♻️ Reiniciando processo para recriar client limpo...")
         print("========================================")
-
-        try:
-            await asyncio.sleep(30)
-        except Exception:
-            pass
-
-        os.execv(
-            sys.executable,
-            [sys.executable] + sys.argv
-        )
 
 # =========================================================
 # START FINAL
