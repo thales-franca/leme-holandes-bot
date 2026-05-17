@@ -5320,12 +5320,16 @@ class LemeBot(discord.Client):
 
         intents = discord.Intents.default()
 
+        intents.guilds = True
         intents.members = True
         intents.message_content = True
-        intents.presences = True
 
         super().__init__(
             intents=intents
+        )
+
+        print(
+            "CLIENT: intents configuradas."
         )
 
         self.tree = app_commands.CommandTree(self)
