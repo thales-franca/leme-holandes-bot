@@ -5394,10 +5394,23 @@ class LemeBot(discord.Client):
 
         try:
 
-            await warm_ram_indexes()
+            print(
+                "SETUP: iniciando warm_ram_indexes..."
+            )
+
+            await asyncio.wait_for(
+                warm_ram_indexes(),
+                timeout=30
+            )
 
             print(
                 "SETUP: warm_ram_indexes ok."
+            )
+
+        except asyncio.TimeoutError:
+
+            print(
+                "SETUP: warm_ram_indexes demorou mais de 30s. Pulando warm cache inicial."
             )
 
         except Exception as e:
