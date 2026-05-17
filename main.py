@@ -31210,45 +31210,27 @@ async def run_bot():
 
     import traceback
 
-    while True:
+    try:
 
-        try:
+        print("🚀 Iniciando LEME HOLANDÊS BOT...")
+        print("🔌 Tentando conectar no Discord...")
+        print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
+        print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
+        print("🛰️ Chamando client.start...")
 
-            print("🚀 Iniciando LEME HOLANDÊS BOT...")
-            print("🔌 Tentando conectar no Discord...")
-            print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
-            print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
-            print("🛰️ Chamando client.start...")
+        await client.start(
+            DISCORD_TOKEN,
+            reconnect=True
+        )
 
-            await asyncio.wait_for(
-                client.start(
-                    DISCORD_TOKEN,
-                    reconnect=True
-                ),
-                timeout=45
-            )
+    except Exception as e:
 
-        except asyncio.TimeoutError:
+        traceback.print_exc()
 
-            print("========================================")
-            print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
-            print("========================================")
-
-        except Exception as e:
-
-            traceback.print_exc()
-
-            print("========================================")
-            print("❌ BOT CRASH DETECTADO")
-            print(f"Erro: {e}")
-            print("========================================")
-
-        print("♻️ Nova tentativa em 30 segundos...")
-
-        try:
-            await asyncio.sleep(30)
-        except Exception:
-            pass
+        print("========================================")
+        print("❌ BOT CRASH DETECTADO")
+        print(f"Erro: {e}")
+        print("========================================")
 
 # =========================================================
 # START FINAL
