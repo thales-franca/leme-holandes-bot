@@ -31254,13 +31254,16 @@ if not DISCORD_TOKEN:
 # KEEP ALIVE
 # =========================================================
 
+print("ANTES DO KEEP_ALIVE")
 keep_alive()
+print("DEPOIS DO KEEP_ALIVE")
 
 
 # =========================================================
 # LOOP PRINCIPAL DO DISCORD
 # =========================================================
 
+print("ANTES DO ASYNCIO RUN")
 asyncio.run( run_bot() )
 
 
