@@ -31263,10 +31263,11 @@ if not DISCORD_TOKEN:
 
 # =========================================================
 # KEEP ALIVE
-# TEMPORARIAMENTE DESATIVADO PARA TESTE
 # =========================================================
 
-print("KEEP_ALIVE DESATIVADO")
+print("ANTES DO KEEP_ALIVE")
+keep_alive()
+print("DEPOIS DO KEEP_ALIVE")
 
 
 # =========================================================
@@ -31274,7 +31275,6 @@ print("KEEP_ALIVE DESATIVADO")
 # =========================================================
 
 print("ANTES DO ASYNCIO RUN")
-
 asyncio.run(
     run_bot()
 )
@@ -31283,3 +31283,4 @@ asyncio.run(
 # =================================================
 # FIM DO BLOCO 22/22
 # =================================================
+
