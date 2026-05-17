@@ -12,7 +12,6 @@ import threading
 import random
 import csv
 import io
-import aiohttp
 
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta, time as dtime, date
@@ -31192,14 +31191,10 @@ GLOBAL_LOCK = asyncio.Lock()
 # RUNNER RESILIENTE
 # =========================================================
 
-# =========================================================
-# RUNNER RESILIENTE
-# =========================================================
-
 async def run_bot():
 
     import traceback
-    import aiohttp
+    import requests
 
     try:
 
@@ -31220,28 +31215,31 @@ async def run_bot():
         # TESTE DIRETO API DISCORD
         # =================================================
 
-        print("🧪 Testando token via aiohttp...")
+        print("🧪 Testando token via requests...")
 
-        async with aiohttp.ClientSession() as session:
+        try:
 
-            async with session.get(
+            r = requests.get(
                 "https://discord.com/api/v10/users/@me",
                 headers={
                     "Authorization": f"Bot {token}"
                 },
-                timeout=20
-            ) as resp:
+                timeout=15
+            )
 
-                print("📡 Status API Discord:", resp.status)
+            print("📡 Status API Discord:", r.status_code)
+            print("📡 Resposta:", r.text[:300])
 
-                txt = await resp.text()
+            if r.status_code != 200:
 
-                print("📡 Resposta Discord:", txt[:300])
+                print("❌ Discord recusou o token.")
+                return
 
-                if resp.status != 200:
+        except Exception as e:
 
-                    print("❌ Discord recusou o token.")
-                    return
+            print("❌ Falha HTTP:")
+            print(e)
+            return
 
         # =================================================
         # LOGIN DISCORD
@@ -31253,10 +31251,6 @@ async def run_bot():
         await client.login(token)
 
         print("✅ LOGIN OK")
-
-        # =================================================
-        # WEBSOCKET
-        # =================================================
 
         print("🌐 Abrindo websocket Discord...")
 
