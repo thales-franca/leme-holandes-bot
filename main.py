@@ -12,6 +12,7 @@ import threading
 import random
 import csv
 import io
+import asyncio
 
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta, time as dtime, date
@@ -23,6 +24,15 @@ from flask import Flask
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
+
+
+# =========================================================
+# EVENT LOOP POLICY FIX (RENDER/LINUX)
+# =========================================================
+
+asyncio.set_event_loop_policy(
+    asyncio.DefaultEventLoopPolicy()
+)
 
 
 # =========================================================
