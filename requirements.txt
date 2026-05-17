@@ -1,6 +1,6 @@
-discord.py==2.4.0
+discord.py==2.3.2
 gspread==6.1.2
 google-auth==2.33.0
 flask==3.0.3
 psycopg2-binary
-requests==2.32.3
+requests
