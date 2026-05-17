@@ -31223,21 +31223,18 @@ async def run_bot():
         print("🔐 TOKEN tamanho:", len(token))
 
         # =================================================
-        # LOGIN DISCORD
+        # START DISCORD
         # =================================================
 
         print("🔌 Tentando conectar no Discord...")
-        print("🛰️ Chamando client.login...")
+        print("🛰️ Chamando client.start...")
 
-        await client.login(token)
-
-        print("✅ LOGIN OK")
-
-        print("🌐 Abrindo websocket Discord...")
-
-        await client.connect(
+        await client.start(
+            token,
             reconnect=True
         )
+
+        print("✅ client.start finalizado.")
 
     except Exception as e:
 
@@ -31265,7 +31262,9 @@ if not DISCORD_TOKEN:
 # =========================================================
 
 print("ANTES DO KEEP_ALIVE")
+
 keep_alive()
+
 print("DEPOIS DO KEEP_ALIVE")
 
 
@@ -31274,7 +31273,10 @@ print("DEPOIS DO KEEP_ALIVE")
 # =========================================================
 
 print("ANTES DO ASYNCIO RUN")
-asyncio.run( run_bot() )
+
+asyncio.run(
+    run_bot()
+)
 
 
 # =================================================
