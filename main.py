@@ -31196,7 +31196,6 @@ GLOBAL_LOCK = asyncio.Lock()
 async def run_bot():
 
     import traceback
-    import requests
 
     try:
 
@@ -31212,36 +31211,6 @@ async def run_bot():
 
         print("🔐 TOKEN existe:", bool(token))
         print("🔐 TOKEN tamanho:", len(token))
-
-        # =================================================
-        # TESTE DIRETO API DISCORD
-        # =================================================
-
-        print("🧪 Testando token via requests...")
-
-        try:
-
-            r = requests.get(
-                "https://discord.com/api/v10/users/@me",
-                headers={
-                    "Authorization": f"Bot {token}"
-                },
-                timeout=15
-            )
-
-            print("📡 Status API Discord:", r.status_code)
-            print("📡 Resposta:", r.text[:300])
-
-            if r.status_code != 200:
-
-                print("❌ Discord recusou o token.")
-                return
-
-        except Exception as e:
-
-            print("❌ Falha HTTP:")
-            print(e)
-            return
 
         # =================================================
         # LOGIN DISCORD
