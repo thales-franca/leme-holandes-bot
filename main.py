@@ -31202,14 +31202,16 @@ async def run_bot():
         print("🚀 Iniciando LEME HOLANDÊS BOT...")
         print("🔌 Tentando conectar no Discord...")
         print("🔐 TOKEN existe:", bool(DISCORD_TOKEN))
-        print("🛰️ Chamando client.start...")
 
-        await client.start(
-            DISCORD_TOKEN,
+        print("🔑 Executando login...")
+        await client.login(DISCORD_TOKEN)
+
+        print("✅ LOGIN OK")
+
+        print("🌐 Abrindo websocket Discord...")
+        await client.connect(
             reconnect=True
         )
-
-        print("✅ client.start finalizado.")
 
     except Exception as e:
 
