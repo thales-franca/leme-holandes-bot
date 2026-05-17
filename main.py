@@ -31204,72 +31204,51 @@ GLOBAL_LOCK = asyncio.Lock()
 
 # =========================================================
 # RUNNER RESILIENTE
-# IMPORTANTE:
-# - usa o client principal já existente
-# - NÃO reinstancia client
-# - mantém setup_hook funcional
 # =========================================================
 
 async def run_bot():
-    import sys
-    import os
+
     import traceback
 
-    try:
+    while True:
 
-        print("🚀 Iniciando LEME HOLANDÊS BOT...")
-        print("🔌 Tentando conectar no Discord...")
-        print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
-        print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
-        print("🛰️ Chamando client.start...")
+        try:
 
-        await asyncio.wait_for(
-            client.start(
-                DISCORD_TOKEN,
-                reconnect=True
-            ),
-            timeout=45
-        )
+            print("🚀 Iniciando LEME HOLANDÊS BOT...")
+            print("🔌 Tentando conectar no Discord...")
+            print("🔐 DISCORD_TOKEN carregado:", bool(DISCORD_TOKEN))
+            print("🧪 DATABASE_URL carregada:", bool(os.getenv("DATABASE_URL")))
+            print("🛰️ Chamando client.start...")
 
-        print("✅ client.start retornou")
+            await asyncio.wait_for(
+                client.start(
+                    DISCORD_TOKEN,
+                    reconnect=True
+                ),
+                timeout=45
+            )
 
-    except asyncio.TimeoutError:
+        except asyncio.TimeoutError:
 
-        print("========================================")
-        print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
-        print("O client.start não respondeu em 45 segundos.")
-        print("========================================")
+            print("========================================")
+            print("⏰ TIMEOUT AO CONECTAR NO DISCORD")
+            print("========================================")
+
+        except Exception as e:
+
+            traceback.print_exc()
+
+            print("========================================")
+            print("❌ BOT CRASH DETECTADO")
+            print(f"Erro: {e}")
+            print("========================================")
+
+        print("♻️ Nova tentativa em 30 segundos...")
 
         try:
             await asyncio.sleep(30)
         except Exception:
             pass
-
-        os.execv(
-            sys.executable,
-            [sys.executable] + sys.argv
-        )
-
-    except Exception as e:
-
-        traceback.print_exc()
-
-        print("========================================")
-        print("❌ BOT CRASH DETECTADO")
-        print(f"Erro: {e}")
-        print("♻️ Reiniciando processo para recriar client limpo...")
-        print("========================================")
-
-        try:
-            await asyncio.sleep(30)
-        except Exception:
-            pass
-
-        os.execv(
-            sys.executable,
-            [sys.executable] + sys.argv
-        )
-
 
 # =========================================================
 # START FINAL
