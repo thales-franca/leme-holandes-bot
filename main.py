@@ -5326,6 +5326,8 @@ class LemeBot(discord.Client):
             intents=intents
         )
 
+        self.tree = app_commands.CommandTree(self)
+
         print(
             "CLIENT: intents MINIMAS carregadas."
         )
