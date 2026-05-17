@@ -13,6 +13,7 @@ import random
 import csv
 import io
 import asyncio
+import socket
 
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta, time as dtime, date
@@ -33,6 +34,13 @@ from google.oauth2.service_account import Credentials
 asyncio.set_event_loop_policy(
     asyncio.DefaultEventLoopPolicy()
 )
+
+
+# =========================================================
+# SOCKET TIMEOUT FIX (RENDER FREE)
+# =========================================================
+
+socket.setdefaulttimeout(60)
 
 
 # =========================================================
@@ -31184,6 +31192,12 @@ print("DEPOIS DO KEEP_ALIVE")
 # =========================================================
 
 print("ANTES DO ASYNCIO RUN")
+
+asyncio.set_event_loop_policy(
+    asyncio.DefaultEventLoopPolicy()
+)
+
+socket.setdefaulttimeout(60)
 
 asyncio.run(
     run_bot()
