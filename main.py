@@ -5336,8 +5336,13 @@ class LemeBot(discord.Client):
 
     async def setup_hook(self):
 
+        print(
+            "SETUP: iniciado."
+        )
+
+        # =================================================
         # Views persistentes
-        # funcionam após restart quando o bot volta online
+        # =================================================
 
         try:
 
@@ -5359,12 +5364,15 @@ class LemeBot(discord.Client):
                 f"ERRO SETUP add_view: {e}"
             )
 
-            raise
-
+        # =================================================
         # Sync commands
-        # guild-scoped quando possível
+        # =================================================
 
         try:
+
+            print(
+                "SETUP: iniciando sync..."
+            )
 
             if GUILD_ID:
 
@@ -5404,7 +5412,9 @@ class LemeBot(discord.Client):
                 "SETUP: sync falhou temporariamente. Bot seguirá online sem derrubar o processo."
             )
 
-        # Warm cache dos índices RAM leves
+        # =================================================
+        # Warm cache
+        # =================================================
 
         try:
 
@@ -5433,7 +5443,13 @@ class LemeBot(discord.Client):
                 f"ERRO SETUP warm_ram_indexes: {e}"
             )
 
-            raise
+            print(
+                "SETUP: warm cache falhou. Bot seguirá online."
+            )
+
+        print(
+            "SETUP: finalizado."
+        )
 
 
 client = LemeBot()
@@ -31219,7 +31235,9 @@ async def run_bot():
 
         if token.lower().startswith("bot "):
 
-            print("⚠️ TOKEN veio com prefixo 'Bot '. Removendo prefixo automaticamente.")
+            print(
+                "⚠️ TOKEN veio com prefixo 'Bot '. Removendo prefixo automaticamente."
+            )
 
             token = token[4:].strip()
 
@@ -31237,8 +31255,6 @@ async def run_bot():
             token,
             reconnect=True
         )
-
-        print("✅ client.start finalizado.")
 
     except Exception as e:
 
@@ -31266,7 +31282,9 @@ if not DISCORD_TOKEN:
 # =========================================================
 
 print("ANTES DO KEEP_ALIVE")
+
 keep_alive()
+
 print("DEPOIS DO KEEP_ALIVE")
 
 
@@ -31275,6 +31293,7 @@ print("DEPOIS DO KEEP_ALIVE")
 # =========================================================
 
 print("ANTES DO ASYNCIO RUN")
+
 asyncio.run(
     run_bot()
 )
@@ -31283,4 +31302,3 @@ asyncio.run(
 # =================================================
 # FIM DO BLOCO 22/22
 # =================================================
-
