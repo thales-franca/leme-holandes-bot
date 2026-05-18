@@ -14411,12 +14411,12 @@ async def cadastrar_player(
             arquetipo_final
         )
 
-        if not nm or len(nm) > 80:
+        if not nome_deck or len(nome_deck) > 80:
 
             return await interaction.followup.send(
-                "❌ Nome de deck inválido (1 a 80 caracteres).",
-                ephemeral=True
-            )
+        "❌ Nome de deck inválido (1 a 80 caracteres).",
+        ephemeral=True
+        )
 
         ok, val = validate_decklist_url(
             decklist,
