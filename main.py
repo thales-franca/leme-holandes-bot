@@ -4258,6 +4258,29 @@ async def ac_match_id_user_pending(
             current or ""
         ).strip().lower()
 
+        formato = str(
+            getattr(
+                interaction.namespace,
+                "formato",
+                ""
+            ) or ""
+        ).strip()
+
+        if not formato:
+
+            return []
+
+        sh = open_sheet()
+
+        tournament_id = resolve_tournament_id(
+            sh,
+            formato
+        )
+
+        if not tournament_id:
+
+            return []
+
         # 1) snapshot imediato
 
         items = _get_match_ac_choices_snapshot_for_user(
@@ -4269,8 +4292,6 @@ async def ac_match_id_user_pending(
         # 2) fallback leve
 
         if not items:
-
-            sh = open_sheet()
 
             items = get_match_ac_choices_for_user(
                 sh,
@@ -4300,6 +4321,27 @@ async def ac_match_id_user_pending(
                 or not value
                 or value in seen
             ):
+                continue
+
+            match_row = get_match_by_id_fast(
+                sh,
+                value
+            )
+
+            if not match_row:
+
+                continue
+
+            row_tournament_id = safe_int(
+                match_row.get(
+                    "tournament_id",
+                    DEFAULT_TOURNAMENT_ID
+                ),
+                DEFAULT_TOURNAMENT_ID
+            )
+
+            if row_tournament_id != tournament_id:
+
                 continue
 
             out.append(
