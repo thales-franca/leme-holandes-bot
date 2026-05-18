@@ -14677,7 +14677,7 @@ async def cadastrar_player(
             {
                 "range":
                 f"{col_letter(col_deck['deck'])}{rown}",
-                "values": [[nm]]
+                "values": [[nome_deck]]
             },
             {
                 "range":
@@ -14696,7 +14696,7 @@ async def cadastrar_player(
         )
 
         msg_parts.append(
-            f"- Deck setado: **{nm}**"
+            f"- Deck setado: **{nome_deck}**"
         )
 
         msg_parts.append(
@@ -14721,7 +14721,7 @@ async def cadastrar_player(
             f"formato={format_label(formato)} "
             f"season={season} "
             f"ciclo={ciclo} "
-            f"deck='{nm}'"
+            f"deck='{nome_deck}'"
         )
 
     except Exception as e:
