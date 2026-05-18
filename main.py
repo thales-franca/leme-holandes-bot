@@ -8039,7 +8039,7 @@ async def inscrever(
             },
         ])
 
-               cache_invalidate(
+        cache_invalidate(
             ws_decks
         )
 
