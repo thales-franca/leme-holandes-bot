@@ -4281,24 +4281,20 @@ async def ac_match_id_user_pending(
 
             return []
 
-        # 1) snapshot imediato
-
-        items = _get_match_ac_choices_snapshot_for_user(
-            user_id=uid,
-            query=q,
-            limit=25
+        ws_matches = ensure_worksheet(
+            sh,
+            "Matches",
+            MATCHES_HEADER
         )
 
-        # 2) fallback leve
+        rows = cached_get_all_records(
+            ws_matches,
+            ttl_seconds=10
+        )
 
-        if not items:
-
-            items = get_match_ac_choices_for_user(
-                sh,
-                user_id=uid,
-                query=q,
-                limit=25
-            )
+        nick_map = get_player_nick_map_fast(
+            sh
+        )
 
         out: list[
             app_commands.Choice[str]
@@ -4306,34 +4302,10 @@ async def ac_match_id_user_pending(
 
         seen = set()
 
-        for item in items:
-
-            label = str(
-                item.get("label", "")
-            ).strip()
-
-            value = str(
-                item.get("value", "")
-            ).strip()
-
-            if (
-                not label
-                or not value
-                or value in seen
-            ):
-                continue
-
-            match_row = get_match_by_id_fast(
-                sh,
-                value
-            )
-
-            if not match_row:
-
-                continue
+        for r in rows:
 
             row_tournament_id = safe_int(
-                match_row.get(
+                r.get(
                     "tournament_id",
                     DEFAULT_TOURNAMENT_ID
                 ),
@@ -4344,16 +4316,112 @@ async def ac_match_id_user_pending(
 
                 continue
 
+            if str(
+                r.get(
+                    "active",
+                    "TRUE"
+                )
+            ).strip().lower() != "true":
+
+                continue
+
+            status = str(
+                r.get(
+                    "confirmed_status",
+                    ""
+                )
+            ).strip().lower()
+
+            if status == "confirmed":
+
+                continue
+
+            result_type = str(
+                r.get(
+                    "result_type",
+                    ""
+                )
+            ).strip().upper()
+
+            if result_type == "AUTO_FORFEIT":
+
+                continue
+
+            player_a = str(
+                r.get(
+                    "player_a_id",
+                    ""
+                )
+            ).strip()
+
+            player_b = str(
+                r.get(
+                    "player_b_id",
+                    ""
+                )
+            ).strip()
+
+            if uid not in (
+                player_a,
+                player_b
+            ):
+
+                continue
+
+            match_id = str(
+                r.get(
+                    "match_id",
+                    ""
+                )
+            ).strip()
+
+            if not match_id or match_id in seen:
+
+                continue
+
+            opponent_id = (
+                player_b
+                if uid == player_a
+                else player_a
+            )
+
+            opponent_name = nick_map.get(
+                opponent_id,
+                opponent_id
+            )
+
+            pod = str(
+                r.get(
+                    "pod",
+                    ""
+                )
+            ).strip()
+
+            label = (
+                f"{opponent_name} | POD {pod} | {status or 'open'}"
+            )
+
+            searchable = (
+                f"{label} {match_id}"
+            ).lower()
+
+            if q and q not in searchable:
+
+                continue
+
             out.append(
                 app_commands.Choice(
                     name=label[:100],
-                    value=value
+                    value=match_id
                 )
             )
 
-            seen.add(value)
+            seen.add(
+                match_id
+            )
 
             if len(out) >= 25:
+
                 break
 
         return out[:25]
