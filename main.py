@@ -8039,9 +8039,26 @@ async def inscrever(
             },
         ])
 
-        cache_invalidate(
+               cache_invalidate(
             ws_decks
         )
+
+        # =================================================
+        # POSTGRES SYNC — PLAYER
+        # =================================================
+
+        try:
+
+            pg_upsert_player(
+                pid,
+                nick_atual or interaction.user.display_name
+            )
+
+        except Exception as e:
+
+            print(
+                f"POSTGRES sync player falhou no /inscrever: {e}"
+            )
 
         await interaction.followup.send(
             f"✅ Inscrição confirmada\n"
