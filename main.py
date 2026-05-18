@@ -10297,7 +10297,7 @@ async def rejeitar(
             f"resultado rejeitado: "
             f"user={interaction.user.display_name} "
             f"({pid}) | "
-            f"formato={format_label_by_id(tournament_id)} | "
+            f"formato={format_label_by_id(sh, tournament_id)} | "
             f"season={season_id} | "
             f"cycle={cycle} | "
             f"match={match_id}"
@@ -12957,7 +12957,7 @@ async def admin_resultado_editar(
             f"**{placar}**\n"
 
             f"- Formato: "
-            f"**{format_label_by_id(tournament_id)}**\n"
+            f"**{format_label_by_id(sh, tournament_id)}**\n"
 
             f"- Linhas standings "
             f"recalculadas: "
@@ -13155,7 +13155,7 @@ async def admin_resultado_cancelar(
             f"Match reaberto.\n"
 
             f"- Formato: "
-            f"**{format_label_by_id(tournament_id)}**\n"
+            f"**{format_label_by_id(sh, tournament_id)}**\n"
 
             f"- Linhas standings "
             f"recalculadas: "
