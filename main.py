@@ -26,6 +26,11 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
+from postgres_sync import (
+    pg_ping,
+    pg_upsert_player
+)
+
 
 # =========================================================
 # EVENT LOOP POLICY FIX (RENDER/LINUX)
@@ -5640,6 +5645,7 @@ async def send_followup_chunks(
 # =========================================================
 # Players upsert (Sheets)
 # + invalidação do PLAYER RAM INDEX
+# + espelhamento PostgreSQL
 # =========================================================
 
 def upsert_player(
@@ -5728,6 +5734,19 @@ def upsert_player(
 
             pass
 
+        try:
+
+            pg_upsert_player(
+                did,
+                nick
+            )
+
+        except Exception as e:
+
+            print(
+                f"POSTGRES sync player falhou: {e}"
+            )
+
         return
 
     row = [""] * len(PLAYERS_HEADER)
@@ -5763,6 +5782,19 @@ def upsert_player(
     except Exception:
 
         pass
+
+    try:
+
+        pg_upsert_player(
+            did,
+            nick
+        )
+
+    except Exception as e:
+
+        print(
+            f"POSTGRES sync player falhou: {e}"
+        )
 
 
 # =========================================================
