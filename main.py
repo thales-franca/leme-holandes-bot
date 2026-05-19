@@ -5001,18 +5001,18 @@ def recalculate_cycle(
             a_gw + b_gw + d_g
         )
 
-        if a_gw > b_gw:
+if a_gw > b_gw:
 
-            stats[a]["real_match_points"] += 3.0
+    stats[a]["real_match_points"] += 4.0
 
-        elif b_gw > a_gw:
+elif b_gw > a_gw:
 
-            stats[b]["real_match_points"] += 3.0
+    stats[b]["real_match_points"] += 4.0
 
-        else:
+else:
 
-            stats[a]["real_match_points"] += 1.0
-            stats[b]["real_match_points"] += 1.0
+    stats[a]["real_match_points"] += 2.0
+    stats[b]["real_match_points"] += 2.0
 
         opponents[a].append(b)
         opponents[b].append(a)
@@ -5036,9 +5036,9 @@ def recalculate_cycle(
 
         else:
 
-            mwp[pid] = floor_333(
-                mp_real / (3.0 * mplayed)
-            )
+          mwp[pid] = floor_333(
+    mp_real / (4.0 * mplayed)
+)
 
         gplayed = s["games_played"]
 
