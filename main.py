@@ -7185,116 +7185,8 @@ async def post_onboarding_message(
     name="onboarding",
     description="Reposta o botão de onboarding no canal atual (OWNER)."
 )
-async def onboarding(        table = []
-
-        for r in rows:
-
-            try:
-
-                m = safe_int(
-                    r.get(
-                        "matches_played",
-                        0
-                    ),
-                    0
-                )
-
-                pts = sheet_float(
-                    r.get(
-                        "match_points",
-                        0
-                    ),
-                    0.0
-                )
-
-                mwp = sheet_float(
-                    r.get("mwp", 0),
-                    0.0
-                )
-
-                omw = sheet_float(
-                    r.get("omw", 0),
-                    0.0
-                )
-
-                gw = sheet_float(
-                    r.get("gw", 0),
-                    0.0
-                )
-
-                ogw = sheet_float(
-                    r.get("ogw", 0),
-                    0.0
-                )
-
-                table.append({
-
-                    "p":
-                        str(
-                            r.get(
-                                "player_id",
-                                ""
-                            )
-                        ).strip(),
-
-                    "pts":
-                        pts,
-
-                    "mwp":
-                        mwp,
-
-                    "omw":
-                        omw,
-
-                    "gw":
-                        gw,
-
-                    "ogw":
-                        ogw,
-
-                    "j":
-                        m,
-
-                    "mwp_percent":
-                        sheet_float(
-                            r.get(
-                                "mwp_percent",
-                                0
-                            ),
-                            0.0
-                        ),
-
-                    "omw_percent":
-                        sheet_float(
-                            r.get(
-                                "omw_percent",
-                                0
-                            ),
-                            0.0
-                        ),
-
-                    "gw_percent":
-                        sheet_float(
-                            r.get(
-                                "gw_percent",
-                                0
-                            ),
-                            0.0
-                        ),
-
-                    "ogw_percent":
-                        sheet_float(
-                            r.get(
-                                "ogw_percent",
-                                0
-                            ),
-                            0.0
-                        ),
-                })
-
-            except Exception:
-
-                continuenteraction
+async def onboarding(
+    interaction: discord.Interaction
 ):
 
     try:
@@ -12139,7 +12031,7 @@ async def ranking(
 
                 table = []
 
-        for r in rows:
+               for r in rows:
 
             try:
 
