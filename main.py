@@ -5014,8 +5014,8 @@ else:
     stats[a]["real_match_points"] += 2.0
     stats[b]["real_match_points"] += 2.0
 
-        opponents[a].append(b)
-        opponents[b].append(a)
+opponents[a].append(b)
+opponents[b].append(a)
 
     mwp = {}
 
