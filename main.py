@@ -5092,9 +5092,7 @@ def recalculate_cycle(
                 / len(ogw_vals)
             )
 
-    K = 3
-
-    out_rows = []
+        out_rows = []
 
     for pid, s in stats.items():
 
@@ -5119,28 +5117,6 @@ def recalculate_cycle(
             2
         )
 
-        ppm = (
-            final_points + K
-        ) / (
-            matches_played + K
-        )
-
-        peso_pts = (
-            matches_played
-            / (matches_played + K)
-        )
-
-        peso_ppm = (
-            K
-            / (matches_played + K)
-        )
-
-        score = (
-            final_points * peso_pts
-        ) + (
-            ppm * peso_ppm
-        )
-
         out_rows.append({
 
             "tournament_id": tid,
@@ -5157,9 +5133,6 @@ def recalculate_cycle(
 
             "real_points": real_points,
             "bonus_percent": bonus_percent,
-
-            "ppm": round(ppm, 6),
-            "score": round(score, 6),
 
             "mwp": round(mwp[pid], 6),
             "omw": round(omw[pid], 6),
@@ -5191,8 +5164,7 @@ def recalculate_cycle(
     out_rows.sort(
         key=lambda r: (
 
-            r["score"],
-            r["ppm"],
+            r["match_points"],
             r["mwp"],
             r["omw"],
             r["gw"],
@@ -5355,7 +5327,6 @@ def recalculate_cycle(
     cache_invalidate(ws_standings)
 
     return out_rows
-
 
 # =========================================================
 # [BLOCO 4/22 termina aqui]
@@ -7214,8 +7185,116 @@ async def post_onboarding_message(
     name="onboarding",
     description="Reposta o botão de onboarding no canal atual (OWNER)."
 )
-async def onboarding(
-    interaction: discord.Interaction
+async def onboarding(        table = []
+
+        for r in rows:
+
+            try:
+
+                m = safe_int(
+                    r.get(
+                        "matches_played",
+                        0
+                    ),
+                    0
+                )
+
+                pts = sheet_float(
+                    r.get(
+                        "match_points",
+                        0
+                    ),
+                    0.0
+                )
+
+                mwp = sheet_float(
+                    r.get("mwp", 0),
+                    0.0
+                )
+
+                omw = sheet_float(
+                    r.get("omw", 0),
+                    0.0
+                )
+
+                gw = sheet_float(
+                    r.get("gw", 0),
+                    0.0
+                )
+
+                ogw = sheet_float(
+                    r.get("ogw", 0),
+                    0.0
+                )
+
+                table.append({
+
+                    "p":
+                        str(
+                            r.get(
+                                "player_id",
+                                ""
+                            )
+                        ).strip(),
+
+                    "pts":
+                        pts,
+
+                    "mwp":
+                        mwp,
+
+                    "omw":
+                        omw,
+
+                    "gw":
+                        gw,
+
+                    "ogw":
+                        ogw,
+
+                    "j":
+                        m,
+
+                    "mwp_percent":
+                        sheet_float(
+                            r.get(
+                                "mwp_percent",
+                                0
+                            ),
+                            0.0
+                        ),
+
+                    "omw_percent":
+                        sheet_float(
+                            r.get(
+                                "omw_percent",
+                                0
+                            ),
+                            0.0
+                        ),
+
+                    "gw_percent":
+                        sheet_float(
+                            r.get(
+                                "gw_percent",
+                                0
+                            ),
+                            0.0
+                        ),
+
+                    "ogw_percent":
+                        sheet_float(
+                            r.get(
+                                "ogw_percent",
+                                0
+                            ),
+                            0.0
+                        ),
+                })
+
+            except Exception:
+
+                continuenteraction
 ):
 
     try:
@@ -12058,9 +12137,7 @@ async def ranking(
                 ephemeral=False
             )
 
-        K = 3
-
-        table = []
+                table = []
 
         for r in rows:
 
@@ -12102,26 +12179,6 @@ async def ranking(
                     0.0
                 )
 
-                ppm = (
-                    (pts + K) / (m + K)
-                    if m else 0
-                )
-
-                peso_pts = (
-                    m / (m + K)
-                    if m else 0
-                )
-
-                peso_ppm = (
-                    K / (m + K)
-                    if m else 0
-                )
-
-                score = (
-                    pts * peso_pts
-                    + ppm * peso_ppm
-                )
-
                 table.append({
 
                     "p":
@@ -12132,17 +12189,11 @@ async def ranking(
                             )
                         ).strip(),
 
-                    "score":
-                        score,
-
                     "pts":
                         pts,
 
                     "mwp":
                         mwp,
-
-                    "ppm":
-                        ppm,
 
                     "omw":
                         omw,
@@ -13715,11 +13766,9 @@ async def ranking_geral(
                 "Sem standings para esta season."
             )
 
-        # =================================================
+              # =================================================
         # CÁLCULOS
         # =================================================
-
-        K = 3
 
         table = []
 
@@ -13730,18 +13779,13 @@ async def ranking_geral(
             pts = s["pts"]
 
             raw_mwp = (
-                (pts / (3 * m))
+                (pts / (4 * m))
                 if m else 0
             )
 
             mwp = max(
                 raw_mwp,
                 0.333
-            )
-
-            ppm = (
-                (pts + K) / (m + K)
-                if m else 0
             )
 
             games = s["gplayed"]
@@ -13782,32 +13826,13 @@ async def ranking_geral(
 
                 ogw = 0.333
 
-            peso_pts = (
-                m / (m + K)
-                if m > 0 else 0
-            )
-
-            peso_ppm = (
-                K / (m + K)
-                if m > 0 else 0
-            )
-
-            score = (
-                pts * peso_pts
-                + ppm * peso_ppm
-            )
-
             table.append({
 
                 "p": p,
 
-                "score": score,
-
                 "pts": pts,
 
                 "mwp": mwp,
-
-                "ppm": ppm,
 
                 "omw": omw,
 
@@ -13817,7 +13842,6 @@ async def ranking_geral(
 
                 "j": m
             })
-
         # =================================================
         # ORDENAÇÃO OFICIAL
         # =================================================
@@ -21097,8 +21121,6 @@ def _final_read_ranking_geral_rows(
     if not stats:
         return []
 
-    K = 3
-
     table = []
 
     for pid, s in stats.items():
@@ -21111,7 +21133,7 @@ def _final_read_ranking_geral_rows(
         )
 
         raw_mwp = (
-            (pts / (3 * m))
+            (pts / (4 * m))
             if m
             else 0.0
         )
@@ -21119,12 +21141,6 @@ def _final_read_ranking_geral_rows(
         mwp = max(
             raw_mwp,
             0.333
-        )
-
-        ppm = (
-            (pts + K) / (m + K)
-            if m
-            else 0.0
         )
 
         games = s["gplayed"]
@@ -21171,28 +21187,9 @@ def _final_read_ranking_geral_rows(
 
             ogw = 0.333
 
-        peso_pts = (
-            m / (m + K)
-            if m > 0
-            else 0.0
-        )
-
-        peso_ppm = (
-            K / (m + K)
-            if m > 0
-            else 0.0
-        )
-
-        score = (
-            pts * peso_pts
-            + ppm * peso_ppm
-        )
-
         table.append({
             "player_id": pid,
-            "score": round(score, 6),
             "pts": round(pts, 6),
-            "ppm": round(ppm, 6),
             "mwp": round(mwp, 6),
             "omw": round(omw, 6),
             "gw": round(gw, 6),
@@ -21202,8 +21199,7 @@ def _final_read_ranking_geral_rows(
 
     table.sort(
         key=lambda x: (
-            x["score"],
-            x["ppm"],
+            x["pts"],
             x["mwp"],
             x["omw"],
             x["gw"],
