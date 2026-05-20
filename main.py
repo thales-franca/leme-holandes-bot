@@ -12168,7 +12168,7 @@ async def ranking(
 
             pid = r["p"]
 
-            nome = get_player_display_name(
+            nome = get_player_name(
                 sh,
                 pid
             )
