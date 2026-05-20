@@ -12141,7 +12141,7 @@ async def ranking(
 
                 continue
 
-                if not table:
+        if not table:
 
             return await interaction.followup.send(
                 "⚠️ Nenhum dado válido encontrado no ranking.",
