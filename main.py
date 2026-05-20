@@ -12052,93 +12052,161 @@ async def ranking(
                 )
 
                 mwp = sheet_float(
-                    r.get("mwp", 0),
+                    r.get(
+                        "mwp",
+                        0
+                    ),
                     0.0
                 )
 
                 omw = sheet_float(
-                    r.get("omw", 0),
+                    r.get(
+                        "omw",
+                        0
+                    ),
                     0.0
                 )
 
                 gw = sheet_float(
-                    r.get("gw", 0),
+                    r.get(
+                        "gw",
+                        0
+                    ),
                     0.0
                 )
 
                 ogw = sheet_float(
-                    r.get("ogw", 0),
+                    r.get(
+                        "ogw",
+                        0
+                    ),
                     0.0
                 )
 
                 table.append({
 
-                    "p":
-                        str(
-                            r.get(
-                                "player_id",
-                                ""
-                            )
-                        ).strip(),
+                    "p": str(
+                        r.get(
+                            "player_id",
+                            ""
+                        )
+                    ).strip(),
 
-                    "pts":
-                        pts,
+                    "pts": pts,
 
-                    "mwp":
-                        mwp,
+                    "mwp": mwp,
 
-                    "omw":
-                        omw,
+                    "omw": omw,
 
-                    "gw":
-                        gw,
+                    "gw": gw,
 
-                    "ogw":
-                        ogw,
+                    "ogw": ogw,
 
-                    "j":
-                        m,
+                    "j": m,
 
-                    "mwp_percent":
-                        sheet_float(
-                            r.get(
-                                "mwp_percent",
-                                0
-                            ),
-                            0.0
+                    "mwp_percent": sheet_float(
+                        r.get(
+                            "mwp_percent",
+                            0
                         ),
+                        0.0
+                    ),
 
-                    "omw_percent":
-                        sheet_float(
-                            r.get(
-                                "omw_percent",
-                                0
-                            ),
-                            0.0
+                    "omw_percent": sheet_float(
+                        r.get(
+                            "omw_percent",
+                            0
                         ),
+                        0.0
+                    ),
 
-                    "gw_percent":
-                        sheet_float(
-                            r.get(
-                                "gw_percent",
-                                0
-                            ),
-                            0.0
+                    "gw_percent": sheet_float(
+                        r.get(
+                            "gw_percent",
+                            0
                         ),
+                        0.0
+                    ),
 
-                    "ogw_percent":
-                        sheet_float(
-                            r.get(
-                                "ogw_percent",
-                                0
-                            ),
-                            0.0
+                    "ogw_percent": sheet_float(
+                        r.get(
+                            "ogw_percent",
+                            0
                         ),
+                        0.0
+                    ),
                 })
 
             except Exception:
 
                 continue
+
+        if not table:
+
+            return await interaction.followup.send(
+                "⚠️ Nenhum dado válido encontrado no ranking.",
+                ephemeral=False
+            )
+
+        table.sort(
+            key=lambda x: (
+                x["pts"],
+                x["mwp"],
+                x["omw"],
+                x["gw"],
+                x["ogw"]
+            ),
+            reverse=True
+        )
+
+        lines = []
+
+        for pos, r in enumerate(
+            table[:top],
+            start=1
+        ):
+
+            pid = r["p"]
+
+            nome = get_player_display_name(
+                sh,
+                pid
+            )
+
+            lines.append(
+
+                f"{pos} | "
+                f"{nome} | "
+                f"{r['j']} | "
+                f"{fmt_num2(r['pts'])} | "
+                f"{fmt_num2(r['mwp_percent'])} | "
+                f"{fmt_num2(r['omw_percent'])} | "
+                f"{fmt_num2(r['gw_percent'])} | "
+                f"{fmt_num2(r['ogw_percent'])}"
+            )
+
+        msg = (
+            f"🏆 Ranking — "
+            f"{format_label(formato)} | "
+            f"Season {season} | "
+            f"Ciclo {cycle} (Top {top})\n\n"
+
+            f"pos | jogador | J | PTS | MWP | OMW | GW | OGW\n"
+            f"--------------------------------------------------\n"
+            + "\n".join(lines)
+        )
+
+        await interaction.followup.send(
+            f"```{msg}```",
+            ephemeral=False
+        )
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Erro no /ranking: {e}",
+            ephemeral=False
+        )
 
         # =================================================
         # ORDENAÇÃO
