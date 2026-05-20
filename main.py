@@ -4692,12 +4692,10 @@ async def ac_owner_cycle_for_season(
 # =================================================
 
 
-
 # =========================================================
 # BLOCO ORIGINAL: BLOCO 4/22
 # SUB-BLOCO: ÚNICA
 # REVISÃO MULTI-FORMATO
-# ALTERANDO APENAS O NECESSÁRIO
 # =========================================================
 
 def recalculate_cycle(
@@ -4710,30 +4708,6 @@ def recalculate_cycle(
     """
     Recalcula o ranking do ciclo (SEMPRE do zero),
     persistindo o Standing no padrão oficial da liga.
-
-    Critério oficial de ordenação:
-    1. score
-    2. ppm
-    3. mwp
-    4. omw
-    5. gw
-    6. ogw
-
-    Regras base:
-    - Match points reais:
-      Win=3, Draw=1, Loss=0
-    - MWP com piso de 33,3%
-    - GWP com piso de 33,3%
-    - OMW = média do MWP dos oponentes
-    - OGW = média do GWP dos oponentes
-    - Considera apenas matches:
-      active=TRUE
-      confirmed_status=confirmed
-      result_type != bye
-
-    Bônus:
-    - aplicado sobre os pontos reais
-    - nunca acumula sobre bônus anterior
     """
 
     tid = safe_int(
@@ -4774,19 +4748,16 @@ def recalculate_cycle(
     )
 
     try:
-
         sweep_auto_confirm(
             sh,
             season_id,
             cycle,
             tournament_id=tid
         )
-
     except Exception:
         pass
 
     if bonus_percent is None:
-
         bonus_percent = get_cycle_bonus_percent(
             ws_bonus,
             season_id,
@@ -4814,42 +4785,28 @@ def recalculate_cycle(
     for r in enr_rows:
 
         row_tid = safe_int(
-            r.get(
-                "tournament_id",
-                DEFAULT_TOURNAMENT_ID
-            ),
+            r.get("tournament_id", DEFAULT_TOURNAMENT_ID),
             DEFAULT_TOURNAMENT_ID
         )
 
         if row_tid != tid:
             continue
 
-        if safe_int(
-            r.get("season_id", 0),
-            0
-        ) != season_id:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
 
-        if safe_int(
-            r.get("cycle", 0),
-            0
-        ) != cycle:
+        if safe_int(r.get("cycle", 0), 0) != cycle:
             continue
 
-        if str(
-            r.get("status", "")
-        ).strip().lower() != "active":
+        if str(r.get("status", "")).strip().lower() != "active":
             continue
 
-        pid = str(
-            r.get("player_id", "")
-        ).strip()
+        pid = str(r.get("player_id", "")).strip()
 
         if pid:
             all_player_ids.add(pid)
 
     stats = {}
-
     opponents = {}
 
     def ensure(pid: str):
@@ -4859,7 +4816,6 @@ def recalculate_cycle(
             stats[pid] = {
                 "real_match_points": 0.0,
                 "matches_played": 0,
-
                 "game_wins": 0,
                 "game_losses": 0,
                 "game_draws": 0,
@@ -4872,7 +4828,6 @@ def recalculate_cycle(
         ensure(pid)
 
     try:
-
         matches_rows = get_matches_for_cycle_fast(
             sh,
             season_id=season_id,
@@ -4898,58 +4853,34 @@ def recalculate_cycle(
     for r in matches_rows:
 
         row_tid = safe_int(
-            r.get(
-                "tournament_id",
-                DEFAULT_TOURNAMENT_ID
-            ),
+            r.get("tournament_id", DEFAULT_TOURNAMENT_ID),
             DEFAULT_TOURNAMENT_ID
         )
 
         if row_tid != tid:
             continue
 
-        if safe_int(
-            r.get("season_id", 0),
-            0
-        ) != season_id:
+        if safe_int(r.get("season_id", 0), 0) != season_id:
             continue
 
-        if safe_int(
-            r.get("cycle", 0),
-            0
-        ) != cycle:
+        if safe_int(r.get("cycle", 0), 0) != cycle:
             continue
 
-        if str(
-            r.get(
-                "confirmed_status",
-                ""
-            )
-        ).strip().lower() != "confirmed":
+        if str(r.get("confirmed_status", "")).strip().lower() != "confirmed":
             continue
 
-        if not as_bool(
-            r.get("active", "TRUE")
-        ):
+        if not as_bool(r.get("active", "TRUE")):
             continue
 
         result_type = str(
-            r.get(
-                "result_type",
-                "normal"
-            )
+            r.get("result_type", "normal")
         ).strip().lower()
 
         if result_type == "bye":
             continue
 
-        a = str(
-            r.get("player_a_id", "")
-        ).strip()
-
-        b = str(
-            r.get("player_b_id", "")
-        ).strip()
+        a = str(r.get("player_a_id", "")).strip()
+        b = str(r.get("player_b_id", "")).strip()
 
         if not a or not b:
             continue
@@ -4957,20 +4888,9 @@ def recalculate_cycle(
         ensure(a)
         ensure(b)
 
-        a_gw = safe_int(
-            r.get("a_games_won", 0),
-            0
-        )
-
-        b_gw = safe_int(
-            r.get("b_games_won", 0),
-            0
-        )
-
-        d_g = safe_int(
-            r.get("draw_games", 0),
-            0
-        )
+        a_gw = safe_int(r.get("a_games_won", 0), 0)
+        b_gw = safe_int(r.get("b_games_won", 0), 0)
+        d_g = safe_int(r.get("draw_games", 0), 0)
 
         valid.append(
             (
@@ -5018,7 +4938,6 @@ def recalculate_cycle(
         opponents[b].append(a)
 
     mwp = {}
-
     gwp = {}
 
     for pid, s in stats.items():
@@ -5036,9 +4955,9 @@ def recalculate_cycle(
 
         else:
 
-          mwp[pid] = floor_333(
-    mp_real / (3.0 * mplayed)
-)
+            mwp[pid] = floor_333(
+                mp_real / (3.0 * mplayed)
+            )
 
         gplayed = s["games_played"]
 
@@ -5058,7 +4977,6 @@ def recalculate_cycle(
             )
 
     omw = {}
-
     ogw = {}
 
     for pid in stats.keys():
@@ -5092,7 +5010,9 @@ def recalculate_cycle(
                 / len(ogw_vals)
             )
 
-        out_rows = []
+    K = 3
+
+    out_rows = []
 
     for pid, s in stats.items():
 
@@ -5117,6 +5037,32 @@ def recalculate_cycle(
             2
         )
 
+        ppm = (
+            (final_points + K)
+            / (matches_played + K)
+            if matches_played > 0
+            else 0.0
+        )
+
+        peso_pts = (
+            matches_played
+            / (matches_played + K)
+            if matches_played > 0
+            else 0.0
+        )
+
+        peso_ppm = (
+            K
+            / (matches_played + K)
+            if matches_played > 0
+            else 0.0
+        )
+
+        score = (
+            final_points * peso_pts
+            + ppm * peso_ppm
+        )
+
         out_rows.append({
 
             "tournament_id": tid,
@@ -5133,6 +5079,9 @@ def recalculate_cycle(
 
             "real_points": real_points,
             "bonus_percent": bonus_percent,
+
+            "ppm": round(ppm, 6),
+            "score": round(score, 6),
 
             "mwp": round(mwp[pid], 6),
             "omw": round(omw[pid], 6),
@@ -5163,8 +5112,8 @@ def recalculate_cycle(
 
     out_rows.sort(
         key=lambda r: (
-
-            r["match_points"],
+            r["score"],
+            r["ppm"],
             r["mwp"],
             r["omw"],
             r["gw"],
@@ -5181,7 +5130,6 @@ def recalculate_cycle(
     ):
 
         r["rank_position"] = i
-
         r["last_recalc_at"] = ts
 
     header = [
@@ -5328,6 +5276,7 @@ def recalculate_cycle(
 
     return out_rows
 
+
 # =========================================================
 # [BLOCO 4/22 termina aqui]
 # =========================================================
@@ -5335,6 +5284,7 @@ def recalculate_cycle(
 # =================================================
 # FIM DO SUB-BLOCO ÚNICA
 # =================================================
+
 
 
 
