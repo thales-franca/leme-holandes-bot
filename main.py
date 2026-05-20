@@ -12029,9 +12029,9 @@ async def ranking(
                 ephemeral=False
             )
 
-                table = []
+        table = []
 
-               for r in rows:
+        for r in rows:
 
             try:
 
