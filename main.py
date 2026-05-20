@@ -12141,7 +12141,7 @@ async def ranking(
 
                 continue
 
-        if not table:
+                if not table:
 
             return await interaction.followup.send(
                 "⚠️ Nenhum dado válido encontrado no ranking.",
@@ -12159,6 +12159,10 @@ async def ranking(
             reverse=True
         )
 
+        nick_map = get_player_nick_map_fast(
+            sh
+        )
+
         lines = []
 
         for pos, r in enumerate(
@@ -12166,10 +12170,12 @@ async def ranking(
             start=1
         ):
 
-            pid = r["p"]
+            pid = str(
+                r["p"]
+            ).strip()
 
-            nome = get_player_name(
-                sh,
+            nome = nick_map.get(
+                pid,
                 pid
             )
 
