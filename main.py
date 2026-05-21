@@ -13422,7 +13422,7 @@ async def ranking_geral(
             )
 
         # =================================================
-        # USA STANDINGS (IGUAL AO /ranking)
+        # USA STANDINGS
         # =================================================
 
         ws_standings = ensure_worksheet(
@@ -13460,6 +13460,7 @@ async def ranking_geral(
 
         # =================================================
         # LEITURA DOS STANDINGS
+        # SOMANDO TODOS OS CICLOS DA SEASON
         # =================================================
 
         for row in vals[1:]:
@@ -13506,106 +13507,118 @@ async def ranking_geral(
             if not p:
                 continue
 
-cycle_id = safe_int(
-    getv("cycle_id", 0),
-    0
-)
+            if p not in stats:
 
-matches_played = safe_int(
-    getv(
-        "matches_played",
-        0
-    ),
-    0
-)
+                stats[p] = {
 
-match_points = sheet_float(
-    getv(
-        "match_points",
-        0
-    ),
-    0.0
-)
+                    "pts": 0.0,
 
-game_wins = safe_int(
-    getv(
-        "game_wins",
-        0
-    ),
-    0
-)
+                    "matches": 0,
 
-game_losses = safe_int(
-    getv(
-        "game_losses",
-        0
-    ),
-    0
-)
+                    "gwins": 0,
 
-game_draws = safe_int(
-    getv(
-        "game_draws",
-        0
-    ),
-    0
-)
+                    "glosses": 0,
 
-games_played = safe_int(
-    getv(
-        "games_played",
-        0
-    ),
-    0
-)
+                    "gdraws": 0,
 
-omw_raw = sheet_float(
-    getv("omw", 0),
-    0.0
-)
+                    "gplayed": 0,
 
-ogw_raw = sheet_float(
-    getv("ogw", 0),
-    0.0
-)
+                    "omw_weighted_sum": 0.0,
 
-# =================================================
-# MANTÉM APENAS O CICLO MAIS RECENTE
-# =================================================
+                    "ogw_weighted_sum": 0.0,
 
-if (
-    p not in stats
-    or cycle_id > stats[p]["cycle_id"]
-):
+                    "omw_weight": 0,
 
-    stats[p] = {
+                    "ogw_weight": 0,
+                }
 
-        "cycle_id": cycle_id,
+            matches_played = safe_int(
+                getv(
+                    "matches_played",
+                    0
+                ),
+                0
+            )
 
-        "pts": match_points,
+            match_points = sheet_float(
+                getv(
+                    "match_points",
+                    0
+                ),
+                0.0
+            )
 
-        "matches": matches_played,
+            game_wins = safe_int(
+                getv(
+                    "game_wins",
+                    0
+                ),
+                0
+            )
 
-        "gwins": game_wins,
+            game_losses = safe_int(
+                getv(
+                    "game_losses",
+                    0
+                ),
+                0
+            )
 
-        "glosses": game_losses,
+            game_draws = safe_int(
+                getv(
+                    "game_draws",
+                    0
+                ),
+                0
+            )
 
-        "gdraws": game_draws,
+            games_played = safe_int(
+                getv(
+                    "games_played",
+                    0
+                ),
+                0
+            )
 
-        "gplayed": games_played,
+            omw_raw = sheet_float(
+                getv("omw", 0),
+                0.0
+            )
 
-        "omw_weighted_sum": (
-            omw_raw * matches_played
-        ),
+            ogw_raw = sheet_float(
+                getv("ogw", 0),
+                0.0
+            )
 
-        "ogw_weighted_sum": (
-            ogw_raw * matches_played
-        ),
+            # =================================================
+            # SOMA TODOS OS CICLOS
+            # =================================================
 
-        "omw_weight": matches_played,
+            stats[p]["pts"] += match_points
 
-        "ogw_weight": matches_played,
-    }
+            stats[p]["matches"] += matches_played
+
+            stats[p]["gwins"] += game_wins
+
+            stats[p]["glosses"] += game_losses
+
+            stats[p]["gdraws"] += game_draws
+
+            stats[p]["gplayed"] += games_played
+
+            if matches_played > 0:
+
+                stats[p]["omw_weighted_sum"] += (
+                    omw_raw * matches_played
+                )
+
+                stats[p]["ogw_weighted_sum"] += (
+                    ogw_raw * matches_played
+                )
+
+                stats[p]["omw_weight"] += matches_played
+
+                stats[p]["ogw_weight"] += matches_played
 
         if not stats:
 
@@ -13625,17 +13638,9 @@ if (
 
             pts = s["pts"]
 
-            # =============================================
-            # PPM
-            # =============================================
-
             ppm = (
                 pts / m
             ) if m > 0 else 0
-
-            # =============================================
-            # SCORE OFICIAL LEME
-            # =============================================
 
             K = 3
 
@@ -13653,10 +13658,6 @@ if (
                 (ppm * peso_ppm)
             )
 
-            # =============================================
-            # MWP
-            # =============================================
-
             raw_mwp = (
                 (pts / (3 * m))
                 if m else 0
@@ -13666,10 +13667,6 @@ if (
                 raw_mwp,
                 0.333
             )
-
-            # =============================================
-            # GW
-            # =============================================
 
             games = s["gplayed"]
 
@@ -13685,10 +13682,6 @@ if (
                 0.333
             )
 
-            # =============================================
-            # OMW
-            # =============================================
-
             if s["omw_weight"] > 0:
 
                 omw = max(
@@ -13701,10 +13694,6 @@ if (
 
                 omw = 0.333
 
-            # =============================================
-            # OGW
-            # =============================================
-
             if s["ogw_weight"] > 0:
 
                 ogw = max(
@@ -13716,10 +13705,6 @@ if (
             else:
 
                 ogw = 0.333
-
-            # =============================================
-            # TABELA
-            # =============================================
 
             table.append({
 
@@ -13743,7 +13728,7 @@ if (
             })
 
         # =================================================
-        # ORDENAÇÃO OFICIAL
+        # ORDENAÇÃO
         # =================================================
 
         table.sort(
@@ -13934,6 +13919,7 @@ if (
         await interaction.followup.send(
             f"❌ Erro: {e}"
         )
+
 
 # =================================================
 # FIM DO SUB-BLOCO C/7
