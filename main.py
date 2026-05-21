@@ -13429,7 +13429,7 @@ async def ranking_geral(
             ws_matches,
             ttl_seconds=10
         )
-        if len(vals) &lt;= 1:
+        if len(vals) <= 1:
             return await interaction.followup.send(
                 "Sem partidas para esta season."
             )
@@ -13453,7 +13453,7 @@ async def ranking_geral(
                     -1
                 )
                 if (
-                    i &lt; 0
+                    i < 0
                     or i >= len(row)
                 ):
                     return default
@@ -13645,7 +13645,7 @@ async def ranking_geral(
             )
             row_lines.append(
                 f"{pos:>3} | "
-                f"{nome[:22]:&lt;22} | "
+                f"{nome[:22]:<22} | "
                 f"{r['j']:>2} | "
                 f"{fmt_num2(r['score']):>6} | "
                 f"{fmt_num2(r['pts']):>6} | "
@@ -13665,7 +13665,7 @@ async def ranking_geral(
             f"(Top {top})",
             "",
             f"{'pos':>3} | "
-            f"{'jogador':&lt;22} | "
+            f"{'jogador':<22} | "
             f"{'J':>2} | "
             f"{'SCORE':>6} | "
             f"{'PTS':>6} | "
@@ -13751,7 +13751,6 @@ async def ranking_geral(
         await interaction.followup.send(
             f"❌ Erro: {e}"
         )
-
 
 # =================================================
 # FIM DO SUB-BLOCO C/7
