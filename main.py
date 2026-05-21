@@ -13432,7 +13432,7 @@ async def ranking_geral(
 
         ensure_sheet_columns(
             ws_matches,
-            MATCHES_REQUIRED
+            MATCHES_HEADER
         )
 
         vals = cached_get_all_values(
