@@ -13370,27 +13370,27 @@ async def status_ciclo(
         )
 
 
-# =========================================================
+# =================================================
 # /ranking_geral
-# =========================================================
+# =================================================
 @client.tree.command(
-name="ranking_geral",
-description="Mostra ranking geral da season."
+    name="ranking_geral",
+    description="Mostra ranking geral da season."
 )
 @app_commands.describe(
-formato="Formato da liga",
-season="Season",
-top="Quantidade de jogadores (8..60)"
+    formato="Formato da liga",
+    season="Season",
+    top="Quantidade de jogadores (8..60)"
 )
 @app_commands.autocomplete(
-formato=ac_formatos,
-season=ac_pods_ver_season
+    formato=ac_formatos,
+    season=ac_pods_ver_season
 )
 async def ranking_geral(
-interaction: discord.Interaction,
-formato: str,
-season: int,
-top: int = 30
+    interaction: discord.Interaction,
+    formato: str,
+    season: int,
+    top: int = 30
 ):
     await interaction.response.defer()
     try:
@@ -13429,7 +13429,7 @@ top: int = 30
             ws_matches,
             ttl_seconds=10
         )
-        if len(vals) <= 1:
+        if len(vals) &lt;= 1:
             return await interaction.followup.send(
                 "Sem partidas para esta season."
             )
@@ -13453,7 +13453,7 @@ top: int = 30
                     -1
                 )
                 if (
-                    i < 0
+                    i &lt; 0
                     or i >= len(row)
                 ):
                     return default
@@ -13645,7 +13645,7 @@ top: int = 30
             )
             row_lines.append(
                 f"{pos:>3} | "
-                f"{nome[:22]:<22} | "
+                f"{nome[:22]:&lt;22} | "
                 f"{r['j']:>2} | "
                 f"{fmt_num2(r['score']):>6} | "
                 f"{fmt_num2(r['pts']):>6} | "
@@ -13665,7 +13665,7 @@ top: int = 30
             f"(Top {top})",
             "",
             f"{'pos':>3} | "
-            f"{'jogador':<22} | "
+            f"{'jogador':&lt;22} | "
             f"{'J':>2} | "
             f"{'SCORE':>6} | "
             f"{'PTS':>6} | "
@@ -13683,25 +13683,32 @@ top: int = 30
         total_rows = len(
             row_lines
         )
-        for start in range(
-            0,
-            total_rows,
-            chunk_size
-        ):
-            part_lines = []
-            part_lines.extend(
-                header_lines
-            )
-            part_lines.extend(
-                row_lines[
-                    start:start + chunk_size
-                ]
-            )
-            part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
+        if total_rows == 0:
             await interaction.followup.send(
-                part_msg,
-                ephemeral=False
+                "❌ Nenhum jogador encontrado para exibir."
             )
+        else:
+            for start in range(
+                0,
+                total_rows,
+                chunk_size
+            ):
+                part_lines = []
+                part_lines.extend(
+                    header_lines
+                )
+                part_lines.extend(
+                    row_lines[
+                        start:start + chunk_size
+                    ]
+                )
+                part_msg = "
+```txt\n" + "\n".join(part_lines) + "\n
+```"
+                await interaction.followup.send(
+                    part_msg,
+                    ephemeral=False
+                )
         # =================================================
         # LEGENDA
         # =================================================
@@ -13733,7 +13740,9 @@ top: int = 30
         legend_lines.append(
             "OGW = Opponent's Game Win Percentage"
         )
-        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
+        legend_msg = "
+```txt\n" + "\n".join(legend_lines) + "\n
+```"
         await interaction.followup.send(
             legend_msg,
             ephemeral=False
@@ -13742,6 +13751,8 @@ top: int = 30
         await interaction.followup.send(
             f"❌ Erro: {e}"
         )
+
+
 # =================================================
 # FIM DO SUB-BLOCO C/7
 # =================================================
