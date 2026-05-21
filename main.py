@@ -13697,13 +13697,13 @@ async def ranking_geral(
                     start:start + chunk_size
                 ]
             )
-            part_msg = (
-                "
-            ```txt\n"
-                + "\n".join(part_lines)
-                + "\n
-            ```"
-            )
+part_msg = (
+    "
+```txt\n"
+    + "\n".join(part_lines)
+    + "\n
+```"
+)
             await interaction.followup.send(
                 part_msg,
                 ephemeral=False
