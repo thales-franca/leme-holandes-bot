@@ -13699,10 +13699,10 @@ async def ranking_geral(
             )
             part_msg = (
                 "
-```txt\n"
+            ```txt\n"
                 + "\n".join(part_lines)
                 + "\n
-```"
+            ```"
             )
             await interaction.followup.send(
                 part_msg,
