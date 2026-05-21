@@ -12243,10 +12243,10 @@ async def ranking(
                 + "\n".join(part_lines)
                 + "\n```"
             )
-
         await interaction.followup.send(
-                msg,
-                ephemeral=False
+            msg,
+            ephemeral=False
+        )
 
         legend_lines = []
 
