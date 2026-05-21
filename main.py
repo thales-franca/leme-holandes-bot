@@ -13739,13 +13739,13 @@ part_msg = (
         legend_lines.append(
             "OGW = Opponent's Game Win Percentage"
         )
-        legend_msg = (
-            "
+legend_msg = (
+    "
 ```txt\n"
-            + "\n".join(legend_lines)
-            + "\n
+    + "\n".join(legend_lines)
+    + "\n
 ```"
-        )
+)
         await interaction.followup.send(
             legend_msg,
             ephemeral=False
