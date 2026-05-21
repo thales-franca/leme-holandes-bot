@@ -13421,173 +13421,175 @@ async def ranking_geral(
                 f"❌ A season {season} não existe."
             )
 
-# =================================================
-# USA MATCHES
-# =================================================
 
-ws_matches = ensure_worksheet(
-    sh,
-    "Matches",
-    MATCHES_HEADER,
-    rows=50000,
-    cols=40
-)
+    # =================================================
+    # USA MATCHES
+    # =================================================
 
-ensure_sheet_columns(
-    ws_matches,
-    MATCHES_HEADER
-)
-
-vals = cached_get_all_values(
-    ws_matches,
-    ttl_seconds=10
-)
-
-if len(vals) <= 1:
-
-    return await interaction.followup.send(
-        "Sem partidas para esta season."
+    ws_matches = ensure_worksheet(
+        sh,
+        "Matches",
+        MATCHES_HEADER,
+        rows=50000,
+        cols=40
     )
 
-header = vals[0]
+    ensure_sheet_columns(
+        ws_matches,
+        MATCHES_HEADER
+    )
 
-idx = {
-    name: i
-    for i, name in enumerate(header)
-}
+    vals = cached_get_all_values(
+        ws_matches,
+        ttl_seconds=10
+    )
 
-stats = {}
+    if len(vals) <= 1:
 
-# =================================================
-# LEITURA DOS MATCHES
-# TODOS OS CICLOS DA SEASON
-# =================================================
-
-for row in vals[1:]:
-
-    def getv(
-        name: str,
-        default=""
-    ):
-
-        i = idx.get(
-            name,
-            -1
+        return await interaction.followup.send(
+            "Sem partidas para esta season."
         )
 
-        if (
-            i < 0
-            or i >= len(row)
+    header = vals[0]
+
+    idx = {
+        name: i
+        for i, name in enumerate(header)
+    }
+
+    stats = {}
+
+    # =================================================
+    # LEITURA DOS MATCHES
+    # TODOS OS CICLOS DA SEASON
+    # =================================================
+
+    for row in vals[1:]:
+
+        def getv(
+            name: str,
+            default=""
         ):
-            return default
 
-        return row[i]
+            i = idx.get(
+                name,
+                -1
+            )
 
-    row_tid = safe_int(
-        getv(
-            "tournament_id",
+            if (
+                i < 0
+                or i >= len(row)
+            ):
+                return default
+
+            return row[i]
+
+        row_tid = safe_int(
+            getv(
+                "tournament_id",
+                DEFAULT_TOURNAMENT_ID
+            ),
             DEFAULT_TOURNAMENT_ID
-        ),
-        DEFAULT_TOURNAMENT_ID
-    )
+        )
 
-    if row_tid != tournament_id:
-        continue
+        if row_tid != tournament_id:
+            continue
 
-    if safe_int(
-        getv("season_id", 0),
-        0
-    ) != season:
-        continue
+        if safe_int(
+            getv("season_id", 0),
+            0
+        ) != season:
+            continue
 
-    status = str(
-        getv("status", "")
-    ).strip().lower()
+        status = str(
+            getv("status", "")
+        ).strip().lower()
 
-    if status in [
-        "",
-        "open",
-        "pending"
-    ]:
-        continue
+        if status in [
+            "",
+            "open",
+            "pending"
+        ]:
+            continue
 
-    p1 = str(
-        getv("player1_id", "")
-    ).strip()
+        p1 = str(
+            getv("player1_id", "")
+        ).strip()
 
-    p2 = str(
-        getv("player2_id", "")
-    ).strip()
+        p2 = str(
+            getv("player2_id", "")
+        ).strip()
 
-    if not p1 or not p2:
-        continue
+        if not p1 or not p2:
+            continue
 
-    for pid in [p1, p2]:
+        for pid in [p1, p2]:
 
-        if pid not in stats:
+            if pid not in stats:
 
-            stats[pid] = {
+                stats[pid] = {
 
-                "pts": 0.0,
+                    "pts": 0.0,
 
-                "matches": 0,
+                    "matches": 0,
 
-                "gwins": 0,
+                    "gwins": 0,
 
-                "glosses": 0,
+                    "glosses": 0,
 
-                "gdraws": 0,
+                    "gdraws": 0,
 
-                "gplayed": 0,
-            }
+                    "gplayed": 0,
+                }
 
-    p1_games = safe_int(
-        getv("player1_games", 0),
-        0
-    )
+        p1_games = safe_int(
+            getv("player1_games", 0),
+            0
+        )
 
-    p2_games = safe_int(
-        getv("player2_games", 0),
-        0
-    )
+        p2_games = safe_int(
+            getv("player2_games", 0),
+            0
+        )
 
-    draws = safe_int(
-        getv("draw_games", 0),
-        0
-    )
+        draws = safe_int(
+            getv("draw_games", 0),
+            0
+        )
 
-    p1_pts = sheet_float(
-        getv("player1_points", 0),
-        0
-    )
+        p1_pts = sheet_float(
+            getv("player1_points", 0),
+            0
+        )
 
-    p2_pts = sheet_float(
-        getv("player2_points", 0),
-        0
-    )
+        p2_pts = sheet_float(
+            getv("player2_points", 0),
+            0
+        )
 
-    stats[p1]["pts"] += p1_pts
-    stats[p2]["pts"] += p2_pts
+        stats[p1]["pts"] += p1_pts
+        stats[p2]["pts"] += p2_pts
 
-    stats[p1]["matches"] += 1
-    stats[p2]["matches"] += 1
+        stats[p1]["matches"] += 1
+        stats[p2]["matches"] += 1
 
-    stats[p1]["gwins"] += p1_games
-    stats[p2]["gwins"] += p2_games
+        stats[p1]["gwins"] += p1_games
+        stats[p2]["gwins"] += p2_games
 
-    stats[p1]["glosses"] += p2_games
-    stats[p2]["glosses"] += p1_games
+        stats[p1]["glosses"] += p2_games
+        stats[p2]["glosses"] += p1_games
 
-    stats[p1]["gdraws"] += draws
-    stats[p2]["gdraws"] += draws
+        stats[p1]["gdraws"] += draws
+        stats[p2]["gdraws"] += draws
 
-    stats[p1]["gplayed"] += (
-        p1_games + p2_games + draws
-    )
+        stats[p1]["gplayed"] += (
+            p1_games + p2_games + draws
+        )
 
-    stats[p2]["gplayed"] += (
-        p1_games + p2_games + draws
-    )
+        stats[p2]["gplayed"] += (
+            p1_games + p2_games + draws
+        )
+        
             # =================================================
             # SOMA TODOS OS CICLOS
             # =================================================
