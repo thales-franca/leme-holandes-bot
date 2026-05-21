@@ -12169,85 +12169,86 @@ async def ranking(
                 pid
             )
 
-lines.append(
+            lines.append(
 
-    f"{pos:>3} | "
+                f"{pos:>3} | "
 
-    f"{nome[:22]:<22} | "
+                f"{nome[:22]:<22} | "
 
-    f"{r['j']:>2} | "
+                f"{r['j']:>2} | "
 
-    f"{fmt_num2(r['score']):>6} | "
+                f"{fmt_num2(r['score']):>6} | "
 
-    f"{fmt_num2(r['pts']):>6} | "
+                f"{fmt_num2(r['pts']):>6} | "
 
-    f"{fmt_num2(r['ppm']):>6} | "
+                f"{fmt_num2(r['ppm']):>6} | "
 
-    f"{fmt_num2(r['mwp_percent']):>6} | "
+                f"{fmt_num2(r['mwp_percent']):>6} | "
 
-    f"{fmt_num2(r['omw_percent']):>6} | "
+                f"{fmt_num2(r['omw_percent']):>6} | "
 
-    f"{fmt_num2(r['gw_percent']):>6} | "
+                f"{fmt_num2(r['gw_percent']):>6} | "
 
-    f"{fmt_num2(r['ogw_percent']):>6}"
+                f"{fmt_num2(r['ogw_percent']):>6}"
 
-)
+            )
 
-chunk_size = 8
+        chunk_size = 8
 
-total_rows = len(lines)
+        total_rows = len(lines)
 
-header = [
+        header = [
 
-    f"🏆 Ranking — "
-    f"{format_label(formato)} | "
-    f"Season {season} | "
-    f"Ciclo {cycle} (Top {top})",
+            f"🏆 Ranking — "
+            f"{format_label(formato)} | "
+            f"Season {season} | "
+            f"Ciclo {cycle} (Top {top})",
 
-    "",
+            "",
 
-    f"{'pos':>3} | "
-    f"{'jogador':<20} | "
-    f"{'J':>2} | "
-    f"{'SCORE':>6} | "
-    f"{'PTS':>6} | "
-    f"{'PPM':>6} | "
-    f"{'MWP':>6} | "
-    f"{'OMW':>6} | "
-    f"{'GW':>6} | "
-    f"{'OGW':>6}",
+            f"{'pos':>3} | "
+            f"{'jogador':<22} | "
+            f"{'J':>2} | "
+            f"{'SCORE':>6} | "
+            f"{'PTS':>6} | "
+            f"{'PPM':>6} | "
+            f"{'MWP':>6} | "
+            f"{'OMW':>6} | "
+            f"{'GW':>6} | "
+            f"{'OGW':>6}",
 
-    "-" * 95
-]
-
-for start in range(
-    0,
-    total_rows,
-    chunk_size
-):
-
-    part_lines = []
-
-    part_lines.extend(
-        header
-    )
-
-    part_lines.extend(
-        lines[
-            start:start + chunk_size
+            "-" * 95
         ]
-    )
 
-    msg = (
-        "```txt\n"
-        + "\n".join(part_lines)
-        + "\n```"
-    )
+        for start in range(
+            0,
+            total_rows,
+            chunk_size
+        ):
 
-    await interaction.followup.send(
-        msg,
-        ephemeral=False
-    )
+            part_lines = []
+
+            part_lines.extend(
+                header
+            )
+
+            part_lines.extend(
+                lines[
+                    start:start + chunk_size
+                ]
+            )
+
+            msg = (
+                "```txt\n"
+                + "\n".join(part_lines)
+                + "\n```"
+            )
+
+            await interaction.followup.send(
+                msg,
+                ephemeral=False
+            )
+
 legend_lines = []
 
 legend_lines.append(
