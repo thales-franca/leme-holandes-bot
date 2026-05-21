@@ -12244,7 +12244,7 @@ async def ranking(
                 + "\n```"
             )
 
-            await interaction.followup.send(
+        await interaction.followup.send(
                 msg,
                 ephemeral=False
 
