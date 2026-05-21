@@ -13374,23 +13374,23 @@ async def status_ciclo(
 # /ranking_geral
 # =================================================
 @client.tree.command(
-    name="ranking_geral",
-    description="Mostra ranking geral da season."
+name="ranking_geral",
+description="Mostra ranking geral da season."
 )
 @app_commands.describe(
-    formato="Formato da liga",
-    season="Season",
-    top="Quantidade de jogadores (8..60)"
+formato="Formato da liga",
+season="Season",
+top="Quantidade de jogadores (8..60)"
 )
 @app_commands.autocomplete(
-    formato=ac_formatos,
-    season=ac_pods_ver_season
+formato=ac_formatos,
+season=ac_pods_ver_season
 )
 async def ranking_geral(
-    interaction: discord.Interaction,
-    formato: str,
-    season: int,
-    top: int = 30
+interaction: discord.Interaction,
+formato: str,
+season: int,
+top: int = 30
 ):
     await interaction.response.defer()
     try:
@@ -13702,9 +13702,7 @@ async def ranking_geral(
                         start:start + chunk_size
                     ]
                 )
-                part_msg = "
-```txt\n" + "\n".join(part_lines) + "\n
-```"
+                part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
                 await interaction.followup.send(
                     part_msg,
                     ephemeral=False
@@ -13740,9 +13738,7 @@ async def ranking_geral(
         legend_lines.append(
             "OGW = Opponent's Game Win Percentage"
         )
-        legend_msg = "
-```txt\n" + "\n".join(legend_lines) + "\n
-```"
+        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
         await interaction.followup.send(
             legend_msg,
             ephemeral=False
