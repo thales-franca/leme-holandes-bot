@@ -12247,64 +12247,62 @@ async def ranking(
             await interaction.followup.send(
                 msg,
                 ephemeral=False
-            )
 
-legend_lines = []
+        legend_lines = []
 
-legend_lines.append(
-    "Legenda:"
-)
+        legend_lines.append(
+            "Legenda:"
+        )
 
-legend_lines.append(
-    "J = Número de jogos realizados"
-)
+        legend_lines.append(
+            "J = Número de jogos realizados"
+        )
 
-legend_lines.append(
-    "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}"
-)
+        legend_lines.append(
+            "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}"
+        )
 
-legend_lines.append(
-    "PTS = Pontos totais acumulados"
-)
+        legend_lines.append(
+            "PTS = Pontos totais acumulados"
+        )
 
-legend_lines.append(
-    "PPM = Points Per Match"
-)
+        legend_lines.append(
+            "PPM = Points Per Match"
+        )
 
-legend_lines.append(
-    "MWP = Match Win Percentage"
-)
+        legend_lines.append(
+            "MWP = Match Win Percentage"
+        )
 
-legend_lines.append(
-    "OMW = Opponent's Match Win Percentage"
-)
+        legend_lines.append(
+            "OMW = Opponent's Match Win Percentage"
+        )
 
-legend_lines.append(
-    "GW = Game Win Percentage"
-)
+        legend_lines.append(
+            "GW = Game Win Percentage"
+        )
 
-legend_lines.append(
-    "OGW = Opponent's Game Win Percentage"
-)
+        legend_lines.append(
+            "OGW = Opponent's Game Win Percentage"
+        )
 
-legend_msg = (
-    "```txt\n"
-    + "\n".join(legend_lines)
-    + "\n```"
-)
+        legend_msg = (
+            "```txt\n"
+            + "\n".join(legend_lines)
+            + "\n```"
+        )
 
-await interaction.followup.send(
-    legend_msg,
-    ephemeral=False
-)
-    
+        await interaction.followup.send(
+            legend_msg,
+            ephemeral=False
+        )
+
     except Exception as e:
 
         await interaction.followup.send(
             f"❌ Erro no /ranking: {e}",
             ephemeral=False
         )
-
 
 # =========================================================
 # FORMATADOR DE STANDINGS
