@@ -12183,22 +12183,110 @@ async def ranking(
                 f"{fmt_num2(r['ogw_percent']):>6}"
             )
 
-        msg = (
-            f"🏆 Ranking — "
-            f"{format_label(formato)} | "
-            f"Season {season} | "
-            f"Ciclo {cycle} (Top {top})\n\n"
+chunk_size = 8
 
-            f"pos | jogador              | J | SCORE | PTS | PPM | MWP | OMW | GW | OGW\n"
-            f"-------------------------------------------------------------------------------\n"
-            + "\n".join(lines)
-        )
+total_rows = len(lines)
 
-        await interaction.followup.send(
-            f"```{msg}```",
-            ephemeral=False
-        )
+header = [
 
+    f"🏆 Ranking — "
+    f"{format_label(formato)} | "
+    f"Season {season} | "
+    f"Ciclo {cycle} (Top {top})",
+
+    "",
+
+    f"{'pos':>3} | "
+    f"{'jogador':<20} | "
+    f"{'J':>2} | "
+    f"{'SCORE':>6} | "
+    f"{'PTS':>6} | "
+    f"{'PPM':>6} | "
+    f"{'MWP':>6} | "
+    f"{'OMW':>6} | "
+    f"{'GW':>6} | "
+    f"{'OGW':>6}",
+
+    "-" * 95
+]
+
+for start in range(
+    0,
+    total_rows,
+    chunk_size
+):
+
+    part_lines = []
+
+    part_lines.extend(
+        header
+    )
+
+    part_lines.extend(
+        lines[
+            start:start + chunk_size
+        ]
+    )
+
+    msg = (
+        "```txt\n"
+        + "\n".join(part_lines)
+        + "\n```"
+    )
+
+    await interaction.followup.send(
+        msg,
+        ephemeral=False
+    )
+legend_lines = []
+
+legend_lines.append(
+    "Legenda:"
+)
+
+legend_lines.append(
+    "J = Número de jogos realizados"
+)
+
+legend_lines.append(
+    "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}"
+)
+
+legend_lines.append(
+    "PTS = Pontos totais acumulados"
+)
+
+legend_lines.append(
+    "PPM = Points Per Match"
+)
+
+legend_lines.append(
+    "MWP = Match Win Percentage"
+)
+
+legend_lines.append(
+    "OMW = Opponent's Match Win Percentage"
+)
+
+legend_lines.append(
+    "GW = Game Win Percentage"
+)
+
+legend_lines.append(
+    "OGW = Opponent's Game Win Percentage"
+)
+
+legend_msg = (
+    "```txt\n"
+    + "\n".join(legend_lines)
+    + "\n```"
+)
+
+await interaction.followup.send(
+    legend_msg,
+    ephemeral=False
+)
+    
     except Exception as e:
 
         await interaction.followup.send(
@@ -13325,28 +13413,28 @@ async def ranking_geral(
                 f"❌ A season {season} não existe."
             )
 
-        ws_standings = ensure_worksheet(
+        ws_matches = ensure_worksheet(
             sh,
-            "Standings",
-            STANDINGS_HEADER,
+            "Matches",
+            MATCHES_HEADER,
             rows=50000,
-            cols=30
+            cols=40
         )
 
         ensure_sheet_columns(
-            ws_standings,
-            STANDINGS_REQUIRED
+            ws_matches,
+            MATCHES_REQUIRED
         )
 
         vals = cached_get_all_values(
-            ws_standings,
+            ws_matches,
             ttl_seconds=10
         )
 
         if len(vals) <= 1:
 
             return await interaction.followup.send(
-                "Sem standings para esta season."
+                "Sem partidas para esta season."
             )
 
         header = vals[0]
@@ -13356,34 +13444,34 @@ async def ranking_geral(
             for i, name in enumerate(header)
         }
 
+        def getv(row, name, default=""):
+
+            i = idx.get(
+                name,
+                -1
+            )
+
+            if (
+                i < 0
+                or i >= len(row)
+            ):
+                return default
+
+            return row[i]
+
         stats = {}
 
+        opponents = {}
+
         # =================================================
-        # COLETA DE DADOS
+        # LEITURA DOS MATCHES
         # =================================================
 
         for row in vals[1:]:
 
-            def getv(
-                name: str,
-                default=""
-            ):
-
-                i = idx.get(
-                    name,
-                    -1
-                )
-
-                if (
-                    i < 0
-                    or i >= len(row)
-                ):
-                    return default
-
-                return row[i]
-
             row_tid = safe_int(
                 getv(
+                    row,
                     "tournament_id",
                     DEFAULT_TOURNAMENT_ID
                 ),
@@ -13394,127 +13482,105 @@ async def ranking_geral(
                 continue
 
             if safe_int(
-                getv("season_id", 0),
+                getv(row, "season_id", 0),
                 0
             ) != season:
                 continue
 
-            p = str(
-                getv("player_id", "")
-            ).strip()
+            status = str(
+                getv(row, "status", "")
+            ).strip().lower()
 
-            if not p:
+            if status != "finished":
                 continue
 
-            if p not in stats:
+            p1 = str(
+                getv(row, "player1_id", "")
+            ).strip()
 
-                stats[p] = {
+            p2 = str(
+                getv(row, "player2_id", "")
+            ).strip()
 
-                    "pts": 0,
+            if not p1 or not p2:
+                continue
 
-                    "m": 0,
+            for pid in [p1, p2]:
 
-                    "gwins": 0,
+                if pid not in stats:
 
-                    "glosses": 0,
+                    stats[pid] = {
 
-                    "gdraws": 0,
+                        "pts": 0.0,
 
-                    "gplayed": 0,
+                        "matches": 0,
 
-                    "omw_weighted_sum": 0.0,
+                        "gwins": 0,
 
-                    "ogw_weighted_sum": 0.0,
+                        "glosses": 0,
 
-                    "omw_weight": 0,
+                        "gdraws": 0,
 
-                    "ogw_weight": 0,
-                }
+                        "gplayed": 0,
+                    }
 
-            matches_played = safe_int(
-                getv(
-                    "matches_played",
-                    0
-                ),
+                    opponents[pid] = []
+
+            p1_games = safe_int(
+                getv(row, "player1_games", 0),
                 0
             )
 
-            match_points = sheet_float(
-                getv(
-                    "match_points",
-                    0
-                ),
-                0.0
-            )
-
-            game_wins = safe_int(
-                getv(
-                    "game_wins",
-                    0
-                ),
+            p2_games = safe_int(
+                getv(row, "player2_games", 0),
                 0
             )
 
-            game_losses = safe_int(
-                getv(
-                    "game_losses",
-                    0
-                ),
+            draws = safe_int(
+                getv(row, "draw_games", 0),
                 0
             )
 
-            game_draws = safe_int(
-                getv(
-                    "game_draws",
-                    0
-                ),
+            p1_pts = sheet_float(
+                getv(row, "player1_points", 0),
                 0
             )
 
-            games_played = safe_int(
-                getv(
-                    "games_played",
-                    0
-                ),
+            p2_pts = sheet_float(
+                getv(row, "player2_points", 0),
                 0
             )
 
-            omw_raw = sheet_float(
-                getv("omw", 0),
-                0.0
+            stats[p1]["pts"] += p1_pts
+            stats[p2]["pts"] += p2_pts
+
+            stats[p1]["matches"] += 1
+            stats[p2]["matches"] += 1
+
+            stats[p1]["gwins"] += p1_games
+            stats[p2]["gwins"] += p2_games
+
+            stats[p1]["glosses"] += p2_games
+            stats[p2]["glosses"] += p1_games
+
+            stats[p1]["gdraws"] += draws
+            stats[p2]["gdraws"] += draws
+
+            stats[p1]["gplayed"] += (
+                p1_games + p2_games + draws
             )
 
-            ogw_raw = sheet_float(
-                getv("ogw", 0),
-                0.0
+            stats[p2]["gplayed"] += (
+                p1_games + p2_games + draws
             )
 
-            stats[p]["pts"] += match_points
-            stats[p]["m"] += matches_played
-
-            stats[p]["gwins"] += game_wins
-            stats[p]["glosses"] += game_losses
-            stats[p]["gdraws"] += game_draws
-            stats[p]["gplayed"] += games_played
-
-            if matches_played > 0:
-
-                stats[p]["omw_weighted_sum"] += (
-                    omw_raw * matches_played
-                )
-
-                stats[p]["ogw_weighted_sum"] += (
-                    ogw_raw * matches_played
-                )
-
-                stats[p]["omw_weight"] += matches_played
-
-                stats[p]["ogw_weight"] += matches_played
+            opponents[p1].append(p2)
+            opponents[p2].append(p1)
 
         if not stats:
 
             return await interaction.followup.send(
-                "Sem standings para esta season."
+                "Sem partidas para esta season."
             )
 
         # =================================================
@@ -13525,7 +13591,7 @@ async def ranking_geral(
 
         for p, s in stats.items():
 
-            m = s["m"]
+            m = s["matches"]
 
             pts = s["pts"]
 
@@ -13593,33 +13659,55 @@ async def ranking_geral(
             # OMW
             # =============================================
 
-            if s["omw_weight"] > 0:
+            opp_mwps = []
+            opp_gwps = []
 
-                omw = max(
-                    s["omw_weighted_sum"]
-                    / s["omw_weight"],
+            for opp in opponents[p]:
+
+                if opp not in stats:
+                    continue
+
+                os = stats[opp]
+
+                om = os["matches"]
+
+                opts = os["pts"]
+
+                omwp = (
+                    opts / (3 * om)
+                ) if om > 0 else 0.333
+
+                omwp = max(
+                    omwp,
                     0.333
                 )
 
-            else:
+                ogames = os["gplayed"]
 
-                omw = 0.333
+                ogwp = (
+                    (
+                        os["gwins"]
+                        + 0.5 * os["gdraws"]
+                    ) / ogames
+                ) if ogames > 0 else 0.333
 
-            # =============================================
-            # OGW
-            # =============================================
-
-            if s["ogw_weight"] > 0:
-
-                ogw = max(
-                    s["ogw_weighted_sum"]
-                    / s["ogw_weight"],
+                ogwp = max(
+                    ogwp,
                     0.333
                 )
 
-            else:
+                opp_mwps.append(omwp)
+                opp_gwps.append(ogwp)
 
-                ogw = 0.333
+            omw = (
+                sum(opp_mwps)
+                / len(opp_mwps)
+            ) if opp_mwps else 0.333
+
+            ogw = (
+                sum(opp_gwps)
+                / len(opp_gwps)
+            ) if opp_gwps else 0.333
 
             # =============================================
             # TABELA
@@ -13699,7 +13787,7 @@ async def ranking_geral(
         )
 
         header_lines.append(
-            "-" * 110
+            "-" * 95
         )
 
         row_lines = []
@@ -13746,7 +13834,7 @@ async def ranking_geral(
 
                 f"{i:>3} | "
 
-                f"{nome[:20]:<22} | "
+                f"{nome[:22]:<22} | "
 
                 f"{r['j']:>2} | "
 
@@ -13765,7 +13853,7 @@ async def ranking_geral(
                 f"{ogw_txt:>6}"
             )
 
-        chunk_size = 12
+        chunk_size = 8
 
         total_rows = len(
             row_lines
