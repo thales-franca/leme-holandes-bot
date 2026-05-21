@@ -12169,19 +12169,29 @@ async def ranking(
                 pid
             )
 
-            lines.append(
+lines.append(
 
-                f"{pos:>3} | "
-                f"{nome[:20]:<20} | "
-                f"{r['j']:>2} | "
-                f"{fmt_num2(r['score']):>6} | "
-                f"{fmt_num2(r['pts']):>6} | "
-                f"{fmt_num2(r['ppm']):>6} | "
-                f"{fmt_num2(r['mwp_percent']):>6} | "
-                f"{fmt_num2(r['omw_percent']):>6} | "
-                f"{fmt_num2(r['gw_percent']):>6} | "
-                f"{fmt_num2(r['ogw_percent']):>6}"
-            )
+    f"{pos:>3} | "
+
+    f"{nome[:22]:<22} | "
+
+    f"{r['j']:>2} | "
+
+    f"{fmt_num2(r['score']):>6} | "
+
+    f"{fmt_num2(r['pts']):>6} | "
+
+    f"{fmt_num2(r['ppm']):>6} | "
+
+    f"{fmt_num2(r['mwp_percent']):>6} | "
+
+    f"{fmt_num2(r['omw_percent']):>6} | "
+
+    f"{fmt_num2(r['gw_percent']):>6} | "
+
+    f"{fmt_num2(r['ogw_percent']):>6}"
+
+)
 
 chunk_size = 8
 
