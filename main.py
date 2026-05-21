@@ -13422,10 +13422,10 @@ async def ranking_geral(
             )
 
 
-    # =================================================
-    # USA MATCHES
-    # =================================================
-
+# =================================================
+# USA MATCHES
+# =================================================
+try:
     ws_matches = ensure_worksheet(
         sh,
         "Matches",
@@ -13433,6 +13433,9 @@ async def ranking_geral(
         rows=50000,
         cols=40
     )
+except Exception as e:
+    logging.error(f"Erro ao criar worksheet 'Matches': {e}", exc_info=True)
+    ws_matches = None
 
     ensure_sheet_columns(
         ws_matches,
