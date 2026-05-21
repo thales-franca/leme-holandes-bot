@@ -294,16 +294,23 @@ def safe_float(v, default=0.0):
 
     try:
 
+        if v is None:
+            return default
+
+        if isinstance(v, (int, float)):
+            return float(v)
+
         s = str(v).strip()
 
         if not s:
             return default
 
-        s = s.replace(".", "").replace(",", ".")
+        s = s.replace(",", ".")
 
         return float(s)
 
     except Exception:
+
         return default
 
 
