@@ -12226,27 +12226,26 @@ async def ranking(
             chunk_size
         ):
 
+            end = start + chunk_size
+
+            current_rows = lines[start:end]
+
             part_lines = []
 
-            part_lines.extend(
-                header
-            )
+            part_lines.extend(header)
 
-            part_lines.extend(
-                lines[
-                    start:start + chunk_size
-                ]
-            )
+            part_lines.extend(current_rows)
 
             msg = (
                 "```txt\n"
                 + "\n".join(part_lines)
                 + "\n```"
             )
-        await interaction.followup.send(
-            msg,
-            ephemeral=False
-        )
+
+            await interaction.followup.send(
+                msg,
+                ephemeral=False
+            )
 
         legend_lines = []
 
@@ -13500,7 +13499,11 @@ async def ranking_geral(
                 getv(row, "status", "")
             ).strip().lower()
 
-            if status != "finished":
+            if status in [
+                "",
+                "open",
+                "pending"
+            ]:
                 continue
 
             p1 = str(
