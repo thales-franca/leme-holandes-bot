@@ -13506,110 +13506,106 @@ async def ranking_geral(
             if not p:
                 continue
 
-            if p not in stats:
+cycle_id = safe_int(
+    getv("cycle_id", 0),
+    0
+)
 
-                stats[p] = {
+matches_played = safe_int(
+    getv(
+        "matches_played",
+        0
+    ),
+    0
+)
 
-                    "pts": 0.0,
+match_points = sheet_float(
+    getv(
+        "match_points",
+        0
+    ),
+    0.0
+)
 
-                    "matches": 0,
+game_wins = safe_int(
+    getv(
+        "game_wins",
+        0
+    ),
+    0
+)
 
-                    "gwins": 0,
+game_losses = safe_int(
+    getv(
+        "game_losses",
+        0
+    ),
+    0
+)
 
-                    "glosses": 0,
+game_draws = safe_int(
+    getv(
+        "game_draws",
+        0
+    ),
+    0
+)
 
-                    "gdraws": 0,
+games_played = safe_int(
+    getv(
+        "games_played",
+        0
+    ),
+    0
+)
 
-                    "gplayed": 0,
+omw_raw = sheet_float(
+    getv("omw", 0),
+    0.0
+)
 
-                    "omw_weighted_sum": 0.0,
+ogw_raw = sheet_float(
+    getv("ogw", 0),
+    0.0
+)
 
-                    "ogw_weighted_sum": 0.0,
+# =================================================
+# MANTÉM APENAS O CICLO MAIS RECENTE
+# =================================================
 
-                    "omw_weight": 0,
+if (
+    p not in stats
+    or cycle_id > stats[p]["cycle_id"]
+):
 
-                    "ogw_weight": 0,
-                }
+    stats[p] = {
 
-            matches_played = safe_int(
-                getv(
-                    "matches_played",
-                    0
-                ),
-                0
-            )
+        "cycle_id": cycle_id,
 
-            match_points = sheet_float(
-                getv(
-                    "match_points",
-                    0
-                ),
-                0.0
-            )
+        "pts": match_points,
 
-            game_wins = safe_int(
-                getv(
-                    "game_wins",
-                    0
-                ),
-                0
-            )
+        "matches": matches_played,
 
-            game_losses = safe_int(
-                getv(
-                    "game_losses",
-                    0
-                ),
-                0
-            )
+        "gwins": game_wins,
 
-            game_draws = safe_int(
-                getv(
-                    "game_draws",
-                    0
-                ),
-                0
-            )
+        "glosses": game_losses,
 
-            games_played = safe_int(
-                getv(
-                    "games_played",
-                    0
-                ),
-                0
-            )
+        "gdraws": game_draws,
 
-            omw_raw = sheet_float(
-                getv("omw", 0),
-                0.0
-            )
+        "gplayed": games_played,
 
-            ogw_raw = sheet_float(
-                getv("ogw", 0),
-                0.0
-            )
+        "omw_weighted_sum": (
+            omw_raw * matches_played
+        ),
 
-            stats[p]["pts"] += match_points
-            stats[p]["matches"] += matches_played
+        "ogw_weighted_sum": (
+            ogw_raw * matches_played
+        ),
 
-            stats[p]["gwins"] += game_wins
-            stats[p]["glosses"] += game_losses
-            stats[p]["gdraws"] += game_draws
-            stats[p]["gplayed"] += games_played
+        "omw_weight": matches_played,
 
-            if matches_played > 0:
-
-                stats[p]["omw_weighted_sum"] += (
-                    omw_raw * matches_played
-                )
-
-                stats[p]["ogw_weighted_sum"] += (
-                    ogw_raw * matches_played
-                )
-
-                stats[p]["omw_weight"] += matches_played
-
-                stats[p]["ogw_weight"] += matches_played
+        "ogw_weight": matches_played,
+    }
 
         if not stats:
 
