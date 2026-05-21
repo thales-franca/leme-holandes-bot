@@ -12105,14 +12105,47 @@ async def ranking(
                 ephemeral=False
             )
 
+        for r in table:
+
+            j = r['j']
+            pts = r['pts']
+
+            ppm = (
+                pts / j
+            ) if j > 0 else 0
+
+            K = 3
+
+            peso_pts = (
+                j / (j + K)
+            ) if (j + K) > 0 else 0
+
+            peso_ppm = (
+                K / (j + K)
+            ) if (j + K) > 0 else 0
+
+            score = (
+                (pts * peso_pts)
+                +
+                (ppm * peso_ppm)
+            )
+
+            r['ppm'] = ppm
+            r['score'] = score
+    
         table.sort(
+
             key=lambda x: (
-                x["pts"],
-                x["mwp"],
-                x["omw"],
-                x["gw"],
-                x["ogw"]
+
+                x["score"],
+                x["ppm"],
+                x["mwp_percent"],
+                x["omw_percent"],
+                x["gw_percent"],
+                x["ogw_percent"]
+
             ),
+
             reverse=True
         )
 
@@ -12138,14 +12171,16 @@ async def ranking(
 
             lines.append(
 
-                f"{pos} | "
-                f"{nome} | "
-                f"{r['j']} | "
-                f"{fmt_num2(r['pts'])} | "
-                f"{fmt_num2(r['mwp_percent'])} | "
-                f"{fmt_num2(r['omw_percent'])} | "
-                f"{fmt_num2(r['gw_percent'])} | "
-                f"{fmt_num2(r['ogw_percent'])}"
+                f"{pos:>3} | "
+                f"{nome[:20]:<20} | "
+                f"{r['j']:>2} | "
+                f"{fmt_num2(r['score']):>6} | "
+                f"{fmt_num2(r['pts']):>6} | "
+                f"{fmt_num2(r['ppm']):>6} | "
+                f"{fmt_num2(r['mwp_percent']):>6} | "
+                f"{fmt_num2(r['omw_percent']):>6} | "
+                f"{fmt_num2(r['gw_percent']):>6} | "
+                f"{fmt_num2(r['ogw_percent']):>6}"
             )
 
         msg = (
@@ -12154,220 +12189,13 @@ async def ranking(
             f"Season {season} | "
             f"Ciclo {cycle} (Top {top})\n\n"
 
-            f"pos | jogador | J | PTS | MWP | OMW | GW | OGW\n"
-            f"--------------------------------------------------\n"
+            f"pos | jogador              | J | SCORE | PTS | PPM | MWP | OMW | GW | OGW\n"
+            f"-------------------------------------------------------------------------------\n"
             + "\n".join(lines)
         )
 
         await interaction.followup.send(
             f"```{msg}```",
-            ephemeral=False
-        )
-
-    except Exception as e:
-
-        await interaction.followup.send(
-            f"❌ Erro no /ranking: {e}",
-            ephemeral=False
-        )
-
-        # =================================================
-        # ORDENAÇÃO
-        # =================================================
-
-        table.sort(
-            key=lambda x: (
-                x["score"],
-                x["ppm"],
-                x["mwp"],
-                x["omw"],
-                x["gw"],
-                x["ogw"]
-            ),
-            reverse=True
-        )
-
-        nick_map = get_player_nick_map_fast(
-            sh
-        )
-
-        top = max(
-            8,
-            min(top, 60)
-        )
-
-        header_lines = []
-
-        header_lines.append(
-            f"🏆 Ranking — "
-            f"{format_label(formato)} | "
-            f"Season {season} | "
-            f"Ciclo {cycle} "
-            f"(Top {top})"
-        )
-
-        header_lines.append(
-
-            f"{'pos':>3} | "
-            f"{'jogador':<22} | "
-            f"{'J':>2} | "
-            f"{'SCORE':>6} | "
-            f"{'PTS':>6} | "
-            f"{'PPM':>6} | "
-            f"{'MWP':>6} | "
-            f"{'OMW':>6} | "
-            f"{'GW':>6} | "
-            f"{'OGW':>6}"
-        )
-
-        header_lines.append(
-            "-" * 110
-        )
-
-        row_lines = []
-
-        for i, r in enumerate(
-            table[:top],
-            1
-        ):
-
-            nome = nick_map.get(
-                str(r["p"]),
-                str(r["p"])
-            )
-
-            score_txt = fmt_num2(
-                r["score"]
-            )
-
-            pts_txt = fmt_num2(
-                r["pts"]
-            )
-
-            ppm_txt = fmt_num2(
-                r["ppm"]
-            )
-
-            mwp_txt = fmt_num2(
-                r["mwp_percent"]
-            )
-
-            omw_txt = fmt_num2(
-                r["omw_percent"]
-            )
-
-            gw_txt = fmt_num2(
-                r["gw_percent"]
-            )
-
-            ogw_txt = fmt_num2(
-                r["ogw_percent"]
-            )
-
-            row_lines.append(
-
-                f"{i:>3} | "
-
-                f"{nome[:20]:<22} | "
-
-                f"{r['j']:>2} | "
-
-                f"{score_txt:>6} | "
-
-                f"{pts_txt:>6} | "
-
-                f"{ppm_txt:>6} | "
-
-                f"{mwp_txt:>6} | "
-
-                f"{omw_txt:>6} | "
-
-                f"{gw_txt:>6} | "
-
-                f"{ogw_txt:>6}"
-            )
-
-        chunk_size = 12
-
-        total_rows = len(
-            row_lines
-        )
-
-        for start in range(
-            0,
-            total_rows,
-            chunk_size
-        ):
-
-            part_lines = []
-
-            part_lines.extend(
-                header_lines
-            )
-
-            part_lines.extend(
-                row_lines[
-                    start:start + chunk_size
-                ]
-            )
-
-            part_msg = (
-                "```txt\n"
-                + "\n".join(part_lines)
-                + "\n```"
-            )
-
-            await interaction.followup.send(
-                part_msg,
-                ephemeral=False
-            )
-
-        legend_lines = []
-
-        legend_lines.append(
-            "Legenda:"
-        )
-
-        legend_lines.append(
-            "J = Número de jogos realizados"
-        )
-
-        legend_lines.append(
-            "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}"
-        )
-
-        legend_lines.append(
-            "PTS = Pontos totais acumulados"
-        )
-
-        legend_lines.append(
-            "PPM = Points Per Match"
-        )
-
-        legend_lines.append(
-            "MWP = Match Win Percentage"
-        )
-
-        legend_lines.append(
-            "OMW = Opponent's Match Win Percentage"
-        )
-
-        legend_lines.append(
-            "GW = Game Win Percentage"
-        )
-
-        legend_lines.append(
-            "OGW = Opponent's Game Win Percentage"
-        )
-
-        legend_msg = (
-            "```txt\n"
-            + "\n".join(legend_lines)
-            + "\n```"
-        )
-
-        await interaction.followup.send(
-            legend_msg,
             ephemeral=False
         )
 
@@ -13689,7 +13517,7 @@ async def ranking_geral(
                 "Sem standings para esta season."
             )
 
-              # =================================================
+        # =================================================
         # CÁLCULOS
         # =================================================
 
@@ -13701,8 +13529,40 @@ async def ranking_geral(
 
             pts = s["pts"]
 
+            # =============================================
+            # PPM
+            # =============================================
+
+            ppm = (
+                pts / m
+            ) if m > 0 else 0
+
+            # =============================================
+            # SCORE OFICIAL LEME
+            # =============================================
+
+            K = 3
+
+            peso_pts = (
+                m / (m + K)
+            ) if (m + K) > 0 else 0
+
+            peso_ppm = (
+                K / (m + K)
+            ) if (m + K) > 0 else 0
+
+            score = (
+                (pts * peso_pts)
+                +
+                (ppm * peso_ppm)
+            )
+
+            # =============================================
+            # MWP
+            # =============================================
+
             raw_mwp = (
-                (pts / (4 * m))
+                (pts / (3 * m))
                 if m else 0
             )
 
@@ -13710,6 +13570,10 @@ async def ranking_geral(
                 raw_mwp,
                 0.333
             )
+
+            # =============================================
+            # GW
+            # =============================================
 
             games = s["gplayed"]
 
@@ -13725,6 +13589,10 @@ async def ranking_geral(
                 0.333
             )
 
+            # =============================================
+            # OMW
+            # =============================================
+
             if s["omw_weight"] > 0:
 
                 omw = max(
@@ -13736,6 +13604,10 @@ async def ranking_geral(
             else:
 
                 omw = 0.333
+
+            # =============================================
+            # OGW
+            # =============================================
 
             if s["ogw_weight"] > 0:
 
@@ -13749,19 +13621,27 @@ async def ranking_geral(
 
                 ogw = 0.333
 
+            # =============================================
+            # TABELA
+            # =============================================
+
             table.append({
 
                 "p": p,
 
                 "pts": pts,
 
-                "mwp": mwp,
+                "ppm": ppm,
 
-                "omw": omw,
+                "score": score,
 
-                "gw": gw,
+                "mwp_percent": mwp * 100,
 
-                "ogw": ogw,
+                "omw_percent": omw * 100,
+
+                "gw_percent": gw * 100,
+
+                "ogw_percent": ogw * 100,
 
                 "j": m
             })
@@ -13773,10 +13653,10 @@ async def ranking_geral(
             key=lambda x: (
                 x["score"],
                 x["ppm"],
-                x["mwp"],
-                x["omw"],
-                x["gw"],
-                x["ogw"],
+                x["mwp_percent"],
+                x["omw_percent"],
+                x["gw_percent"],
+                x["ogw_percent"],
             ),
             reverse=True
         )
@@ -13847,19 +13727,19 @@ async def ranking_geral(
             )
 
             mwp_txt = fmt_num2(
-                r["mwp"] * 100
+                r["mwp_percent"]
             )
 
             omw_txt = fmt_num2(
-                r["omw"] * 100
+                r["omw_percent"]
             )
 
             gw_txt = fmt_num2(
-                r["gw"] * 100
+                r["gw_percent"]
             )
 
             ogw_txt = fmt_num2(
-                r["ogw"] * 100
+                r["ogw_percent"]
             )
 
             row_lines.append(
