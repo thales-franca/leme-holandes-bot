@@ -7418,6 +7418,7 @@ DECK_GUILDAS = [
     "Bant",
     "Boros",
     "Dimir",
+    "Domain",
     "Esper",
     "Golgari",
     "Grixis",
@@ -7454,12 +7455,12 @@ MODERN_DECK_ARQUETIPOS = [
     "Broodscale",
     "Burn",
     "Cascade",
+    "Crashing Footfalls",
     "Combo",
     "Control",
     "Creativity",
     "Death's Shadow",
     "Delirium",
-    "Domain Zoo",
     "Dredge",
     "Eldrazi",
     "Eldrazi Aggro",
@@ -7482,6 +7483,7 @@ MODERN_DECK_ARQUETIPOS = [
     "Miracles",
     "Murktide",
     "Necro",
+    "Neobrand",
     "Neoform",
     "Omnath",
     "Prowess",
@@ -7502,6 +7504,7 @@ MODERN_DECK_ARQUETIPOS = [
     "Wizards",
     "Yawgmoth",
     "Zombies",
+    "Zoo",
 ]
 
 PAUPER_DECK_ARQUETIPOS = [
