@@ -13374,23 +13374,23 @@ async def status_ciclo(
 # /ranking_geral
 # =================================================
 @client.tree.command(
-    name="ranking_geral",
-    description="Mostra ranking geral da season."
+name="ranking_geral",
+description="Mostra ranking geral da season."
 )
 @app_commands.describe(
-    formato="Formato da liga",
-    season="Season",
-    top="Quantidade de jogadores (8..60)"
+formato="Formato da liga",
+season="Season",
+top="Quantidade de jogadores (8..60)"
 )
 @app_commands.autocomplete(
-    formato=ac_formatos,
-    season=ac_pods_ver_season
+formato=ac_formatos,
+season=ac_pods_ver_season
 )
 async def ranking_geral(
-    interaction: discord.Interaction,
-    formato: str,
-    season: int,
-    top: int = 30
+interaction: discord.Interaction,
+formato: str,
+season: int,
+top: int = 30
 ):
     await interaction.response.defer()
     try:
@@ -13400,7 +13400,6 @@ async def ranking_geral(
             return await interaction.followup.send("❌ Formato inválido.")
         if not season_exists(sh, season, tournament_id=tournament_id):
             return await interaction.followup.send(f"❌ A season {season} não existe.")
-
         # =================================================
         # USA MATCHES
         # =================================================
@@ -13411,7 +13410,6 @@ async def ranking_geral(
             return await interaction.followup.send("Sem partidas para esta season.")
         header = vals[0]
         idx = {name: i for i, name in enumerate(header)}
-
         def getv(row, *names, default=""):
             for name in names:
                 i = idx.get(name, -1)
@@ -13420,39 +13418,25 @@ async def ranking_geral(
                     if value not in (None, ""):
                         return value
             return default
-
-        # Helpers para parsing e formatação
         def parse_pts(raw):
-            """Converte string de ponto da planilha (aceita 0,5 ou 0.5) para float.
-               Retorna None se vazio."""
-            if raw is None or raw == "":
+            if raw in (None, ""):
                 return None
             try:
-                return float(raw.replace(",", "."))
-            except (ValueError, TypeError):
+                return float(str(raw).replace(",", ".").strip())
+            except Exception:
                 return None
-
         def fmt_rank(value):
-            """Formata número para exibição:
-               - inteiro: sem decimais
-               - meio: 0,5
-               - até 2 casas quando houver fração"""
             try:
-                f = float(value)
-                # Arredonda para 2 casas
-                rounded = round(f, 2)
-                # Converte para string com vírgula e 2 casas
-                s = f"{rounded:.2f}".replace(".", ",")
-                # Remove zeros desnecessários no final
-                if "," in s:
-                    while s.endswith("0"):
-                        s = s[:-1]
-                    if s.endswith(","):
-                        s = s[:-1]
-                return s
+                value = round(float(value), 2)
+                if value.is_integer():
+                    return str(int(value))
+                text = f"{value:.2f}".replace(".", ",")
+                text = text.rstrip("0")
+                if text.endswith(","):
+                    text = text[:-1]
+                return text
             except Exception:
                 return "0"
-
         stats = {}
         # =================================================
         # LEITURA DOS MATCHES
@@ -13510,11 +13494,7 @@ async def ranking_geral(
             p2_pts_raw = getv(row, "player2_points", "player_b_points", default=None)
             p1_pts = parse_pts(p1_pts_raw)
             p2_pts = parse_pts(p2_pts_raw)
-            if p1_pts is not None and p2_pts is not None:
-                # Pontos da planilha
-                pass
-            else:
-                # Fallback para 3/1/0 baseado em games
+            if p1_pts is None or p2_pts is None:
                 if p1_games > p2_games:
                     p1_pts = 3.0
                     p2_pts = 0.0
@@ -13540,7 +13520,6 @@ async def ranking_geral(
             stats[p2]["opponents"].append(p1)
         if not stats:
             return await interaction.followup.send("❌ Nenhum jogador encontrado para exibir.")
-
         # =================================================
         # CÁLCULOS (mwp, gw, omw, ogw)
         # =================================================
