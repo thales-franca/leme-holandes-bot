@@ -13406,8 +13406,6 @@ top: int = 30
         ws_matches = ensure_worksheet(sh, "Matches", MATCHES_HEADER, rows=50000, cols=40)
         ensure_sheet_columns(ws_matches, MATCHES_HEADER)
         vals = cached_get_all_values(ws_matches, ttl_seconds=10)
-        if len(vals) <= 1:
-            return await interaction.followup.send("Sem partidas para esta season.")
         header = vals[0]
         idx = {name: i for i, name in enumerate(header)}
         def getv(row, *names, default=""):
@@ -13502,8 +13500,6 @@ top: int = 30
             stats[p2]["gplayed"] += (p1_games + p2_games + draws)
             stats[p1]["opponents"].append(p2)
             stats[p2]["opponents"].append(p1)
-        if not stats:
-            return await interaction.followup.send("❌ Nenhum jogador encontrado para exibir.")
         # =================================================
         # USA STANDINGS
         # =================================================
@@ -13559,6 +13555,8 @@ top: int = 30
                         "opponents": []
                     }
                 stats[pid]["pts"] = pts
+        if not stats:
+            return await interaction.followup.send("❌ Nenhum jogador encontrado para exibir.")
         # =================================================
         # CÁLCULOS (mwp, gw, omw, ogw)
         # =================================================
@@ -13675,22 +13673,22 @@ top: int = 30
                 part_lines.extend(row_lines[start:start + chunk_size])
                 part_msg = "```txt\n" + "\n".join(part_lines) + "\n```"
                 await interaction.followup.send(part_msg, ephemeral=False)
-        # =================================================
-        # LEGENDA
-        # =================================================
-        legend_lines = [
-            "Legenda:",
-            "J = Número de jogos realizados",
-            "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}",
-            "PTS = Pontos oficiais da aba Standings",
-            "PPM = Points Per Match",
-            "MWP = Match Win Percentage",
-            "OMW = Opponent's Match Win Percentage",
-            "GW = Game Win Percentage",
-            "OGW = Opponent's Game Win Percentage"
-        ]
-        legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
-        await interaction.followup.send(legend_msg, ephemeral=False)
+            # =================================================
+            # LEGENDA
+            # =================================================
+            legend_lines = [
+                "Legenda:",
+                "J = Número de jogos realizados",
+                "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}",
+                "PTS = Pontos oficiais da aba Standings",
+                "PPM = Points Per Match",
+                "MWP = Match Win Percentage",
+                "OMW = Opponent's Match Win Percentage",
+                "GW = Game Win Percentage",
+                "OGW = Opponent's Game Win Percentage"
+            ]
+            legend_msg = "```txt\n" + "\n".join(legend_lines) + "\n```"
+            await interaction.followup.send(legend_msg, ephemeral=False)
     except Exception as e:
         await interaction.followup.send(f"❌ Erro: {e}")
         
