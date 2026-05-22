@@ -3863,17 +3863,13 @@ async def ac_formatos(
     interaction: discord.Interaction,
     current: str
 ):
-
     try:
-
         if _ac_should_skip(
             interaction,
             "ac_formatos"
         ):
             return []
-
         sh = open_sheet()
-
         ws = ensure_worksheet(
             sh,
             "Tournaments",
@@ -3881,80 +3877,66 @@ async def ac_formatos(
             rows=100,
             cols=20
         )
-
         rows = cached_get_all_records(
             ws,
             ttl_seconds=10
         )
-
         q = str(
             current or ""
         ).strip().lower()
-
         out = []
-
         seen = set()
-
         for r in rows:
-
             format_key = str(
                 r.get(
                     "format_key",
                     ""
                 )
             ).strip()
-
             if not format_key:
                 continue
-
             if format_key.lower() in seen:
                 continue
-
             display_name = str(
                 r.get(
                     "name",
                     format_key
                 )
             ).strip()
-
             status = str(
                 r.get(
                     "status",
                     ""
                 )
             ).strip().lower()
-
+            # Filtrar apenas formatos ativos
+            if status:
+                if status not in ("ativo", "active", "1", "true", "sim", "yes"):
+                    continue
             search_blob = (
                 f"{format_key} "
                 f"{display_name} "
                 f"{status}"
             ).lower()
-
             if q and q not in search_blob:
                 continue
-
             label = (
                 f"{display_name} | {status}"
                 if status
                 else display_name
             )
-
             out.append(
                 app_commands.Choice(
                     name=label[:100],
                     value=format_key
                 )
             )
-
             seen.add(
                 format_key.lower()
             )
-
             if len(out) >= 25:
                 break
-
         return out[:25]
-
     except Exception:
         return []
 
