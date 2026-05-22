@@ -13490,22 +13490,6 @@ top: int = 30
                 getv(row, "draw_games", "games_drawn", default=0),
                 0
             )
-            p1_pts_raw = getv(row, "player1_points", "player_a_points", default=None)
-            p2_pts_raw = getv(row, "player2_points", "player_b_points", default=None)
-            p1_pts = parse_pts(p1_pts_raw)
-            p2_pts = parse_pts(p2_pts_raw)
-            if p1_pts is None or p2_pts is None:
-                if p1_games > p2_games:
-                    p1_pts = 3.0
-                    p2_pts = 0.0
-                elif p2_games > p1_games:
-                    p1_pts = 0.0
-                    p2_pts = 3.0
-                else:
-                    p1_pts = 1.0
-                    p2_pts = 1.0
-            stats[p1]["pts"] += p1_pts
-            stats[p2]["pts"] += p2_pts
             stats[p1]["matches"] += 1
             stats[p2]["matches"] += 1
             stats[p1]["gwins"] += p1_games
@@ -13520,6 +13504,61 @@ top: int = 30
             stats[p2]["opponents"].append(p1)
         if not stats:
             return await interaction.followup.send("❌ Nenhum jogador encontrado para exibir.")
+        # =================================================
+        # USA STANDINGS
+        # =================================================
+        try:
+            ws_standings = ensure_worksheet(sh, "Standings", STANDINGS_HEADER, rows=50000, cols=40)
+            ensure_sheet_columns(ws_standings, STANDINGS_HEADER)
+        except Exception:
+            ws_standings = sh.worksheet_by_title("Standings")
+        standings_vals = cached_get_all_values(ws_standings, ttl_seconds=10)
+        if len(standings_vals) > 1:
+            standings_header = standings_vals[0]
+            standings_idx = {name: i for i, name in enumerate(standings_header)}
+            def getv_standings(row, *names, default=""):
+                for name in names:
+                    i = standings_idx.get(name, -1)
+                    if i >= 0 and i < len(row):
+                        value = row[i]
+                        if value not in (None, ""):
+                            return value
+                return default
+            standings_pts_map = {}
+            for row in standings_vals[1:]:
+                row_tid_raw = getv_standings(row, "tournament_id", "tournament", default=None)
+                if row_tid_raw not in (None, ""):
+                    row_tid = safe_int(row_tid_raw, DEFAULT_TOURNAMENT_ID)
+                    if row_tid != tournament_id:
+                        continue
+                row_season_raw = getv_standings(row, "season_id", "season", default=None)
+                if row_season_raw not in (None, ""):
+                    row_season = safe_int(row_season_raw, 0)
+                    if row_season != season:
+                        continue
+                pid = str(
+                    getv_standings(row, "player_id", "discord_id", "user_id", "id", default="")
+                ).strip()
+                if not pid:
+                    continue
+                pts = parse_pts(
+                    getv_standings(row, "points", "pts", "total_points", "score", default=None)
+                )
+                if pts is None:
+                    continue
+                standings_pts_map[pid] = pts
+            for pid, pts in standings_pts_map.items():
+                if pid not in stats:
+                    stats[pid] = {
+                        "pts": 0.0,
+                        "matches": 0,
+                        "gwins": 0,
+                        "glosses": 0,
+                        "gdraws": 0,
+                        "gplayed": 0,
+                        "opponents": []
+                    }
+                stats[pid]["pts"] = pts
         # =================================================
         # CÁLCULOS (mwp, gw, omw, ogw)
         # =================================================
@@ -13643,7 +13682,7 @@ top: int = 30
             "Legenda:",
             "J = Número de jogos realizados",
             "SCORE = {PTS×[J÷(J+3)]} + {PPM×[3÷(J+3)]}",
-            "PTS = Pontos totais acumulados",
+            "PTS = Pontos oficiais da aba Standings",
             "PPM = Points Per Match",
             "MWP = Match Win Percentage",
             "OMW = Opponent's Match Win Percentage",
