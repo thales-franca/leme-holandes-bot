@@ -7494,6 +7494,7 @@ MODERN_DECK_ARQUETIPOS = [
     "Scam",
     "Song of Creation",
     "Spirits",
+    "StoneBlade",
     "Storm",
     "Tempo",
     "Through the Breach",
