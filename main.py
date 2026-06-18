@@ -13562,85 +13562,85 @@ top: int = 30
         # CÁLCULOS (mwp, gw, omw, ogw)
         # =================================================
 
-def get_stats(pid):
-    s = stats[pid]
-    m = s["matches"]
-    pts = s["pts"]
+        def get_stats(pid):
+            s = stats[pid]
+            m = s["matches"]
+            pts = s["pts"]
 
-    ppm = pts / m if m > 0 else 0
+            ppm = pts / m if m > 0 else 0
 
-    K = 3
+            K = 3
 
-    peso_pts = (m / (m + K)) if (m + K) > 0 else 0
-    peso_ppm = (K / (m + K)) if (m + K) > 0 else 0
+            peso_pts = (m / (m + K)) if (m + K) > 0 else 0
+            peso_ppm = (K / (m + K)) if (m + K) > 0 else 0
 
-    score = (pts * peso_pts) + (ppm * peso_ppm)
+            score = (pts * peso_pts) + (ppm * peso_ppm)
 
-    # IMPORTANTE:
-    # MWP não pode usar match_points_sum, porque ele contém bônus de ciclo.
-    # Usa o MWP já calculado na aba Standings, ponderado por partidas.
-    if s["mwp_percent_weight"] > 0:
-        raw_mwp = (
-            s["mwp_percent_weighted_sum"]
-            / s["mwp_percent_weight"]
-        ) / 100
-    else:
-        raw_mwp = 0
+            # IMPORTANTE:
+            # MWP não pode usar match_points_sum, porque ele contém bônus de ciclo.
+            # Usa o MWP já calculado na aba Standings, ponderado por partidas.
+            if s["mwp_percent_weight"] > 0:
+                raw_mwp = (
+                    s["mwp_percent_weighted_sum"]
+                    / s["mwp_percent_weight"]
+                ) / 100
+            else:
+                raw_mwp = 0
 
-    raw_mwp = min(raw_mwp, 1.0)
-    mwp = max(raw_mwp, 0.333)
+            raw_mwp = min(raw_mwp, 1.0)
+            mwp = max(raw_mwp, 0.333)
 
-    games = s["gplayed"]
+            games = s["gplayed"]
 
-    if games > 0:
-        raw_gw = (
-            (s["gwins"] + 0.5 * s["gdraws"])
-            / games
-        )
-    elif s["gw_percent_weight"] > 0:
-        raw_gw = (
-            s["gw_percent_weighted_sum"]
-            / s["gw_percent_weight"]
-        ) / 100
-    else:
-        raw_gw = 0
+            if games > 0:
+                raw_gw = (
+                    (s["gwins"] + 0.5 * s["gdraws"])
+                    / games
+                )
+            elif s["gw_percent_weight"] > 0:
+                raw_gw = (
+                    s["gw_percent_weighted_sum"]
+                    / s["gw_percent_weight"]
+                ) / 100
+            else:
+                raw_gw = 0
 
-    raw_gw = min(raw_gw, 1.0)
-    gw = max(raw_gw, 0.333)
+            raw_gw = min(raw_gw, 1.0)
+            gw = max(raw_gw, 0.333)
+    
+            if s["omw_percent_weight"] > 0:
+                raw_omw = (
+                    s["omw_percent_weighted_sum"]
+                    / s["omw_percent_weight"]
+                ) / 100
+            else:
+                raw_omw = 0
 
-    if s["omw_percent_weight"] > 0:
-        raw_omw = (
-            s["omw_percent_weighted_sum"]
-            / s["omw_percent_weight"]
-        ) / 100
-    else:
-        raw_omw = 0
+            raw_omw = min(raw_omw, 1.0)
+            omw = max(raw_omw, 0.333)
 
-    raw_omw = min(raw_omw, 1.0)
-    omw = max(raw_omw, 0.333)
+            if s["ogw_percent_weight"] > 0:
+                raw_ogw = (
+                    s["ogw_percent_weighted_sum"]
+                    / s["ogw_percent_weight"]
+                ) / 100
+            else:
+                raw_ogw = 0
 
-    if s["ogw_percent_weight"] > 0:
-        raw_ogw = (
-            s["ogw_percent_weighted_sum"]
-            / s["ogw_percent_weight"]
-        ) / 100
-    else:
-        raw_ogw = 0
+            raw_ogw = min(raw_ogw, 1.0)
+            ogw = max(raw_ogw, 0.333)
 
-    raw_ogw = min(raw_ogw, 1.0)
-    ogw = max(raw_ogw, 0.333)
-
-    return {
-        "pts": pts,
-        "matches": m,
-        "ppm": ppm,
-        "score": score,
-        "mwp": mwp,
-        "gw": gw,
-        "omw": omw,
-        "ogw": ogw,
-        "opponents": s["opponents"]
-    }
+            return {
+                "pts": pts,
+                "matches": m,
+                "ppm": ppm,
+                "score": score,
+                "mwp": mwp,
+                "gw": gw,
+                "omw": omw,
+                "ogw": ogw,
+                "opponents": s["opponents"]
+            }
 
         player_stats = {pid: get_stats(pid) for pid in stats}
         for pid, st in player_stats.items():
