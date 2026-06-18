@@ -24103,12 +24103,6 @@ def build_sheet_row_by_header(header: list, data: dict) -> list:
     return out
 
 
-def clear_final_participants_for_season(
-    ws_participants,
-    season_id: int,
-    tournament_id: int = DEFAULT_TOURNAMENT_ID
-):
-    
 def get_final_participant_row(
     ws_participants,
     season_id: int,
@@ -24353,17 +24347,28 @@ def save_single_final_participant(
         DEFAULT_TOURNAMENT_ID
     )
 
+    header = (
+        header_vals[0]
+        if header_vals
+        else FINAL_PARTICIPANTS_HEADER
+    )
+
+    data = {
+        "tournament_id": tid,
+        "season_id": season_id,
+        "seed": seed,
+        "player_id": pid,
+        "ranking_position": safe_int(ranking_position, 0),
+        "status": str(status or "active").strip().lower(),
+        "created_at": nowb,
+        "updated_at": nowb,
+    }
+
     ws_participants.append_row(
-        [
-            str(tid),
-            str(season_id),
-            str(seed),
-            pid,
-            str(safe_int(ranking_position, 0)),
-            str(status or "active").strip().lower(),
-            nowb,
-            nowb,
-        ],
+        build_sheet_row_by_header(
+            header,
+            data
+        ),
         value_input_option="USER_ENTERED"
     )
 
