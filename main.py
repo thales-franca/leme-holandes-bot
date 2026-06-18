@@ -13376,7 +13376,7 @@ async def ranking_geral(
 interaction: discord.Interaction,
 formato: str,
 season: int,
-top: int = 30
+top: int = 100
 ):
     await interaction.response.defer()
     try:
