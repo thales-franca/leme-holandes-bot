@@ -20582,10 +20582,6 @@ def _final_read_ranking_geral_rows(
     season_id: int,
     tournament_id: int = DEFAULT_TOURNAMENT_ID
 ) -> list[dict]:
-    """
-    Retorna a classificação final da season usando a mesma lógica oficial
-    do /ranking_geral, mas em formato estruturado.
-    """
 
     ws_standings = ensure_worksheet(
         sh,
@@ -20624,44 +20620,24 @@ def _final_read_ranking_geral_rows(
 
     for row in vals[1:]:
 
-        def getv(
-            name: str,
-            default=""
-        ):
-
+        def getv(name: str, default=""):
             i = idx.get(name, -1)
-
             if i < 0 or i >= len(row):
                 return default
-
             return row[i]
 
         row_tid = safe_int(
-            getv(
-                "tournament_id",
-                DEFAULT_TOURNAMENT_ID
-            ),
+            getv("tournament_id", DEFAULT_TOURNAMENT_ID),
             DEFAULT_TOURNAMENT_ID
         )
 
         if row_tid != tid:
             continue
 
-        if safe_int(
-            getv(
-                "season_id",
-                0
-            ),
-            0
-        ) != season_id:
+        if safe_int(getv("season_id", 0), 0) != season_id:
             continue
 
-        pid = str(
-            getv(
-                "player_id",
-                ""
-            )
-        ).strip()
+        pid = str(getv("player_id", "")).strip()
 
         if not pid:
             continue
@@ -20681,69 +20657,16 @@ def _final_read_ranking_geral_rows(
                 "ogw_weight": 0,
             }
 
-        matches_played = safe_int(
-            getv(
-                "matches_played",
-                0
-            ),
-            0
-        )
+        matches_played = safe_int(getv("matches_played", 0), 0)
+        match_points = sheet_float(getv("match_points", 0), 0.0)
 
-        match_points = sheet_float(
-            getv(
-                "match_points",
-                0
-            ),
-            0.0
-        )
+        game_wins = safe_int(getv("game_wins", 0), 0)
+        game_losses = safe_int(getv("game_losses", 0), 0)
+        game_draws = safe_int(getv("game_draws", 0), 0)
+        games_played = safe_int(getv("games_played", 0), 0)
 
-        game_wins = safe_int(
-            getv(
-                "game_wins",
-                0
-            ),
-            0
-        )
-
-        game_losses = safe_int(
-            getv(
-                "game_losses",
-                0
-            ),
-            0
-        )
-
-        game_draws = safe_int(
-            getv(
-                "game_draws",
-                0
-            ),
-            0
-        )
-
-        games_played = safe_int(
-            getv(
-                "games_played",
-                0
-            ),
-            0
-        )
-
-        omw_raw = sheet_float(
-            getv(
-                "omw",
-                0
-            ),
-            0.0
-        )
-
-        ogw_raw = sheet_float(
-            getv(
-                "ogw",
-                0
-            ),
-            0.0
-        )
+        omw_raw = sheet_float(getv("omw", 0), 0.0)
+        ogw_raw = sheet_float(getv("ogw", 0), 0.0)
 
         stats[pid]["pts"] += match_points
         stats[pid]["m"] += matches_played
@@ -20753,15 +20676,8 @@ def _final_read_ranking_geral_rows(
         stats[pid]["gplayed"] += games_played
 
         if matches_played > 0:
-
-            stats[pid]["omw_weighted_sum"] += (
-                omw_raw * matches_played
-            )
-
-            stats[pid]["ogw_weighted_sum"] += (
-                ogw_raw * matches_played
-            )
-
+            stats[pid]["omw_weighted_sum"] += omw_raw * matches_played
+            stats[pid]["ogw_weighted_sum"] += ogw_raw * matches_played
             stats[pid]["omw_weight"] += matches_played
             stats[pid]["ogw_weight"] += matches_played
 
@@ -20770,73 +20686,87 @@ def _final_read_ranking_geral_rows(
 
     table = []
 
+    K = 3
+
     for pid, s in stats.items():
 
-        m = s["m"]
+        m = safe_int(s["m"], 0)
+        pts = sheet_float(s["pts"], 0.0)
 
-        pts = sheet_float(
-            s["pts"],
-            0.0
-        )
+        # Considera apenas jogadores que pontuaram na season.
+        if pts <= 0:
+            continue
 
-        raw_mwp = (
-            (pts / (4 * m))
-            if m
+        ppm = (
+            pts / m
+            if m > 0
             else 0.0
         )
 
-        mwp = max(
-            raw_mwp,
-            0.333
+        peso_pts = (
+            m / (m + K)
+            if m > 0
+            else 0.0
         )
 
-        games = s["gplayed"]
+        peso_ppm = (
+            K / (m + K)
+            if m > 0
+            else 0.0
+        )
+
+        score = (
+            (pts * peso_pts)
+            +
+            (ppm * peso_ppm)
+        )
+
+        raw_mwp = (
+            pts / (3 * m)
+            if m > 0
+            else 0.0
+        )
+
+        raw_mwp = min(raw_mwp, 1.0)
+
+        mwp = max(raw_mwp, 0.333)
+
+        games = safe_int(s["gplayed"], 0)
 
         raw_gw = (
             (
                 s["gwins"]
                 + 0.5 * s["gdraws"]
             ) / games
-            if games
+            if games > 0
             else 0.0
         )
 
-        gw = max(
-            raw_gw,
-            0.333
-        )
+        raw_gw = min(raw_gw, 1.0)
+
+        gw = max(raw_gw, 0.333)
 
         if s["omw_weight"] > 0:
-
             omw = max(
-                (
-                    s["omw_weighted_sum"]
-                    / s["omw_weight"]
-                ),
+                s["omw_weighted_sum"] / s["omw_weight"],
                 0.333
             )
-
         else:
-
             omw = 0.333
 
         if s["ogw_weight"] > 0:
-
             ogw = max(
-                (
-                    s["ogw_weighted_sum"]
-                    / s["ogw_weight"]
-                ),
+                s["ogw_weighted_sum"] / s["ogw_weight"],
                 0.333
             )
-
         else:
-
             ogw = 0.333
 
         table.append({
             "player_id": pid,
+            "score": round(score, 6),
             "pts": round(pts, 6),
+            "ppm": round(ppm, 6),
             "mwp": round(mwp, 6),
             "omw": round(omw, 6),
             "gw": round(gw, 6),
@@ -20846,7 +20776,8 @@ def _final_read_ranking_geral_rows(
 
     table.sort(
         key=lambda x: (
-            x["pts"],
+            x["score"],
+            x["ppm"],
             x["mwp"],
             x["omw"],
             x["gw"],
@@ -20857,15 +20788,10 @@ def _final_read_ranking_geral_rows(
 
     out = []
 
-    for pos, item in enumerate(
-        table,
-        start=1
-    ):
+    for pos, item in enumerate(table, start=1):
 
         row = dict(item)
-
         row["ranking_position"] = pos
-
         out.append(row)
 
     return out
@@ -21111,17 +21037,12 @@ def clear_final_participants_for_season(
     except Exception:
         pass
 
-
 def save_final_participants(
     ws_participants,
     season_id: int,
     qualified_rows: list[dict],
     tournament_id: int = DEFAULT_TOURNAMENT_ID
 ):
-    """
-    Salva os classificados da fase final da season.
-    Sempre regrava a season por completo para garantir consistência.
-    """
 
     clear_final_participants_for_season(
         ws_participants,
@@ -21140,43 +21061,43 @@ def save_final_participants(
 
     nowb = now_br_str()
 
-    rows_to_add = []
+    vals = cached_get_all_values(
+        ws_participants,
+        ttl_seconds=10
+    )
+
+    header = (
+        vals[0]
+        if vals
+        else FINAL_PARTICIPANTS_HEADER
+    )
 
     tid = safe_int(
         tournament_id,
         DEFAULT_TOURNAMENT_ID
     )
 
+    rows_to_add = []
+
     for r in qualified_rows:
 
-        rows_to_add.append([
-            str(tid),
-            str(season_id),
-            str(
-                safe_int(
-                    r.get("seed", 0),
-                    0
-                )
-            ),
-            str(
-                r.get(
-                    "player_id",
-                    ""
-                )
-            ).strip(),
-            str(
-                safe_int(
-                    r.get(
-                        "ranking_position",
-                        0
-                    ),
-                    0
-                )
-            ),
-            "active",
-            nowb,
-            nowb,
-        ])
+        data = {
+            "tournament_id": tid,
+            "season_id": season_id,
+            "seed": safe_int(r.get("seed", 0), 0),
+            "player_id": str(r.get("player_id", "")).strip(),
+            "ranking_position": safe_int(r.get("ranking_position", 0), 0),
+            "status": "active",
+            "created_at": nowb,
+            "updated_at": nowb,
+        }
+
+        rows_to_add.append(
+            build_sheet_row_by_header(
+                header,
+                data
+            )
+        )
 
     if rows_to_add:
 
@@ -21193,6 +21114,7 @@ def save_final_participants(
         invalidate_final_participants_ram_index()
     except Exception:
         pass
+
 
 
 def get_final_participants_rows(
@@ -23450,40 +23372,47 @@ def _build_final_match_row_dict(
 
 
 def _final_match_row_dict_to_sheet_row(
-    r: dict
+    r: dict,
+    header: list | None = None
 ) -> list:
 
-    return [
-        str(
-            safe_int(
-                r.get(
-                    "tournament_id",
-                    DEFAULT_TOURNAMENT_ID
-                ),
-                DEFAULT_TOURNAMENT_ID
-            )
+    h = (
+        header
+        if header
+        else FINAL_MATCHES_HEADER
+    )
+
+    data = {
+        "tournament_id": safe_int(
+            r.get("tournament_id", DEFAULT_TOURNAMENT_ID),
+            DEFAULT_TOURNAMENT_ID
         ),
-        str(r.get("final_match_id", "")).strip(),
-        str(safe_int(r.get("season_id", 0), 0)),
-        str(r.get("bracket", "")).strip().lower(),
-        str(safe_int(r.get("round", 0), 0)),
-        str(safe_int(r.get("match_order", 0), 0)),
-        str(r.get("player_a_id", "")).strip(),
-        str(r.get("player_b_id", "")).strip(),
-        str(safe_int(r.get("a_games_won", 0), 0)),
-        str(safe_int(r.get("b_games_won", 0), 0)),
-        str(r.get("result_type", "")).strip().lower(),
-        str(r.get("status", "")).strip().lower(),
-        str(r.get("winner_id", "")).strip(),
-        str(r.get("loser_id", "")).strip(),
-        str(r.get("next_win_match_id", "")).strip(),
-        str(r.get("next_win_slot", "")).strip(),
-        str(r.get("next_lose_match_id", "")).strip(),
-        str(r.get("next_lose_slot", "")).strip(),
-        "TRUE" if as_bool(r.get("is_reset_match", False)) else "FALSE",
-        str(r.get("created_at", "")).strip(),
-        str(r.get("updated_at", "")).strip(),
-    ]
+        "final_match_id": str(r.get("final_match_id", "")).strip(),
+        "season_id": safe_int(r.get("season_id", 0), 0),
+        "bracket": str(r.get("bracket", "")).strip().lower(),
+        "round": safe_int(r.get("round", 0), 0),
+        "match_order": safe_int(r.get("match_order", 0), 0),
+        "player_a_id": str(r.get("player_a_id", "")).strip(),
+        "player_b_id": str(r.get("player_b_id", "")).strip(),
+        "a_games_won": safe_int(r.get("a_games_won", 0), 0),
+        "b_games_won": safe_int(r.get("b_games_won", 0), 0),
+        "result_type": str(r.get("result_type", "")).strip().lower(),
+        "status": str(r.get("status", "")).strip().lower(),
+        "winner_id": str(r.get("winner_id", "")).strip(),
+        "loser_id": str(r.get("loser_id", "")).strip(),
+        "next_win_match_id": str(r.get("next_win_match_id", "")).strip(),
+        "next_win_slot": str(r.get("next_win_slot", "")).strip(),
+        "next_lose_match_id": str(r.get("next_lose_match_id", "")).strip(),
+        "next_lose_slot": str(r.get("next_lose_slot", "")).strip(),
+        "is_reset_match": "TRUE" if as_bool(r.get("is_reset_match", False)) else "FALSE",
+        "created_at": str(r.get("created_at", "")).strip(),
+        "updated_at": str(r.get("updated_at", "")).strip(),
+    }
+
+    return build_sheet_row_by_header(
+        h,
+        data
+    )
 
 
 # =========================================================
@@ -23808,14 +23737,24 @@ def generate_final_bracket(
             "Nenhum participante na fase final."
         )
 
-    top_size = len(
-        participants
-    )
+    top_size = len(participants)
 
     if top_size not in (2, 4, 8, 16):
 
         raise RuntimeError(
             "Tamanho inválido da fase final."
+        )
+
+    existing_matches = get_final_matches_fast(
+        sh,
+        season_id,
+        tournament_id=tournament_id
+    )
+
+    if existing_matches:
+
+        raise RuntimeError(
+            "Já existe chaveamento gerado para esta fase final."
         )
 
     ws_matches = ensure_worksheet(
@@ -23831,6 +23770,17 @@ def generate_final_bracket(
         FINAL_MATCHES_REQUIRED
     )
 
+    vals = cached_get_all_values(
+        ws_matches,
+        ttl_seconds=10
+    )
+
+    header = (
+        vals[0]
+        if vals
+        else FINAL_MATCHES_HEADER
+    )
+
     rows_dict = build_final_bracket_rows(
         season_id,
         participants,
@@ -23838,7 +23788,10 @@ def generate_final_bracket(
     )
 
     rows_sheet = [
-        _final_match_row_dict_to_sheet_row(r)
+        _final_match_row_dict_to_sheet_row(
+            r,
+            header=header
+        )
         for r in rows_dict
     ]
 
@@ -24010,16 +23963,32 @@ def ensure_final_deck_row(
         DEFAULT_TOURNAMENT_ID
     )
 
+    vals = cached_get_all_values(
+        ws_final_decks,
+        ttl_seconds=10
+    )
+
+    header = (
+        vals[0]
+        if vals
+        else FINAL_DECKS_HEADER
+    )
+
+    data = {
+        "tournament_id": tid,
+        "season_id": season_id,
+        "player_id": str(player_id).strip(),
+        "deck": "",
+        "decklist_url": "",
+        "created_at": nowb,
+        "updated_at": nowb,
+    }
+
     ws_final_decks.append_row(
-        [
-            str(tid),
-            str(season_id),
-            str(player_id).strip(),
-            "",
-            "",
-            nowb,
-            nowb,
-        ],
+        build_sheet_row_by_header(
+            header,
+            data
+        ),
         value_input_option="USER_ENTERED"
     )
 
@@ -24116,6 +24085,30 @@ def upsert_final_deck(
 # HELPERS — PARTICIPANTES DA FASE FINAL
 # =========================================================
 
+# =========================================================
+# HELPERS — PARTICIPANTES DA FASE FINAL
+# =========================================================
+
+def build_sheet_row_by_header(header: list, data: dict) -> list:
+    """
+    Monta uma linha respeitando a ordem real do header da aba.
+    """
+    out = []
+
+    for col in header:
+        key = str(col or "").strip()
+        val = data.get(key, "")
+        out.append(str(val))
+
+    return out
+
+
+def clear_final_participants_for_season(
+    ws_participants,
+    season_id: int,
+    tournament_id: int = DEFAULT_TOURNAMENT_ID
+):
+    
 def get_final_participant_row(
     ws_participants,
     season_id: int,
