@@ -25535,10 +25535,155 @@ async def inscrever_final(
                 ephemeral=True
             )
 
-        stage = get_latest_valid_final_stage(
-            sh,
-            tournament_id=tournament_id
+        ws_stage, _, _ = ensure_final_sheets(
+            sh
         )
+
+        stage_vals = cached_get_all_values(
+            ws_stage,
+            ttl_seconds=0
+        )
+
+        stage = None
+
+        if len(stage_vals) > 1:
+
+            stage_header = [
+                str(h or "").strip()
+                for h in stage_vals[0]
+            ]
+
+            stage_idx = {
+                name: i
+                for i, name in enumerate(stage_header)
+            }
+
+            valid_stages = []
+
+            for row in stage_vals[1:]:
+
+                def get_stage_value(name: str, default=""):
+                    i = stage_idx.get(name, -1)
+
+                    if i < 0 or i >= len(row):
+                        return default
+
+                    return row[i]
+
+                row_season = safe_int(
+                    get_stage_value(
+                        "season_id",
+                        0
+                    ),
+                    0
+                )
+
+                row_tournament_id = safe_int(
+                    get_stage_value(
+                        "tournament_id",
+                        DEFAULT_TOURNAMENT_ID
+                    ),
+                    DEFAULT_TOURNAMENT_ID
+                )
+
+                row_status = str(
+                    get_stage_value(
+                        "status",
+                        ""
+                    )
+                ).strip().lower()
+
+                if row_season <= 0:
+                    continue
+
+                if row_tournament_id != tournament_id:
+                    continue
+
+                if row_status not in (
+                    "generated",
+                    "waiting_confirmation",
+                    "in_progress",
+                    "completed"
+                ):
+                    continue
+
+                valid_stages.append({
+                    "tournament_id": row_tournament_id,
+                    "season_id": row_season,
+                    "status": row_status,
+                    "top_size": safe_int(
+                        get_stage_value(
+                            "top_size",
+                            0
+                        ),
+                        0
+                    ),
+                    "format": str(
+                        get_stage_value(
+                            "format",
+                            ""
+                        )
+                    ).strip(),
+                    "created_at": str(
+                        get_stage_value(
+                            "created_at",
+                            ""
+                        )
+                    ).strip(),
+                    "updated_at": str(
+                        get_stage_value(
+                            "updated_at",
+                            ""
+                        )
+                    ).strip(),
+                })
+
+            if valid_stages:
+
+                status_priority = {
+                    "generated": 4,
+                    "waiting_confirmation": 3,
+                    "in_progress": 2,
+                    "completed": 1,
+                }
+
+                valid_stages.sort(
+                    key=lambda x: (
+                        status_priority.get(
+                            str(
+                                x.get(
+                                    "status",
+                                    ""
+                                )
+                            ).strip().lower(),
+                            0
+                        ),
+                        safe_int(
+                            x.get(
+                                "season_id",
+                                0
+                            ),
+                            0
+                        ),
+                        str(
+                            x.get(
+                                "updated_at",
+                                ""
+                            )
+                        ).strip(),
+                        str(
+                            x.get(
+                                "created_at",
+                                ""
+                            )
+                        ).strip(),
+                    ),
+                    reverse=True
+                )
+
+                stage = dict(
+                    valid_stages[0]
+                )
 
         if not stage:
 
@@ -25568,6 +25713,7 @@ async def inscrever_final(
                 "❌ Não consegui identificar a season da fase final atual.",
                 ephemeral=True
             )
+
         if not final_stage_allows_player_deck_registration(
             stage_status
         ):
@@ -25735,8 +25881,6 @@ async def inscrever_final(
             f"❌ Erro no /inscrever_final: {e}",
             ephemeral=True
         )
-
-
 
 # =================================================
 # FIM DO SUB-BLOCO B/2
