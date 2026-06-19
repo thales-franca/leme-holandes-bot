@@ -20855,7 +20855,7 @@ def define_final_top_size(
     if total <= 15:
         return 4
 
-    if total <= 31:
+    if total <= 63:
         return 8
 
     return 16
