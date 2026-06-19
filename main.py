@@ -25574,7 +25574,12 @@ async def inscrever_final(
         ):
 
             return await interaction.followup.send(
-                "❌ A fase final encontrada não está disponível para inscrição de deck.",
+                "❌ A fase final encontrada não está disponível para inscrição de deck.\n"
+                f"- Formato selecionado: **{format_label(formato)}**\n"
+                f"- Tournament ID resolvido: **{tournament_id}**\n"
+                f"- Season encontrada: **{season}**\n"
+                f"- Status encontrado: **{stage_status}**\n"
+                f"- Top size: **{stage.get('top_size', '-')}**",
                 ephemeral=True
             )
 
