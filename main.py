@@ -20415,7 +20415,6 @@ def final_stage_exists(
         is not None
     )
 
-
 def set_final_stage(
     ws_stage,
     season_id: int,
@@ -20447,32 +20446,41 @@ def set_final_stage(
         tournament_id=tid
     )
 
-    header = cached_get_all_values(
+    header_vals = cached_get_all_values(
         ws_stage,
         ttl_seconds=10
+    )
+
+    header = (
+        header_vals[0]
+        if header_vals
+        else FINAL_STAGE_HEADER
     )
 
     idx = {
         name: i
         for i, name in enumerate(
-            header[0]
-            if header
-            else FINAL_STAGE_HEADER
+            header
         )
     }
 
     if rown is None:
 
+        data = {
+            "tournament_id": tid,
+            "season_id": season_id,
+            "status": status,
+            "top_size": top_size,
+            "format": str(fmt),
+            "created_at": nowb,
+            "updated_at": nowb,
+        }
+
         ws_stage.append_row(
-            [
-                str(tid),
-                str(season_id),
-                status,
-                str(top_size),
-                str(fmt),
-                nowb,
-                nowb,
-            ],
+            build_sheet_row_by_header(
+                header,
+                data
+            ),
             value_input_option="USER_ENTERED"
         )
 
@@ -20535,6 +20543,7 @@ def set_final_stage(
             invalidate_final_stage_ram_index()
         except Exception:
             pass
+
 
 
 # =========================================================
