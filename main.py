@@ -25568,10 +25568,18 @@ async def inscrever_final(
                 "❌ Não consegui identificar a season da fase final atual.",
                 ephemeral=True
             )
-
         if not final_stage_allows_player_deck_registration(
             stage_status
         ):
+
+            stage_top_size = (
+                stage.get(
+                    "top_size",
+                    "-"
+                )
+                if stage
+                else "-"
+            )
 
             return await interaction.followup.send(
                 "❌ A fase final encontrada não está disponível para inscrição de deck.\n"
@@ -25579,7 +25587,7 @@ async def inscrever_final(
                 f"- Tournament ID resolvido: **{tournament_id}**\n"
                 f"- Season encontrada: **{season}**\n"
                 f"- Status encontrado: **{stage_status}**\n"
-                f"- Top size: **{stage.get('top_size', '-')}**",
+                f"- Top size: **{stage_top_size}**",
                 ephemeral=True
             )
 
@@ -25727,6 +25735,7 @@ async def inscrever_final(
             f"❌ Erro no /inscrever_final: {e}",
             ephemeral=True
         )
+
 
 
 # =================================================
