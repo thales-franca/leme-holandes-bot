@@ -24830,10 +24830,23 @@ def get_latest_valid_final_stage(
         sh
     )
 
-    rows = cached_get_all_records(
+    vals = cached_get_all_values(
         ws_stage,
         ttl_seconds=10
     )
+
+    if len(vals) <= 1:
+        return None
+
+    header = [
+        str(h or "").strip()
+        for h in vals[0]
+    ]
+
+    idx = {
+        name: i
+        for i, name in enumerate(header)
+    }
 
     valid = []
 
@@ -24842,39 +24855,34 @@ def get_latest_valid_final_stage(
         DEFAULT_TOURNAMENT_ID
     )
 
-    for raw in rows:
+    for row in vals[1:]:
 
-        r = _normalize_final_stage_row(
-            raw
-        )
+        def getv(name: str, default=""):
+            i = idx.get(name, -1)
 
-        row_tid = safe_int(
-            r.get(
-                "tournament_id",
-                DEFAULT_TOURNAMENT_ID
-            ),
-            DEFAULT_TOURNAMENT_ID
-        )
+            if i < 0 or i >= len(row):
+                return default
 
-        if row_tid != tid:
-            continue
+            return row[i]
 
         sid = safe_int(
-            r.get(
-                "season_id",
-                0
-            ),
+            getv("season_id", 0),
             0
         )
 
+        row_tid = safe_int(
+            getv("tournament_id", DEFAULT_TOURNAMENT_ID),
+            DEFAULT_TOURNAMENT_ID
+        )
+
         status = str(
-            r.get(
-                "status",
-                ""
-            )
+            getv("status", "")
         ).strip().lower()
 
         if sid <= 0:
+            continue
+
+        if row_tid != tid:
             continue
 
         if status not in (
@@ -24885,39 +24893,57 @@ def get_latest_valid_final_stage(
         ):
             continue
 
-        valid.append(r)
+        valid.append({
+            "tournament_id": row_tid,
+            "season_id": sid,
+            "status": status,
+            "top_size": safe_int(
+                getv("top_size", 0),
+                0
+            ),
+            "format": str(
+                getv("format", "")
+            ).strip(),
+            "created_at": str(
+                getv("created_at", "")
+            ).strip(),
+            "updated_at": str(
+                getv("updated_at", "")
+            ).strip(),
+        })
 
     if not valid:
         return None
 
+    # Prioriza fases onde inscrição de deck é permitida.
+    status_priority = {
+        "generated": 3,
+        "waiting_confirmation": 3,
+        "in_progress": 2,
+        "completed": 1,
+    }
+
     valid.sort(
         key=lambda x: (
+            status_priority.get(
+                str(x.get("status", "")).lower(),
+                0
+            ),
             safe_int(
-                x.get(
-                    "season_id",
-                    0
-                ),
+                x.get("season_id", 0),
                 0
             ),
             str(
-                x.get(
-                    "updated_at",
-                    ""
-                )
+                x.get("updated_at", "")
             ).strip(),
             str(
-                x.get(
-                    "created_at",
-                    ""
-                )
+                x.get("created_at", "")
             ).strip(),
         ),
         reverse=True
     )
 
-    return dict(
-        valid[0]
-    )
+    return dict(valid[0])
 
 
 def final_stage_allows_player_deck_registration(
